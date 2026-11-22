@@ -422,3 +422,14 @@ None.
 - No implicit `int` ↔ `float` conversion; explicit cast required.
 - Dangling refs: configurable per field (`dangle` default, or `restrict`).
 - Time: UTC instants only; applications handle time-zone conversion.
+
+### Clarified during implementation (Phase 1, 2026-11-22)
+- **ID layout:** the 64 low bits are a 16-bit per-millisecond counter followed by 48 random bits.
+- **Ties within a sort group:** values of different families with equal contents (the list `[1]` and the array `[1]`) are ordered by family, so they are never equal: pair < array < list, and fifo < lifo < ring < priority.
+- **Equal set elements of different numeric types** (`1` and `1.0` in a `set<any>`): the one with the lower type code is kept, so the result doesn't depend on insertion order. Duplicate map keys are an error.
+- **Queue literals:** a queue is written as a list of its elements in pop order. A priority queue is written as a list of `priority => element` pairs. Equality ignores the size limit and direction, which come from the type.
+- **Image and doc literals:** there is no dedicated literal, so they print as `cast(x"…" as image)` and `cast("…" as doc<F>)`.
+- **JSON:** a number is an `int` when its value is whole and fits in 64 bits, including forms like `1.0` and `1e3`. A repeated object key keeps its last value. Numbers outside the float range are rejected.
+- **XML:** the parsed form is the root element. Whitespace-only text, comments, processing instructions and directives are dropped. Adjacent text is merged. Namespaced names are written `{uri}local`, and namespace declarations keep their `xmlns:p` form.
+- **CSV/TSV:** every row must have the same number of fields. The header option (`list<map<text,text>>`) will come as a derived-format option with the catalog.
+- **Doc conformance:** a `doc<F>` value must carry format `F` exactly. A derived format's document is not accepted as its base format.

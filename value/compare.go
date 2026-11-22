@@ -228,8 +228,99 @@ func exactRat(v Value) *big.Rat {
 	panic(fmt.Sprintf("value: %s is not a number", v.Code()))
 }
 
-// compareComposite orders values in the composite groups (docs, images,
-// collections, records and queues). It is defined with those types.
-var compareComposite = func(a, b Value) int {
-	panic(fmt.Sprintf("value: comparing %s values is not supported yet", a.Code()))
+// compareComposite orders values in the composite groups (spec/types.md
+// §11.2). Values of different families in one group (a list and an array,
+// say) with equal contents are ordered by family, so they are never equal.
+func compareComposite(a, b Value) int {
+	switch x := a.(type) {
+	case Doc:
+		y := b.(Doc)
+		if c := strings.Compare(x.format, y.format); c != 0 {
+			return c
+		}
+		return strings.Compare(x.text, y.text)
+	case Image:
+		return bytes.Compare(x.data, b.(Image).data)
+	case Record:
+		y := b.(Record)
+		for i := range min(len(x.names), len(y.names)) {
+			if c := strings.Compare(x.names[i], y.names[i]); c != 0 {
+				return c
+			}
+			if c := Compare(x.vals[i], y.vals[i]); c != 0 {
+				return c
+			}
+		}
+		return cmpInt(len(x.names), len(y.names))
+	case Set:
+		return compareSeq(x.elems, b.(Set).elems)
+	case Map:
+		y := b.(Map)
+		for i := range min(len(x.keys), len(y.keys)) {
+			if c := Compare(x.keys[i], y.keys[i]); c != 0 {
+				return c
+			}
+			if c := Compare(x.vals[i], y.vals[i]); c != 0 {
+				return c
+			}
+		}
+		return cmpInt(len(x.keys), len(y.keys))
+	case Queue:
+		y := b.(Queue)
+		both := x.code == CodePriority && y.code == CodePriority
+		for i := range min(len(x.items), len(y.items)) {
+			if c := Compare(x.items[i], y.items[i]); c != 0 {
+				return c
+			}
+			if both {
+				if c := cmpInt64(x.prios[i], y.prios[i]); c != 0 {
+					return c
+				}
+			}
+		}
+		if c := cmpInt(len(x.items), len(y.items)); c != 0 {
+			return c
+		}
+		return cmpInt(familyRank(x.code), familyRank(y.code))
+	}
+	// pair, array and list: element by element.
+	if c := compareSeq(sequence(a), sequence(b)); c != 0 {
+		return c
+	}
+	return cmpInt(familyRank(code(a)), familyRank(code(b)))
+}
+
+func sequence(v Value) []Value {
+	switch x := v.(type) {
+	case Pair:
+		return []Value{x.Key(), x.Value()}
+	case Array:
+		return x.elems
+	case List:
+		return x.elems
+	}
+	panic(fmt.Sprintf("value: no sort order for %s", v.Code()))
+}
+
+// compareSeq compares element by element; a prefix sorts first.
+func compareSeq(a, b []Value) int {
+	for i := range min(len(a), len(b)) {
+		if c := Compare(a[i], b[i]); c != 0 {
+			return c
+		}
+	}
+	return cmpInt(len(a), len(b))
+}
+
+// familyRank breaks ties between families that share a sort group.
+func familyRank(c Code) int {
+	switch c {
+	case CodePair, CodeFifo:
+		return 0
+	case CodeArray, CodeLifo:
+		return 1
+	case CodeList, CodeRing:
+		return 2
+	}
+	return 3 // priority
 }
