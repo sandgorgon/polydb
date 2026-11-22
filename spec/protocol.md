@@ -9,7 +9,8 @@ This document defines how clients talk to a PolyDB server: transports, security,
 
 | Topic | Decision |
 |---|---|
-| Authentication | SCRAM-SHA-256 (password never sent); OS peer credentials on Unix sockets; client certificates later |
+| Authentication | SCRAM-SHA-256 (password never sent); 9auth key login (`KEY`) over TLS; OS peer credentials on Unix sockets |
+| Identities | Server and client TLS identities come from `github.com/sandgorgon/9auth` (Ed25519, trusted by fingerprint, SSH-style); CA-signed server certificates also supported |
 | TLS | Required on TCP; `--insecure` development mode limited to localhost |
 | Multiplexing | Many requests at once on one connection, each on its own stream, with flow control |
 | Sending queries | Rhizome text, plus prepared statements with binary parameters |
@@ -28,7 +29,14 @@ This document defines how clients talk to a PolyDB server: transports, security,
 | TCP | TLS 1.3 required (TLS 1.2 allowed by server setting) | port **7377** (unassigned in the IANA registry as of 2026-11-22: part of the unassigned block 7366–7390 for TCP and UDP. Registering it formally with IANA is optional and can be done before public release) |
 | Unix domain socket | protected by file permissions | `/var/run/polydb/polydb.sock` |
 
-- **TLS:** the server presents a certificate. On first start without one configured, `polydb serve` generates a self-signed certificate and prints its fingerprint, so clients can pin it. The ALPN protocol name is `polydb/1`.
+- **TLS:** the ALPN protocol name is `polydb/1`. The server's certificate comes from one of two modes:
+
+  | Mode | Server certificate | How clients trust it |
+  |---|---|---|
+  | **Identity (default)** | the server's 9auth identity, loaded with `auth.LoadFrom(<data dir>/identity)`. It's generated on first start, then never changes, whichever account runs the server. `polydb serve` prints its fingerprint at startup | by fingerprint: pinned explicitly, or trust-on-first-use recorded in 9auth's `known-peers` file (§13) |
+  | **CA** | a certificate and key from the server config (for example from Let's Encrypt or a company CA) | standard certificate-chain and hostname verification |
+
+- **Client certificates:** the server *asks for* a client certificate on every TLS connection but doesn't require one. Password users connect without one. A client that presents its 9auth identity can log in with `KEY` (§3.1). The server builds its own `tls.Config` from 9auth's exported pieces (`TLSCertificate`, `FingerprintOf`), because 9auth's `ServerTLSConfig` requires a client certificate and would lock out password users.
 - **`--insecure`:** turns off TLS for TCP, but the server then only accepts connections from loopback addresses (127.0.0.1, ::1) and logs a warning at startup and on every connection. It is meant for development only.
 - **Unix sockets** don't use TLS. The socket file's permissions control who can connect.
 
@@ -82,9 +90,9 @@ Client                                         Server
 | `SCRAM-SHA-256-PLUS` | over TLS (preferred). Includes channel binding with `tls-exporter` (RFC 9266), so the login is tied to this TLS connection and can't be relayed through a man-in-the-middle |
 | `SCRAM-SHA-256` | over Unix sockets, or `--insecure` mode |
 | `PEER` | Unix sockets only. The server reads the connecting process's OS user (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS, via `golang.org/x/sys/unix`) and maps it to a PolyDB user using the server config. No password needed |
-| `CERT` | reserved for client certificates (mutual TLS) after v1 |
+| `KEY` | over TLS only. The client presented its 9auth identity certificate during the TLS handshake, which proves it holds the private key. The first AUTH message names the PolyDB user. Login succeeds if that certificate's fingerprint is registered to that user (§3.4). No password, no extra round trip |
 
-HELLO_OK lists the mechanisms the server allows on this connection. The client picks one in its first AUTH message.
+HELLO_OK lists the mechanisms the server allows on this connection. The client picks one in its first AUTH message. The Go client and CLI try `KEY` first when they have a 9auth identity and the server offers it, and otherwise fall back to SCRAM.
 
 ### 3.2 SCRAM
 - Follows RFC 5802 and RFC 7677 exactly. The client-first, server-first, client-final and server-final messages travel in AUTH, AUTH_CONTINUE, AUTH and AUTH_OK respectively.
@@ -96,7 +104,19 @@ HELLO_OK lists the mechanisms the server allows on this connection. The client p
 ### 3.3 Failed logins
 - The error is always the generic `auth_failed`. It never reveals whether the user exists.
 - Repeated failures from the same source address are slowed down (exponential backoff, capped at 30 s). An admin can see failures with `show sessions` and the server log.
-- **First admin:** `polydb init` creates the initial `admin` user. It prompts for a password, or generates one and prints it once. Until it has been run, the server accepts only `PEER` connections from the OS user that owns the data directory.
+- **First admin:** `polydb init` creates the initial `admin` user. It prompts for a password, or generates one and prints it once. It can also register the running user's 9auth key for `admin` (`polydb init --key`). Until it has been run, the server accepts only `PEER` connections from the OS user that owns the data directory.
+
+### 3.4 Keys (9auth identities)
+- **Users can have any number of registered keys,** each identified by its 9auth fingerprint (64 hex characters: SHA-256 of the Ed25519 public key) with an optional label:
+  ```
+  alter user ramon add key "3f9a…c41e" as "laptop";
+  alter user ramon drop key "3f9a…c41e";
+  show keys for ramon;
+  ```
+- A fingerprint can be registered to only one user per server.
+- Adding or dropping keys for another user needs `admin`. Users may manage their own keys.
+- `polydb whoami --fingerprint` prints the local 9auth fingerprint (the same one `9sh` and `9vcs` use on that machine), to send to an admin.
+- Keys are stored in the system catalog, not in 9auth's `authorized-peers` file. PolyDB's roles and grants stay the only permission system; 9auth's own permission levels aren't used.
 
 ---
 
@@ -408,7 +428,8 @@ A sketch of the public API. The same `polydb.DB` interface is implemented by the
 
 ```go
 db, err := client.Dial(ctx, "polydb://ramon@db.example.com:7377/sales",
-    client.WithPasswordFunc(prompt), client.WithCertFingerprint(fp))
+    client.WithIdentity(id),              // 9auth identity: KEY login
+    client.WithKnownPeers(knownPeersPath)) // trust-on-first-use server pinning
 
 rows, err := db.Query(ctx, `find Person p | where p.age > $min | show p.name, p.photo`,
     polydb.Params{"min": 30})
@@ -428,6 +449,11 @@ err = polydb.RetryTx(ctx, db, func(tx polydb.Tx) error {   // retries on 'confli
 ```
 
 - **Connection URL:** `polydb://user@host:port/database` for TCP and `polydb+unix:///path/to.sock?db=sales` for Unix sockets.
+- **Trusting the server** (identity mode), one of:
+  - `WithServerFingerprint(fp)`: pin a known fingerprint.
+  - `WithKnownPeers(path)`: trust on first use, using 9auth's `known-peers` file (`auth.KnownPeersPath()`), like SSH's `known_hosts`. The CLI shows the fingerprint and asks before saving it on first connect. If a saved fingerprint later doesn't match, the connection is refused with a loud warning, never silently accepted.
+  - `WithSystemCAs()` (CA mode): standard certificate verification.
+- **Client identity:** `WithIdentity(id)` presents a 9auth identity. The CLI uses the per-user identity from `auth.Load()` (`~/.config/9`) automatically. `WithPasswordFunc(f)` supplies a password for SCRAM.
 - **Debugging:** the CLI's `--trace` option prints every frame and message in readable form (field names, decoded values, with secrets redacted).
 
 ---
@@ -437,7 +463,7 @@ err = polydb.RetryTx(ctx, db, func(tx polydb.Tx) error {   // retries on 'confli
 Besides the native protocol, the server can expose databases as a **9P2000 file tree** (decided 2026-11-22). It isn't meant for applications. Its purpose is the "see the contents of the database" requirement: mount a database and explore it with `ls`, `cat`, `grep`, `find`, `awk` and other Unix tools.
 
 ### 14.1 Implementation
-- Package `server/ninep`, built on **`github.com/sandgorgon/9p`**: MIT licensed, pure Go, standard library only. It's the one approved dependency outside the standard library and `golang.org/x`.
+- Package `server/ninep`, built on **`github.com/sandgorgon/9p`**: MIT licensed, pure Go, standard library only. It's one of the two approved dependencies outside the standard library and `golang.org/x`. The other is `github.com/sandgorgon/9auth`, used for TLS identities.
 - PolyDB implements the library's `server.FileSystem` / `server.File` interfaces. Every file operation becomes a Rhizome operation inside the engine, so **the same permission checks apply** as on the native protocol.
 - Protocol versions: 9P2000, plus 9P2000.u for symlinks. 9P2000.L isn't supported by the library, so Linux mounts must pass `version=9p2000.u` (the kernel defaults to `.L`).
 
@@ -447,8 +473,12 @@ The library has no 9P-level authentication, so identity comes from the connectio
 | Transport | Default | Identity |
 |---|---|---|
 | Unix socket `/var/run/polydb/9p.sock` | **on** when `--9p` is given | OS peer credentials (read in the library's per-connection hook), mapped to PolyDB users through the same mapping as `PEER` (§3.1) |
-| TCP with TLS | off | client certificate (after v1, together with `CERT`) |
+| TCP with TLS (`--9p-tcp`) | off | the client's 9auth identity. The TLS handshake **requires** a client certificate, and its fingerprint must be registered to a PolyDB user (§3.4). The library's per-connection hook records that user, and the attach user name is ignored |
 | TCP without TLS | only with `--insecure`, loopback only | the attach user name, unverified (development only) |
+
+- **Remote 9P with 9-family tools:** because identity comes from 9auth, a remote `9sh` (or any client built on the 9p library over a TLS connection) can attach a PolyDB database and graft it into its namespace with `ns.FromFid`. The same key works for `polydb`, `9sh` and `9vcs` on that machine.
+- On the 9P TCP listener, 9auth's `ServerTLSConfig` is used directly. Requiring a client certificate is right here, because 9P has no password fallback.
+- The Linux kernel's 9P client can't do TLS, so kernel mounts always use the Unix socket.
 
 - **Kernel mounts:** a Linux kernel mount connects as root, because mounting needs root. When the peer is root and the mount uses `access=user`, the kernel opens a separate attach for each local user, and the server trusts the user ID in that attach and maps it like a peer credential. Only root can create such a mount, so this doesn't let ordinary users impersonate each other.
 - **macOS** has no built-in 9P mounting. Use the `polydb 9p ls|cat|get` CLI commands, the library's `9pc` tool, or a FUSE-based 9P client.
@@ -516,3 +546,8 @@ None.
 1. A failed or cancelled statement inside a transaction marks the whole transaction failed; the client must roll back.
 2. Default port 7377, confirmed unassigned in the IANA registry.
 3. 9P access layer added for browsing and Unix tools (§14), using `github.com/sandgorgon/9p` as an approved external dependency.
+4. `github.com/sandgorgon/9auth` (v0.2.0+, which added `LoadFrom`) approved as a dependency:
+   - server identity (default TLS mode)
+   - `KEY` login, which replaces the post-v1 `CERT` plan
+   - trust-on-first-use server pinning in the CLI
+   - authenticated remote 9P over TLS

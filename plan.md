@@ -74,8 +74,12 @@ The language has these parts: definitions (kinds, formats, indexes), data change
 ## 4. Architecture
 
 **Module path:** `github.com/sandgorgon/polydb` (decided).
-**Dependencies:** Go standard library plus `golang.org/x/*`, plus one approved exception: `github.com/sandgorgon/9p` (MIT, itself standard-library only) for the 9P access layer. Nothing else.
-**Go version:** 1.26 or later (required by the 9P library).
+**Dependencies:** Go standard library plus `golang.org/x/*`, plus two approved exceptions, both MIT and themselves standard-library only:
+- `github.com/sandgorgon/9p`: the 9P access layer
+- `github.com/sandgorgon/9auth` (v0.2.0+): TLS identities, key login and server pinning
+
+Nothing else.
+**Go version:** 1.26 or later (required by both libraries). Development uses Go 1.27.4.
 **Platforms:** Linux and macOS only. Windows isn't supported.
 
 ```
@@ -109,7 +113,7 @@ Both modes implement the same Go interface, so application code can switch betwe
 **9P access layer:** the server can also expose databases as a 9P2000 file tree, so they can be mounted (Linux kernel 9P) and explored with `ls`, `cat`, `grep` and other Unix tools. It's read-only by default and goes through the same permission checks. It serves the "see the contents of the database" requirement and isn't meant for applications. Details: spec/protocol.md §14.
 
 **Security (roles from the start):**
-- users with password authentication (salted, slow hash); TLS for network connections
+- users log in with a password (SCRAM, never sent over the wire) or a 9auth key (Ed25519, SSH-style fingerprints); TLS for network connections
 - roles that bundle permissions; users are given roles
 - permissions such as read, write, define (schema), relate and admin, granted at server, database or kind level (decided; entity- and field-level permissions are out of scope for v1)
 - users, roles and grants are managed through the query language (`create user`, `create role`, `grant`, `revoke`) and stored in a system catalog
@@ -219,3 +223,5 @@ None. All planning questions are settled; next step is Phase 0 (specifications).
 | 2026-11-21 | Go module path `github.com/sandgorgon/polydb` | |
 | 2026-11-22 | Specs agreed: types, Rhizome language, wire protocol | See spec/ |
 | 2026-11-22 | 9P access layer for browsing and Unix tools | Uses `github.com/sandgorgon/9p` (approved dependency exception); requires Go 1.26+; becomes Phase 7 |
+| 2026-11-22 | 9auth for identities and key login | `github.com/sandgorgon/9auth` approved. Used for the server TLS identity, `KEY` login (replaces the post-v1 client-certificate plan), CLI server pinning and remote 9P over TLS. `LoadFrom` added upstream and released as v0.2.0 |
+| 2026-11-22 | Go upgraded to 1.27.4 | Official release installed in `~/.local/go` |

@@ -528,6 +528,8 @@ find Person p as of t"2026-01-01T00:00:00Z" | show p.name, p.salary;
 ```
 create user ramon password $pw;
 alter user ramon password $new_pw;
+alter user ramon add key "3f9a…c41e" as "laptop";   // 9auth fingerprint (protocol.md §3.4)
+alter user ramon drop key "3f9a…c41e";
 create role analyst;
 grant read on database sales to analyst;
 grant write on kind sales.Order to analyst;
@@ -535,7 +537,7 @@ grant define on database sales to analyst;
 grant analyst to ramon;
 revoke write on kind sales.Order from analyst;
 drop role analyst;
-show users;  show roles;  show grants for ramon;
+show users;  show roles;  show grants for ramon;  show keys for ramon;
 ```
 
 | Permission | Allows |
@@ -718,7 +720,9 @@ alter_relation = "relation" ident ( "add" field_def
                                   | "alter" field_def
                                   | "rename" "to" ident
                                   | "set" rel_option ) ;
-alter_user     = "user" ident "password" expr ;
+alter_user     = "user" ident ( "password" expr
+                              | "add" "key" text_lit [ "as" text_lit ]
+                              | "drop" "key" text_lit ) ;
 drop_stmt      = "drop" ( "kind" | "relation" | "format" | "index" | "user" | "role" ) ident ;
 
 (* ----- Data ----- *)
@@ -807,6 +811,7 @@ introspect_stmt = "describe" ( target | ( "kind" | "relation" | "format" | "inde
 show_what      = "databases" | "kinds" | "relations" | "formats" | "indexes"
                | "users" | "roles" | "sessions"
                | "grants" [ "for" ident ]
+               | "keys" [ "for" ident ]
                | "stats" [ "kind" ident ] ;
 ```
 
