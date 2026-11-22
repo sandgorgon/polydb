@@ -1,0 +1,8 @@
+# Editor and OS files
+*.swp
+.DS_Store
+
+# Test and build output
+*.test
+*.out
+/coverage.*
