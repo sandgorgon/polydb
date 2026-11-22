@@ -345,6 +345,7 @@ Used for storing values and sending them over the wire.
   | 0x60 | record | record type id + fields in order |
   | 0x61 | union / any | carries the inner value's own tag |
   | 0x70 | collection reference | pointer to an out-of-line collection (section 13) |
+  | 0x80–0x8F | result-only values | entity, field, relation and path values sent in query results; never stored (protocol.md §6.5) |
   | 0xF0–0xFF | reserved | future types |
 
 - The exact byte layout of each payload will be finalized together with the wire protocol spec.

@@ -345,7 +345,13 @@ push @alice.inbox "hello" priority 5;
 push @worker.jobs @task1;                          // fifo, lifo, ring: no priority
 pop @alice.inbox;                                  // returns the value, or null if empty
 pop 10 from @alice.inbox;                          // up to 10 values
+pop @worker.jobs wait 30s;                         // waits up to 30s for an item, then null
 ```
+- **`wait <duration>`** makes `pop` block until an item arrives or the time runs out (decided 2026-11-22). This lets workers wait for jobs without polling.
+  - Waiters on the same queue are served in the order they started waiting.
+  - Not allowed inside a transaction.
+  - The maximum wait is a server setting (default 15 minutes).
+  - The wait can be cancelled by the client (protocol.md §12).
 `peek`, `len` and reading in pop order are functions (§8.4), so they can be used in queries without changing the queue.
 
 ### 6.6 Data changes inside pipelines
@@ -745,7 +751,7 @@ relate_stmt    = "relate" node_ref edge node_ref [ "as" handle ] ;
 unrelate_stmt  = "unrelate" ( node_ref edge node_ref | target ) ;
 node_ref       = target [ "." ident ] ;                 (* entity, or one of its fields *)
 push_stmt      = "push" field_ref expr [ "priority" expr ] ;
-pop_stmt       = "pop" [ expr "from" ] field_ref [ "as" ident ] ;
+pop_stmt       = "pop" [ expr "from" ] field_ref [ "wait" expr ] [ "as" ident ] ;
 field_ref      = target "." ident ;
 
 (* ----- Queries ----- *)

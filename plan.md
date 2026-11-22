@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Planning complete (2026-11-21).** Next: Phase 0, specifications. No code written yet.
+Status: **Phase 0 (specifications) complete (2026-11-22).** Next: Phase 1. No code written yet.
 Source requirements: [req.md](req.md)
 
 ---
@@ -74,7 +74,8 @@ The language has these parts: definitions (kinds, formats, indexes), data change
 ## 4. Architecture
 
 **Module path:** `github.com/sandgorgon/polydb` (decided).
-**Dependencies:** Go standard library plus `golang.org/x/*`. Nothing else.
+**Dependencies:** Go standard library plus `golang.org/x/*`, plus one approved exception: `github.com/sandgorgon/9p` (MIT, itself standard-library only) for the 9P access layer. Nothing else.
+**Go version:** 1.26 or later (required by the 9P library).
 **Platforms:** Linux and macOS only. Windows isn't supported.
 
 ```
@@ -91,6 +92,7 @@ polydb/
   query/      planner, optimizer, executor
   engine/     the database core; one public Go interface used by both modes
   server/     network server (primary deployment mode)
+  server/ninep  9P2000 file-tree view of databases, for browsing and Unix tools
   client/     Go client package for talking to the server
   cmd/polydb  server daemon + CLI client/REPL
   tui/        after v1.0
@@ -102,7 +104,9 @@ polydb/
 
 Both modes implement the same Go interface, so application code can switch between them. The engine is designed for embedding from day one, but polishing and packaging embedded mode comes after the server.
 
-**Wire protocol:** our own versioned binary protocol over TCP (with TLS) and Unix domain sockets. Messages are length-prefixed frames carrying the binary value encoding from `value/`, so results don't need converting to text and back. The protocol supports multiple requests at once on one connection, streaming result rows and cancellation. The Go `client/` package is the reference implementation; clients in other languages would be written against the protocol spec later.
+**Wire protocol:** our own versioned binary protocol over TCP (with TLS) and Unix domain sockets. Messages are length-prefixed frames carrying the binary value encoding from `value/`, so results don't need converting to text and back. The protocol supports multiple requests at once on one connection, streaming result rows and cancellation. The Go `client/` package is the reference implementation; clients in other languages would be written against the protocol spec later. Full details: [spec/protocol.md](spec/protocol.md).
+
+**9P access layer:** the server can also expose databases as a 9P2000 file tree, so they can be mounted (Linux kernel 9P) and explored with `ls`, `cat`, `grep` and other Unix tools. It's read-only by default and goes through the same permission checks. It serves the "see the contents of the database" requirement and isn't meant for applications. Details: spec/protocol.md §14.
 
 **Security (roles from the start):**
 - users with password authentication (salted, slow hash); TLS for network connections
@@ -169,8 +173,9 @@ Both modes implement the same Go interface, so application code can switch betwe
 4. Persistence: WAL + LSM, MVCC, crash recovery
 5. Indexes, full-text search, planner, `explain`
 6. Large-data work: blob store, compaction tuning, stats, transformations, backup/restore, import/export, graph export (DOT/JSON)
-7. Embedded mode polish and packaging; API stability review
-8. **v1.0 release**
+7. 9P access layer (`server/ninep`): file tree, query files, Linux mount testing
+8. Embedded mode polish and packaging; API stability review
+9. **v1.0 release**
 
 **After v1.0:**
 - multi-node: partitioning, replication, distributed queries
@@ -212,3 +217,5 @@ None. All planning questions are settled; next step is Phase 0 (specifications).
 | 2026-11-21 | Project tracked in git | Repository initialized |
 | 2026-11-21 | Query language named **Rhizome**, extension `.rhz` | Web search: only conflict is RhizomeDB (abandoned 2023). Weave and Strand rejected for conflicts. Trademark search (USPTO/EUIPO) still to do before public release |
 | 2026-11-21 | Go module path `github.com/sandgorgon/polydb` | |
+| 2026-11-22 | Specs agreed: types, Rhizome language, wire protocol | See spec/ |
+| 2026-11-22 | 9P access layer for browsing and Unix tools | Uses `github.com/sandgorgon/9p` (approved dependency exception); requires Go 1.26+; becomes Phase 7 |
