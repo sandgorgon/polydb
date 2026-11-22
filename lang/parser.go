@@ -148,6 +148,17 @@ func (p *parser) name(what string) (string, error) {
 	return "", p.errExpected(what)
 }
 
+// metaName reads a metadata name after "::". Metadata names are a fixed
+// set, some of which are keywords (::kind, ::doc, ::from, ::to), so
+// keywords are accepted here.
+func (p *parser) metaName() (string, error) {
+	if t := p.tok(); t.Kind == Keyword {
+		p.advance()
+		return t.Text, nil
+	}
+	return p.name("a metadata name")
+}
+
 func (p *parser) handle() (string, error) {
 	t := p.tok()
 	if t.Kind != Handle {
@@ -375,18 +386,29 @@ func (p *parser) define(at At) (Stmt, error) {
 		if k.Name, err = p.name("a kind name"); err != nil {
 			return nil, err
 		}
+		once := options{}
 		for {
+			at := p.pos()
 			if d, err := p.optDoc(true); err != nil {
 				return nil, err
 			} else if d != nil {
 				k.Doc = d
+				if err := once.use(at, "doc"); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			if p.acceptWord("closed") {
 				k.Closed = true
+				if err := once.use(at, "closed"); err != nil {
+					return nil, err
+				}
 				continue
 			}
 			if p.tok().Is("history") {
+				if err := once.use(at, "history"); err != nil {
+					return nil, err
+				}
 				if k.History, err = p.historyOpt(); err != nil {
 					return nil, err
 				}
@@ -414,13 +436,18 @@ func (p *parser) define(at At) (Stmt, error) {
 		if r.To, err = p.name("a kind, any or field"); err != nil {
 			return nil, err
 		}
+		once := options{}
 		for {
+			at := p.pos()
 			o, ok, err := p.relOption()
 			if err != nil {
 				return nil, err
 			}
 			if !ok {
 				break
+			}
+			if err := once.use(at, o.name()); err != nil {
+				return nil, err
 			}
 			mergeRelOption(r, o)
 		}
@@ -504,6 +531,31 @@ func mergeRelOption(r *DefineRelation, o *RelOption) {
 	}
 }
 
+// name names the option that o sets, for duplicate checks.
+func (o *RelOption) name() string {
+	switch {
+	case o.Doc != nil:
+		return "doc"
+	case o.MaxOut != nil:
+		return "max out"
+	case o.MaxIn != nil:
+		return "max in"
+	}
+	return "on delete"
+}
+
+// options tracks the options a definition has used, so that each appears
+// at most once (spec/rhizome.md §15.5).
+type options map[string]bool
+
+func (o options) use(at Pos, name string) error {
+	if o[name] {
+		return syntaxErr(at, "%s is given more than once", name)
+	}
+	o[name] = true
+	return nil
+}
+
 // relOption reads one relation option, if present.
 func (p *parser) relOption() (*RelOption, bool, error) {
 	if d, err := p.optDoc(true); err != nil || d != nil {
@@ -583,15 +635,34 @@ func (p *parser) fieldDef(full bool) (*FieldDef, error) {
 	if f.Type, err = p.typ(); err != nil {
 		return nil, err
 	}
+	once := options{}
 	for {
+		at := p.pos()
 		if d, err := p.optDoc(true); err != nil {
 			return nil, err
 		} else if d != nil {
 			f.Doc = d
+			if err := once.use(at, "doc"); err != nil {
+				return nil, err
+			}
 			continue
 		}
 		if !full {
 			return f, nil
+		}
+		var opt string
+		switch t := p.tok(); {
+		case t.Is("unique"), t.Is("default"), t.Is("history"):
+			opt = t.Text
+		case t.IsWord("check") && !p.peekTok(1).Is(":"):
+			opt = "check"
+		case t.Is("on"):
+			opt = "on delete"
+		}
+		if opt != "" {
+			if err := once.use(at, opt); err != nil {
+				return nil, err
+			}
 		}
 		switch {
 		case p.accept("unique"):
@@ -931,8 +1002,24 @@ func (p *parser) addClause() ([]*AddField, error) {
 		if a.Value, err = p.expr(); err != nil {
 			return nil, err
 		}
+		once := options{}
 	opts:
 		for {
+			at := p.pos()
+			var opt string
+			switch t := p.tok(); {
+			case t.IsWord("doc"), t.IsWord("check"), t.Is("history"):
+				opt = t.Text
+			case t.Is("on"):
+				opt = "on delete"
+			case t.Is("unique"), t.Is("default"):
+				return nil, syntaxErr(at, "%s isn't allowed in an add clause: it only applies to kind fields", t.Text)
+			}
+			if opt != "" {
+				if err := once.use(at, opt); err != nil {
+					return nil, err
+				}
+			}
 			switch {
 			case p.acceptWord("doc"):
 				s, err := p.textLit("a doc string")
@@ -1034,8 +1121,11 @@ func (p *parser) assign() (*Assign, error) {
 	var err error
 	if p.accept("::") {
 		a.Target.Meta = true
+		a.Target.Name, err = p.metaName()
+	} else {
+		a.Target.Name, err = p.name("a field name")
 	}
-	if a.Target.Name, err = p.name("a field name"); err != nil {
+	if err != nil {
 		return nil, err
 	}
 	for {

@@ -42,6 +42,14 @@ func quoteName(n string) string {
 	return "`" + n + "`"
 }
 
+// metaName formats a metadata name, which may be a keyword.
+func metaName(n string) string {
+	if Keywords[n] {
+		return n
+	}
+	return quoteName(n)
+}
+
 func (f *formatter) doc(d *string) {
 	if d != nil {
 		f.w(" doc ", value.QuoteText(*d))
@@ -314,9 +322,10 @@ func (f *formatter) stmt(s Stmt) {
 						f.w(", ")
 					}
 					if as.Target.Meta {
-						f.w("::")
+						f.w("::", metaName(as.Target.Name))
+					} else {
+						f.name(as.Target.Name)
 					}
-					f.name(as.Target.Name)
 					for _, st := range as.Target.Steps {
 						if st.Index != nil {
 							f.w("[")
@@ -739,8 +748,7 @@ func (f *formatter) expr(e Expr, min int) {
 	case *ParamRef:
 		f.w("$", quoteName(e.Name))
 	case *MetaRef:
-		f.w("::")
-		f.name(e.Name)
+		f.w("::", metaName(e.Name))
 	case *Unary:
 		if e.Op == "not" {
 			f.w("not ")
@@ -794,8 +802,7 @@ func (f *formatter) expr(e Expr, min int) {
 		f.name(e.Name)
 	case *MetaExpr:
 		f.expr(e.X, precPostfix)
-		f.w("::")
-		f.name(e.Name)
+		f.w("::", metaName(e.Name))
 	case *IndexExpr:
 		f.expr(e.X, precPostfix)
 		f.w("[")

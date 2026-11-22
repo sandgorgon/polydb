@@ -448,7 +448,7 @@ find Person p
 | 1 | `.` field, `::` metadata, `[ ]` index or key, `->` inside a doc, `( )` call |
 | 2 | unary `-` |
 | 3 | `*` `/` `%` |
-| 4 | `+` `-` (numbers only), `++` (join text, bytes or lists; union of sets; merge maps), `--` (remove from lists, sets or maps) |
+| 4 | `+` `-` (numbers, and time with durations: §8.2), `++` (join text, bytes or lists; union of sets; merge maps), `--` (remove from lists, sets or maps) |
 | 5 | `=` `!=` `<` `<=` `>` `>=`, `in`, `not in`, `has`, `is`, `between … and …`, `matches`, `starts with`, `ends with`, `contains` (these don't chain: `a < b < c` is a syntax error) |
 | 6 | `not` (so `not a = b` means `not (a = b)`) |
 | 7 | `and` |
@@ -462,9 +462,11 @@ find Person p
 
 ### 8.2 Typing rules
 - Arithmetic follows types.md §10.3. `int` with `float` is an error until one side is cast: `cast(p.age as float) * 1.5`.
+- Times and durations: `time ± duration` gives a time, `time - time` and `duration ± duration` give a duration, and a duration can be multiplied or divided by an int (`now() - 24h`, `2 * 1h`).
+- `int / int` gives an int, rounding toward zero; use decimals or floats for fractions.
 - Each operator means one thing (decided): `+` always adds numbers, `++` always joins. `"a" + "b"` and `1 ++ 2` are type errors, and the message suggests the other operator. With `any` values, the same rule is checked at run time.
 - Comparisons between different numeric types are exact and need no cast (types.md §11.1).
-- `<`, `>` and friends between different type groups (for example text with int) are a type error. Where possible it's reported before the query runs, otherwise at run time on the first row.
+- `<`, `>` and friends between different type groups (for example text with int) are a type error. So are `=` and `!=`, which would otherwise always be false or true. IDs, refs and entities are one group, so `p.manager = @alice` and `p.manager = #01…` work. Comparing with `null` is always allowed. Where possible it's reported before the query runs, otherwise at run time on the first row.
 
 ### 8.3 Null rules
 - `null = null` is true; `null != 1` is true.
@@ -503,7 +505,7 @@ find Person p
 - **CSV/TSV:** without a header, `->[2]->[0]` is row 2, column 0. With the header option, each row is a map, so `->[0]->email` works.
 - **Result types:**
   - For a **base format** the result is `any`. Its type is checked at run time.
-  - For a **derived format** the result has the type declared in the format's shape. For `doc<invoice>`, `->total` is `decimal(12,2)` and `->lines->[0]->qty` is `int`, so type errors are reported before the query runs, and a step the shape doesn't declare is an error.
+  - For a **derived format based on json** the result has the type declared in the format's shape. For `doc<invoice>`, `->total` is `decimal(12,2)` and `->lines->[0]->qty` is `int`, so type errors are reported before the query runs, and a step the shape doesn't declare is an error. Derived formats on other bases give `any`, because their steps (child elements, rows) don't follow the shape's fields.
 - Paths in `define index` (`config->server->port`) use the same rules.
 
 ---
@@ -854,7 +856,8 @@ cmp_tail       = ( "=" | "!=" | "<" | "<=" | ">" | ">=" ) add_expr
 add_expr       = mul_expr { ( "+" | "-" | "++" | "--" ) mul_expr } ;
 mul_expr       = unary { ( "*" | "/" | "%" ) unary } ;
 unary          = "-" unary | postfix ;
-postfix        = primary { "." ident | "::" ident | "[" expr "]" | "->" doc_step } ;
+postfix        = primary { "." ident | "::" meta_name | "[" expr "]" | "->" doc_step } ;
+meta_name      = ident | ? any keyword ? ;      (* ::kind, ::doc, ::from, ::to *)
 doc_step       = ident | text_lit | "[" expr "]"
                | "@" ( ident | text_lit ) ;     (* xml attribute *)
 
@@ -910,3 +913,17 @@ None.
    - When `alter kind … add` declares a field that some entities already added themselves, the types must match apart from `?`. Those values are then checked against the declared type.
    - A definition change conflicts with any transaction writing data at the same time, so data can't be written under a definition that changed underneath it. Definitions change rarely, so these extra conflicts are rare too.
    - Constraint checks (`unique`, relation maximums, `restrict`) are protected against concurrent transactions: the transaction that commits second gets `conflict`.
+9. Checker clarifications (Phase 2, 2026-11-22). The checker runs before a statement does and reports errors with positions:
+   - Reading a field a kind doesn't declare is an `unknown_field` error (with a suggestion) for `closed` kinds. For extensible kinds and kindless entities it has type `any`, because the entity may have added it; it reads as null if absent.
+   - `.field` on a `ref<K>` follows the ref and reads the field of the entity it points to.
+   - **Show columns** are named by `as`, or else by the expression's text (`p.name`). Two columns with the same name are an error. After `show`, later steps see only the columns, by name or by the same expression (`show p.name | sort p.name`).
+   - `union` lines up columns by position; both sides need the same number.
+   - Aggregates in `show` or `let` without a `group by` before them aggregate the whole stream into one row (`find Person p | show count()`). Row values can't be mixed in without a `group by`.
+   - `avg` of exact numbers (`int`, `bigint`, `decimal`) gives a `decimal`.
+   - Text literals written to a field are converted (types.md §10.1) inside list, set, map and record literals too, and an `#id` literal written to a `ref` field becomes a ref.
+   - `push` to a priority queue needs `priority`; other queues don't take one. `pop … as` only works as a pipeline step.
+   - In `relate` and `unrelate`, the edge needs a direction. `unrelate a ~t~> b` can't filter on properties.
+   - In `follow`, every node after the start must be a new variable; connecting bound variables needs `match`. A multi-hop edge can't bind a relation variable; use `follow path`.
+   - `find Person` with no variable, or a pattern node named after a kind (`~works_at~> Company`), is an error that suggests adding a variable.
+   - In `update`, a bare name that is both a pipeline variable and a field of the target is an error; write `p.name` for the field.
+   - `limit`, `skip`, `default`, `history keep` and `set` values must be constants: no variables or fields, though parameters are fine.

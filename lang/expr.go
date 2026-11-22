@@ -208,7 +208,7 @@ func (p *parser) postfix() (Expr, error) {
 			}
 		case p.accept("::"):
 			var n string
-			if n, err = p.name("a metadata name"); err == nil {
+			if n, err = p.metaName(); err == nil {
 				x = &MetaExpr{at, x, n}
 			}
 		case p.accept("["):
@@ -333,7 +333,7 @@ func (p *parser) primary() (Expr, error) {
 		switch t.Text {
 		case "::":
 			p.advance()
-			n, err := p.name("a metadata name")
+			n, err := p.metaName()
 			return &MetaRef{at, n}, err
 		case "(":
 			p.advance()
