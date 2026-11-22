@@ -50,7 +50,7 @@ Examples: `text?`, `list<int>`, `map<text, list<float>>`, `queue.ring<text, 100>
 - `null` is a single value meaning "no value".
 - A type is **not nullable** unless written with `?`. Writing `null` into an `int` field is an error; writing it into `int?` is allowed.
 - `any` accepts every value, including `null`.
-- Free-form fields (fields on an entity with no kind, or not declared by the kind) have type `any`.
+- Fields an entity adds itself (on a kindless entity, or beyond what its kind declares) have the type given when they are added, or `any` if none is given (see rhizome.md §6.2).
 - **Absent vs null:** a field that doesn't exist on an entity is *absent*. A field that exists and holds `null` is *null*. Rhizome can tell them apart (`exists(e.f)` vs `e.f = null`).
 - Null comparisons use **two-valued logic**: `null = null` is true, and `null` sorts before every other value (section 11). There is no SQL-style "unknown" third value.
 
