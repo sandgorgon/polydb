@@ -137,3 +137,37 @@ func TestIsIdentifier(t *testing.T) {
 		}
 	}
 }
+
+func TestTypeEncoding(t *testing.T) {
+	for _, s := range []string{
+		"int", "text?", "decimal(12,2)", "ref", "ref<Person>?", "doc<invoice>", "list<any>",
+		"array<float, 3>", "map<text, list<float>>", "pair<int, text>", "queue.priority<text, low, max 5>",
+		"queue.ring<int, 9>", "queue.fifo<int>", `record{a: int, b: text? "doc"}`, "union<int | text>?",
+	} {
+		ty := MustParseType(s)
+		got, err := DecodeType(AppendType(nil, ty))
+		if err != nil || !got.Equal(ty) || got.String() != ty.String() {
+			t.Errorf("%s: got %v, %v", s, got, err)
+		}
+	}
+	rec := MustParseType(`record{a: int "the a"}`)
+	if got := must(DecodeType(AppendType(nil, rec))); got.Fields[0].Doc != "the a" {
+		t.Error("record field doc lost")
+	}
+	for _, bad := range [][]byte{{}, {byte(CodeInt)}, {byte(CodeInt), 4}, {200, 0}, {byte(CodeList), 0}, {byte(CodeInt), 0, 0}} {
+		if _, err := DecodeType(bad); err == nil {
+			t.Errorf("decoded %x", bad)
+		}
+	}
+}
+
+func TestMapNames(t *testing.T) {
+	ty := MustParseType("map<ref<A>, list<union<doc<f> | ref<B> | ref>>>")
+	got := must(ty.MapNames(func(c Code, n string) (string, error) { return strings.ToLower(n) + c.String(), nil }))
+	if got.String() != "map<ref<aref>, list<union<doc<fdoc> | ref<bref> | ref>>>" {
+		t.Errorf("got %s", got)
+	}
+	if ty.String() != "map<ref<A>, list<union<doc<f> | ref<B> | ref>>>" {
+		t.Error("original changed")
+	}
+}

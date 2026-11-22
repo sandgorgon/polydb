@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 in progress on branch `phase-1`: values, encodings and in-memory storage done; model, catalog and engine API next.
+Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 in progress on branch `phase-1`: values, encodings, in-memory storage, model and catalog done; engine API next.
 Source requirements: [req.md](req.md)
 
 ---
@@ -225,3 +225,8 @@ None. All planning questions are settled; next step is Phase 0 (specifications).
 | 2026-11-22 | 9P access layer for browsing and Unix tools | Uses `github.com/sandgorgon/9p` (approved dependency exception); requires Go 1.26+; becomes Phase 7 |
 | 2026-11-22 | 9auth for identities and key login | `github.com/sandgorgon/9auth` approved. Used for the server TLS identity, `KEY` login (replaces the post-v1 client-certificate plan), CLI server pinning and remote 9P over TLS. `LoadFrom` added upstream and released as v0.2.0 |
 | 2026-11-22 | Go upgraded to 1.27.4 | Official release installed in `~/.local/go` |
+| 2026-11-22 | One store per database | Server-level data (users, roles, database list) gets its own system store. Dropping a database removes its store |
+| 2026-11-22 | One record per field | An entity is a header record plus one record per field, keyed by entity and field name, so a field write never rewrites the whole entity (key layout in `keys/`) |
+| 2026-11-22 | Catalog IDs in keys and stored types | Kinds, relation types and derived formats are referenced by ID; relation types are registered on first use. Renames rewrite one definition |
+| 2026-11-22 | Catalog lives in the database's store | Written in the same atomic batch as the data it goes with; transactions read an immutable cached snapshot |
+| 2026-11-22 | Field IDs assigned when a field is first written | `::id` always works and any field can be related at any time |
