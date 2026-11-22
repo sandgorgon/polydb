@@ -348,7 +348,11 @@ Used for storing values and sending them over the wire.
   | 0x80–0x8F | result-only values | entity, field, relation and path values sent in query results; never stored (protocol.md §6.5) |
   | 0xF0–0xFF | reserved | future types |
 
-- The exact byte layout of each payload will be finalized together with the wire protocol spec.
+- The exact byte layout of each payload is documented on `value.AppendValue` (value/encode.go). Notes:
+  - `ref` is just the target ID. The `ref<Kind>` constraint belongs to the field's type, not the value.
+  - `doc` carries its format by name, and `record` carries its field names. Catalog IDs could replace the names later as a storage optimization.
+  - A value in an `any` or `union` field is encoded as itself, because every encoding already carries its type. Tag 0x61 stays reserved.
+- **Decoding is strict:** only canonical encodings of well-formed values are accepted (minimal varints, sorted sets and map keys, NFC text, valid images, queues in pop order). This means `encode(decode(b)) = b` always holds, and data from the network can't create invalid values.
 
 ### 12.2 Key encoding
 Used inside the storage engine for index keys and sorting.
@@ -356,7 +360,8 @@ Used inside the storage engine for index keys and sorting.
 - **Order-preserving:** comparing the encoded bytes gives the same answer as the order in section 11. This lets the storage engine sort and range-scan values without decoding them.
 - Only keyable types (section 7) have a key encoding.
 - It starts with a byte for the type group (section 11.2) so different types sort correctly against each other. All numeric types share one encoding so that `1` and `1.0` encode identically.
-- Techniques: sign-flipped big-endian integers, float bit tricks for ordering, and zero-byte escaping for text and bytes so they can be compared piece by piece.
+- Techniques: sign-flipped big-endian integers and zero-byte escaping for text and bytes. **Numbers** of every type are written as their exact decimal value, `0.d1d2… × 10^E`: a class byte (−inf, negative, zero, positive, +inf, NaN), the exponent, then the digits in pairs. Every float has a finite decimal expansion, so this is exact and agrees with §11.1 (the float `0.1` sorts just above `0.1d`). The cost is long keys for floats with extreme exponents.
+- Keys are self-delimiting (no key is a prefix of another), so composite keys are plain concatenations. The full layout is documented at the top of value/key.go.
 - It can't always be decoded back to the exact original type (for example, `1` and `1.0` encode the same). Indexes therefore point back to the stored value, which keeps the real type.
 
 ---
