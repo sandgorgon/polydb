@@ -11,10 +11,17 @@
 //	0x12 node     0x12 id                      what an ID names (entity, field
 //	                                           with its entity and name, or relation)
 //	0x13 member   0x13 kind entity             entities of each kind
+//	0x14 backref  0x14 target field            a restrict ref field pointing at target
 //	0x20 relation 0x20 relation                type, endpoints, properties
 //	0x21 out      0x21 from type to relation   adjacency, by start node
 //	0x22 in       0x22 to type from relation   adjacency, by end node
+//	0x23 bytype   0x23 type relation           relations of each type
 //	0x30 index    (Phase 5)                    secondary index entries
+//	0x31 unique   0x31 owner name 0x00 values  the entity holding a unique value;
+//	                                           owner is the kind (unique field,
+//	                                           name = field) or a unique index
+//	                                           (name empty), values are key
+//	                                           encodings (value.Key)
 //	0x40 history  (opt-in field history)
 //
 // An entity's fields are contiguous under its field prefix, so reading a
@@ -38,10 +45,13 @@ const (
 	PrefixField    = 0x11
 	PrefixNode     = 0x12
 	PrefixMember   = 0x13
+	PrefixBackRef  = 0x14
 	PrefixRelation = 0x20
 	PrefixOut      = 0x21
 	PrefixIn       = 0x22
+	PrefixByType   = 0x23
 	PrefixIndex    = 0x30
+	PrefixUnique   = 0x31
 	PrefixHistory  = 0x40
 )
 
@@ -115,6 +125,36 @@ func ParseMember(k []byte) (kind, entity value.ID, err error) {
 	}
 	return value.ID(k[1 : 1+idLen]), value.ID(k[1+idLen:]), nil
 }
+
+// BackRef returns the key recording that the restrict ref field holds a
+// ref to target.
+func BackRef(target, field value.ID) []byte { return key(PrefixBackRef, target, field) }
+
+// BackRefs returns the prefix of all back references to target.
+func BackRefs(target value.ID) []byte { return key(PrefixBackRef, target) }
+
+// ByType returns the key listing a relation under its type.
+func ByType(typ, rel value.ID) []byte { return key(PrefixByType, typ, rel) }
+
+// OfType returns the prefix of all relations of a type.
+func OfType(typ value.ID) []byte { return key(PrefixByType, typ) }
+
+// Unique returns the key claiming a unique value. name is the field name
+// for a unique field and empty for a unique index; vals is the
+// concatenated key encoding of the values.
+func Unique(owner value.ID, name string, vals []byte) []byte {
+	k := append(key(PrefixUnique, owner), name...)
+	return append(append(k, 0), vals...)
+}
+
+// UniquePrefix returns the prefix of all unique keys of one owner and name.
+func UniquePrefix(owner value.ID, name string) []byte {
+	return append(append(key(PrefixUnique, owner), name...), 0)
+}
+
+// CatalogVersion is the key every catalog change writes and every data
+// change guards, so the two can't interleave.
+var CatalogVersion = Meta("catalog")
 
 // Relation returns the key of a relation record.
 func Relation(id value.ID) []byte { return key(PrefixRelation, id) }

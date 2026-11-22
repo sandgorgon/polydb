@@ -159,12 +159,16 @@ func EncodeField(f *model.Field, tc TypeCodec) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return list(f.ID, value.Bool(f.Declared), f.Value, def), nil
+	var v value.Value = value.Null
+	if f.Value != nil {
+		v = f.Value
+	}
+	return list(f.ID, value.Bool(f.Declared), value.Bool(f.Value != nil), v, def), nil
 }
 
 // DecodeField decodes a field record.
 func DecodeField(entity value.ID, name string, b []byte, tc TypeCodec) (*model.Field, error) {
-	vs, err := fields(b, "field", 4)
+	vs, err := fields(b, "field", 5)
 	if err != nil {
 		return nil, err
 	}
@@ -172,7 +176,11 @@ func DecodeField(entity value.ID, name string, b []byte, tc TypeCodec) (*model.F
 	f := &model.Field{Entity: entity, Name: name}
 	f.ID = get[value.ID](r)
 	f.Declared = bool(get[value.Bool](r))
+	hasValue := bool(get[value.Bool](r))
 	f.Value = r.next()
+	if !hasValue {
+		f.Value = nil
+	}
 	def := r.next()
 	if r.err != nil {
 		return nil, r.err

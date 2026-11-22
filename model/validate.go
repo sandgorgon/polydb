@@ -56,37 +56,15 @@ func ValidateFieldDef(fd *FieldDef, ctx FieldContext) error {
 	if ctx == FormatField && (fd.Check != "" || fd.History.On || fd.OnDelete != RefDangle) {
 		return what("an option other than doc")
 	}
-	if fd.OnDelete == RefRestrict && !hasRef(fd.Type) {
-		return fmt.Errorf("field %q: on delete only applies to ref fields", fd.Name)
+	// Refs inside collections and any fields always dangle (spec/types.md
+	// §4.12), so restrict needs the field itself to be a ref.
+	if fd.OnDelete == RefRestrict && fd.Type.Code != value.CodeRef {
+		return fmt.Errorf("field %q: on delete restrict only applies to ref fields, not %s", fd.Name, fd.Type)
 	}
 	if fd.History.Keep < 0 || (fd.History.Keep > 0 && !fd.History.On) {
 		return fmt.Errorf("field %q: invalid history setting", fd.Name)
 	}
 	return nil
-}
-
-func hasRef(t *value.Type) bool {
-	found := false
-	var walk func(*value.Type)
-	walk = func(t *value.Type) {
-		if t == nil || found {
-			return
-		}
-		if t.Code == value.CodeRef {
-			found = true
-			return
-		}
-		walk(t.Elem)
-		walk(t.Key)
-		for _, f := range t.Fields {
-			walk(f.Type)
-		}
-		for _, a := range t.Alts {
-			walk(a)
-		}
-	}
-	walk(t)
-	return found
 }
 
 func validateFields(owner string, fields []FieldDef, ctx FieldContext) error {

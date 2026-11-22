@@ -905,3 +905,8 @@ None.
 5. Relation deletion is set per relation type: `on delete cascade` (default) or `restrict`.
 6. `+` is numeric only; `++` joins and `--` removes. In `update`, `+=` is numeric, and `++=` / `--=` work on text and collections.
 7. Doc paths: each base format defines its own `->` steps (XML gets element-name and `@attr` steps), and derived formats give typed results from their shape (§8.6).
+8. Implementation clarifications (Phase 1, 2026-11-22):
+   - `unset` keeps the field and its ID, so relations attached to the field survive. Only `drop` (or `alter kind … drop`) removes a field.
+   - When `alter kind … add` declares a field that some entities already added themselves, the types must match apart from `?`. Those values are then checked against the declared type.
+   - A definition change conflicts with any transaction writing data at the same time, so data can't be written under a definition that changed underneath it. Definitions change rarely, so these extra conflicts are rare too.
+   - Constraint checks (`unique`, relation maximums, `restrict`) are protected against concurrent transactions: the transaction that commits second gets `conflict`.

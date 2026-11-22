@@ -66,13 +66,15 @@ func TestRecords(t *testing.T) {
 	added := &model.Field{ID: g.New(), Entity: e.ID, Name: "hobby", Value: value.MustText("chess"),
 		Def: &model.FieldDef{Name: "hobby", Type: value.MustParseType("text?"), Doc: "Main hobby", Check: "len(hobby) > 0",
 			History: model.History{On: true, Keep: time.Hour}}}
-	for _, f := range []*model.Field{declared, added} {
+	absent := &model.Field{ID: g.New(), Entity: e.ID, Name: "nick", Declared: true}
+	for _, f := range []*model.Field{declared, added, absent} {
 		b, err := EncodeField(f, plainTypes{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		got, err := DecodeField(f.Entity, f.Name, b, plainTypes{})
-		if err != nil || got.ID != f.ID || got.Declared != f.Declared || !value.Equal(got.Value, f.Value) {
+		if err != nil || got.ID != f.ID || got.Declared != f.Declared || (got.Value == nil) != (f.Value == nil) ||
+			f.Value != nil && !value.Equal(got.Value, f.Value) {
 			t.Errorf("field %s: %+v, %v", f.Name, got, err)
 			continue
 		}

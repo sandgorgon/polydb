@@ -1,0 +1,98 @@
+package engine
+
+import (
+	"sync"
+	"sync/atomic"
+
+	"github.com/sandgorgon/polydb/catalog"
+	"github.com/sandgorgon/polydb/txn"
+)
+
+// DB is one database. It is safe for concurrent use.
+type DB struct {
+	name string
+	eng  *Engine
+	mgr  *txn.Manager
+	cat  atomic.Pointer[catalog.Catalog]
+
+	wmu     sync.Mutex
+	waiters map[string]*waitList // PopWait waiters by field key
+}
+
+// Name returns the database's name.
+func (db *DB) Name() string { return db.name }
+
+// Catalog returns the current committed catalog.
+func (db *DB) Catalog() *catalog.Catalog { return db.cat.Load() }
+
+// TxOptions configure a transaction.
+type TxOptions struct {
+	ReadOnly bool
+	// User is recorded as the owner of entities the transaction creates.
+	User string
+}
+
+// Begin starts a transaction. It must end with Commit or Rollback.
+func (db *DB) Begin(opts TxOptions) *Tx {
+	return &Tx{
+		db:   db,
+		t:    db.mgr.Begin(opts.ReadOnly),
+		base: db.cat.Load(),
+		user: opts.User,
+		now:  db.eng.opts.Now(),
+	}
+}
+
+// Update runs fn in a read-write transaction and commits it if fn returns
+// nil. It doesn't retry on conflict; see Retry.
+func (db *DB) Update(fn func(*Tx) error) error {
+	return db.run(TxOptions{}, fn)
+}
+
+// View runs fn in a read-only transaction.
+func (db *DB) View(fn func(*Tx) error) error {
+	return db.run(TxOptions{ReadOnly: true}, fn)
+}
+
+func (db *DB) run(opts TxOptions, fn func(*Tx) error) error {
+	tx := db.Begin(opts)
+	if err := fn(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// Retry runs fn in read-write transactions until it commits without a
+// conflict, at most attempts times.
+func (db *DB) Retry(attempts int, fn func(*Tx) error) error {
+	var err error
+	for range max(attempts, 1) {
+		if err = db.Update(fn); !IsConflict(err) {
+			return err
+		}
+	}
+	return err
+}
+
+// setCatalog installs c if it is newer than the current catalog.
+func (db *DB) setCatalog(c *catalog.Catalog) {
+	for {
+		cur := db.cat.Load()
+		if c.Version() <= cur.Version() || db.cat.CompareAndSwap(cur, c) {
+			return
+		}
+	}
+}
+
+func (db *DB) close() error {
+	db.wmu.Lock()
+	for _, wl := range db.waiters {
+		for _, w := range wl.list {
+			w.closed = true
+			w.signal()
+		}
+	}
+	db.wmu.Unlock()
+	return db.mgr.Store().Close()
+}

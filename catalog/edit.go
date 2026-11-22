@@ -6,7 +6,6 @@ import (
 
 	"github.com/sandgorgon/polydb/keys"
 	"github.com/sandgorgon/polydb/model"
-	"github.com/sandgorgon/polydb/storage"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -446,11 +445,18 @@ func (e *Edit) DropIndex(name string) error {
 
 // --- commit ---
 
+// Writer receives the stored form of catalog changes: a storage.Batch or a
+// transaction.
+type Writer interface {
+	Set(key, value []byte)
+	Delete(key []byte)
+}
+
 // Commit writes the changes into b and returns the new catalog, whose
 // version is one more than the catalog the edit started from. The edit
-// must not be used afterwards. The caller applies b, together with any
-// data changes, as one atomic batch.
-func (e *Edit) Commit(b *storage.Batch) (*Catalog, error) {
+// must not be used afterwards. The caller commits b together with any
+// data changes, atomically.
+func (e *Edit) Commit(b Writer) (*Catalog, error) {
 	c := e.c
 	for dk := range e.dirty {
 		k := keys.Catalog(dk.typ, dk.id)

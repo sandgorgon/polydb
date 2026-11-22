@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 in progress on branch `phase-1`: values, encodings, in-memory storage, model and catalog done; engine API next.
+Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) complete on branch `phase-1`. Next: Phase 2 (Rhizome language). Until then, `default` and `check` expressions are rejected, and non-unique indexes are recorded but not built.
 Source requirements: [req.md](req.md)
 
 ---
@@ -230,3 +230,4 @@ None. All planning questions are settled; next step is Phase 0 (specifications).
 | 2026-11-22 | Catalog IDs in keys and stored types | Kinds, relation types and derived formats are referenced by ID; relation types are registered on first use. Renames rewrite one definition |
 | 2026-11-22 | Catalog lives in the database's store | Written in the same atomic batch as the data it goes with; transactions read an immutable cached snapshot |
 | 2026-11-22 | Field IDs assigned when a field is first written | `::id` always works and any field can be related at any time |
+| 2026-11-22 | Guarded reads for constraint checks | Snapshot isolation plus read guards on the keys and ranges a check depends on, so `unique`, `max out/in` and `restrict` hold under concurrency. Definition changes write a catalog-version key that every data writer guards |

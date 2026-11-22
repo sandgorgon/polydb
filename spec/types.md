@@ -438,3 +438,4 @@ None.
 - **XML:** the parsed form is the root element. Whitespace-only text, comments, processing instructions and directives are dropped. Adjacent text is merged. Namespaced names are written `{uri}local`, and namespace declarations keep their `xmlns:p` form.
 - **CSV/TSV:** every row must have the same number of fields. The header option (`list<map<text,text>>`) will come as a derived-format option with the catalog.
 - **Doc conformance:** a `doc<F>` value must carry format `F` exactly. A derived format's document is not accepted as its base format.
+- **Queue fields start empty:** a declared queue field never needs a value on `create`. An entity gets an empty queue of the declared type, including when `alter kind` adds a queue field.

@@ -40,7 +40,10 @@ type Field struct {
 	ID     value.ID
 	Entity value.ID
 	Name   string
-	Value  value.Value
+	// Value is nil when the field is absent: an optional declared field
+	// or an added field whose value was unset. The field keeps its ID, so
+	// relations attached to it survive.
+	Value value.Value
 	// Declared is true for fields the entity's kind declares. Their type,
 	// doc and options come from the kind.
 	Declared bool
