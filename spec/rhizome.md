@@ -458,7 +458,7 @@ find Person p
 - `x in coll` / `coll has x` test membership. `has` is the same test written the other way round, which reads better for sets: `p.tags has "eng"`.
 - `x is int`, `x is null`, `x is Person` (kind check) test types.
 - `matches` uses Go regular expressions (RE2 syntax): `p.email matches ".*@x\\.io$"`.
-- **Inside documents:** `p.config->server->port`, `p.config->"key with space"`, `p.items->[0]`. The result type is `any`.
+- **Inside documents:** `p.config->server->port`, `p.config->"key with space"`, `p.items->[0]`. Each format defines what the steps mean, and formats with a shape give typed results (§8.6).
 
 ### 8.2 Typing rules
 - Arithmetic follows types.md §10.3. `int` with `float` is an error until one side is cast: `cast(p.age as float) * 1.5`.
@@ -484,11 +484,28 @@ find Person p
 | Collections | `len`, `keys(m)`, `values(m)`, `first(l)`, `last(l)`, `slice(l, a, b)`, `sort(l)`, `contains` |
 | Queues | `peek(q)`, `len(q)`, `items(q)` (all elements in pop order, without popping) |
 | Graph | `degree(p, "knows", "out")` (direction `"out"`, `"in"` or `"both"`), `nodes(path)`, `rels(path)`, `len(path)` |
-| Docs | `parse(doc)` (the parsed value tree), `valid(text, format)` |
+| Docs | `parse(doc)` (the parsed value tree), `valid(text, format)`, `inner_text(e)` (text inside an XML element) |
 | Aggregates (after `group by`, or over the whole stream) | `count()`, `count(x)`, `sum`, `avg`, `min`, `max`, `collect(x)` (into a list), `collect_set(x)` |
 
 ### 8.5 Parameters
 `$name` values are supplied separately by the client (Go API, CLI `\set` command). Use them instead of building query text from user input; that prevents injection.
+
+
+### 8.6 Paths inside documents
+`->` steps into a `doc` value. The steps work on the parsed form (types.md §6.2), which is cached, and each base format defines what a step means. A step that finds nothing gives `null`, the same as reading an absent field.
+
+| Base format | `->name` or `->"name"` | `->[n]` | Other |
+|---|---|---|---|
+| json | object key | array position (from 0) | `->[expr]`: a text expression is a key, an int is a position |
+| xml | first child element with that name | nth child node (elements and text) | `->@name` or `->@"name"`: attribute value (text) |
+| csv / tsv | column by header name (header option only) | row, then column | |
+
+- **XML** paths start at the root element, so `p.config->server->@port` reads `<config><server port="80">`. A path that ends on an element gives the element record (`record{name, attrs, children}`), which can be read further with `.` (`…->server.children`). `inner_text(e)` joins all the text inside an element. Namespaced names use the `{uri}local` form as a quoted step: `->"{urn:x}item"`.
+- **CSV/TSV:** without a header, `->[2]->[0]` is row 2, column 0. With the header option, each row is a map, so `->[0]->email` works.
+- **Result types:**
+  - For a **base format** the result is `any`. Its type is checked at run time.
+  - For a **derived format** the result has the type declared in the format's shape. For `doc<invoice>`, `->total` is `decimal(12,2)` and `->lines->[0]->qty` is `int`, so type errors are reported before the query runs, and a step the shape doesn't declare is an error.
+- Paths in `define index` (`config->server->port`) use the same rules.
 
 ---
 
@@ -839,7 +856,8 @@ add_expr       = mul_expr { ( "+" | "-" | "++" | "--" ) mul_expr } ;
 mul_expr       = unary { ( "*" | "/" | "%" ) unary } ;
 unary          = "-" unary | postfix ;
 postfix        = primary { "." ident | "::" ident | "[" expr "]" | "->" doc_step } ;
-doc_step       = ident | text_lit | "[" expr "]" ;
+doc_step       = ident | text_lit | "[" expr "]"
+               | "@" ( ident | text_lit ) ;     (* xml attribute *)
 
 primary        = literal
                | ident | handle | param | id_lit
@@ -871,6 +889,7 @@ These are checked after parsing:
 - **A data step** (`update`, `delete`, `unrelate`, `push`, `pop`) ends the pipeline, except `pop … as`, which may be followed by `show`.
 - **`target` as a bare `ident`** is only valid inside a pipeline, where it names a variable.
 - **`grant` and `revoke`:** if a list is followed by `on`, it's a list of permissions; otherwise it's a role.
+- **`->@name`:** after `->`, `@name` is an XML attribute step, not a session handle. Steps must be valid for the document's format (§8.6); for derived formats this is checked before the query runs.
 - **`pop`:** `pop 10 from q` versus `pop q`: when `from` follows the first expression, that expression is the count.
 
 ---
@@ -886,3 +905,4 @@ None.
 4. Kinds are **extensible** by default: declared fields are enforced, and single entities may `add` their own extra fields. `closed` kinds forbid that. `set` never creates fields anywhere; new fields are always created with `add`. (Revised the same day: this replaces "closed by default", keeping typo protection while allowing per-entity fields as req.md describes.)
 5. Relation deletion is set per relation type: `on delete cascade` (default) or `restrict`.
 6. `+` is numeric only; `++` joins and `--` removes. In `update`, `+=` is numeric, and `++=` / `--=` work on text and collections.
+7. Doc paths: each base format defines its own `->` steps (XML gets element-name and `@attr` steps), and derived formats give typed results from their shape (§8.6).
