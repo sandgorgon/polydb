@@ -140,6 +140,9 @@ func (l *lexer) next() (Token, error) {
 		return Token{Kind: Ident, Text: name, Quoted: true, Pos: start, End: l.off}, nil
 	case r == '@':
 		l.advance()
+		if l.peek() == '"' { // ->@"attribute name"
+			return tok(Punct, "@")
+		}
 		if l.peek() == '@' {
 			return Token{}, syntaxErr(start, "@@ is reserved for persistent names")
 		}
