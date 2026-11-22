@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Phase 0 (specifications) complete (2026-11-22).** Next: Phase 1. No code written yet.
+Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 in progress on branch `phase-1`: values, encodings and in-memory storage done; model, catalog and engine API next.
 Source requirements: [req.md](req.md)
 
 ---
