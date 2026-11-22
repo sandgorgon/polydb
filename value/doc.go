@@ -135,13 +135,104 @@ func (f *DerivedFormat) Base() Format { return f.base }
 func (f *DerivedFormat) Shape() *Type { return f.shape }
 
 // Parse parses text with the base format and conforms the result to the
-// shape, so for example JSON objects become records.
+// shape, so for example JSON objects become records. On a json base, a
+// number at a decimal position of the shape is read exactly as a decimal
+// (2.50 stays 2.50) instead of as a float.
 func (f *DerivedFormat) Parse(text string) (Value, error) {
-	v, err := f.base.Parse(text)
+	var v Value
+	var err error
+	if f.base.Name() == "json" {
+		if v, err = parseJSONMode(text, true); err == nil {
+			v, err = settleNumbers(v, f.shape)
+		}
+	} else {
+		v, err = f.base.Parse(text)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return Conform(v, f.shape)
+}
+
+// settleNumbers turns the exact decimals of an exact JSON parse back into
+// floats, except where t expects a decimal. Rounding the exact value to
+// the nearest float gives the same float as parsing the text would.
+func settleNumbers(v Value, t *Type) (Value, error) {
+	var r *Type
+	if t != nil {
+		r = Required(t)
+	}
+	switch x := v.(type) {
+	case Decimal:
+		if wantsDecimal(r) {
+			return x, nil
+		}
+		f, _ := x.Rat().Float64()
+		return NewFloat(f), nil
+	case List:
+		var et *Type
+		if r != nil && (r.Code == CodeList || r.Code == CodeArray || r.Code.IsQueue()) {
+			et = r.Elem
+		}
+		elems := x.Values()
+		for i, e := range elems {
+			var err error
+			if elems[i], err = settleNumbers(e, et); err != nil {
+				return nil, err
+			}
+		}
+		return NewList(elems...)
+	case Map:
+		keys := x.Keys()
+		vals := make([]Value, len(keys))
+		for i, k := range keys {
+			var ft *Type
+			if r != nil {
+				switch r.Code {
+				case CodeMap:
+					ft = r.Elem
+				case CodeRecord:
+					if kt, ok := k.(Text); ok {
+						for _, fd := range r.Fields {
+							if fd.Name == kt.Go() {
+								ft = fd.Type
+							}
+						}
+					}
+				}
+			}
+			v, _ := x.Get(k)
+			var err error
+			if vals[i], err = settleNumbers(orNull(v), ft); err != nil {
+				return nil, err
+			}
+		}
+		return NewMap(keys, vals)
+	}
+	return v, nil
+}
+
+// wantsDecimal reports whether a value of type t should keep a JSON
+// number as a decimal.
+func wantsDecimal(t *Type) bool {
+	switch {
+	case t == nil:
+		return false
+	case t.Code == CodeDecimal:
+		return true
+	case t.Code == CodeUnion:
+		dec, flt := false, false
+		for _, a := range t.Alts {
+			switch Required(a).Code {
+			case CodeDecimal:
+				dec = true
+			case CodeFloat:
+				flt = true
+			}
+		}
+		return dec && !flt
+	}
+	return false
 }
 
 // --- json ---
@@ -149,10 +240,14 @@ func (f *DerivedFormat) Parse(text string) (Value, error) {
 // parseJSON parses JSON: objects become map<text, any>, arrays list<any>,
 // numbers int when whole and in range (else float), strings text. A
 // repeated object key keeps its last value.
-func parseJSON(s string) (Value, error) {
+func parseJSON(s string) (Value, error) { return parseJSONMode(s, false) }
+
+// parseJSONMode parses JSON. With exact set, numbers that aren't whole
+// become exact decimals instead of floats.
+func parseJSONMode(s string, exact bool) (Value, error) {
 	dec := json.NewDecoder(strings.NewReader(s))
 	dec.UseNumber()
-	v, err := jsonValue(dec)
+	v, err := jsonValue(dec, exact)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +257,7 @@ func parseJSON(s string) (Value, error) {
 	return v, nil
 }
 
-func jsonValue(dec *json.Decoder) (Value, error) {
+func jsonValue(dec *json.Decoder, exact bool) (Value, error) {
 	tok, err := dec.Token()
 	if err != nil {
 		if err == io.EOF {
@@ -178,13 +273,18 @@ func jsonValue(dec *json.Decoder) (Value, error) {
 	case string:
 		return NewText(t)
 	case json.Number:
+		if exact {
+			if d, ok := jsonDecimal(string(t)); ok {
+				return d, nil
+			}
+		}
 		return jsonNumber(string(t))
 	case json.Delim:
 		switch t {
 		case '[':
 			var elems []Value
 			for dec.More() {
-				v, err := jsonValue(dec)
+				v, err := jsonValue(dec, exact)
 				if err != nil {
 					return nil, err
 				}
@@ -203,7 +303,7 @@ func jsonValue(dec *json.Decoder) (Value, error) {
 					return nil, err
 				}
 				k := norm.NFC.String(kt.(string))
-				v, err := jsonValue(dec)
+				v, err := jsonValue(dec, exact)
 				if err != nil {
 					return nil, err
 				}
@@ -244,6 +344,40 @@ func jsonNumber(s string) (Value, error) {
 		}
 	}
 	return NewFloat(f), nil
+}
+
+// jsonDecimal reads a JSON number that isn't a whole int as an exact
+// decimal. It reports false for whole numbers, which stay ints, and for
+// numbers too large for a decimal.
+func jsonDecimal(s string) (Decimal, bool) {
+	if v, err := jsonNumber(s); err == nil && v.Code() == CodeInt {
+		return Decimal{}, false
+	}
+	mant, exp := s, 0
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		if !smallExponent(s) {
+			return Decimal{}, false
+		}
+		e, err := strconv.Atoi(strings.TrimPrefix(s[i+1:], "+"))
+		if err != nil {
+			return Decimal{}, false
+		}
+		mant, exp = s[:i], e
+	}
+	d, err := ParseDecimal(mant)
+	if err != nil {
+		return Decimal{}, false
+	}
+	scale := d.Scale() - exp
+	coef := d.Coefficient()
+	if scale < 0 {
+		coef.Mul(coef, pow10(-scale))
+		scale = 0
+	}
+	if d, err = NewDecimal(coef, scale); err != nil {
+		return Decimal{}, false
+	}
+	return d, true
 }
 
 func smallExponent(s string) bool {

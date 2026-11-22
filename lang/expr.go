@@ -311,6 +311,14 @@ func (p *parser) primary() (Expr, error) {
 				return nil, syntaxErr(t.Pos, "exists takes 1 argument")
 			}
 			return &Exists{at, args[0]}, nil
+		case "sort":
+			// sort(list) is a function; the keyword names the pipeline
+			// step everywhere else.
+			if p.peekTok(1).Is("(") {
+				p.advance()
+				args, err := p.args()
+				return &Call{at, t.Text, args}, err
+			}
 		case "cast":
 			p.advance()
 			if err := p.expect("("); err != nil {

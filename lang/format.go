@@ -812,7 +812,11 @@ func (f *formatter) expr(e Expr, min int) {
 		f.expr(e.X, precPostfix)
 		f.docStep(e.Step)
 	case *Call:
-		f.name(e.Name)
+		if e.Name == "sort" {
+			f.w("sort")
+		} else {
+			f.name(e.Name)
+		}
 		f.args(e.Args)
 	case *If:
 		f.w("if")

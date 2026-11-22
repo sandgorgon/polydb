@@ -927,3 +927,16 @@ None.
    - `find Person` with no variable, or a pattern node named after a kind (`~works_at~> Company`), is an error that suggests adding a variable.
    - In `update`, a bare name that is both a pipeline variable and a field of the target is an error; write `p.name` for the field.
    - `limit`, `skip`, `default`, `history keep` and `set` values must be constants: no variables or fields, though parameters are fine.
+10. Evaluation clarifications (Phase 2, 2026-11-22):
+   - `int` overflow is a `limit` error (use `bigint` or `decimal`). Division by zero is a `type` error, except for floats, which give `inf` or `nan`.
+   - Decimal division is exact when the result terminates. Otherwise it keeps 16 digits after the point (or more, if an operand has more), rounded half to even. Trailing zeros beyond the operands' own digits are dropped, so `10.00d / 4` is `2.50d` and `1d / 3` is `0.3333333333333333d`.
+   - `round(x, n)` rounds half away from zero for every number type, and a negative `n` rounds left of the point (`round(1250, -2)` is `1300`). `cast` to an integer type rounds the same way. Fitting a value to `decimal(P,S)` uses the type's half-to-even rounding (types.md §4.5).
+   - `and`, `or` and `not` use three-valued logic: `false and null` is false, `true or null` is true, `not null` is null, and otherwise a null operand gives null. `where` then treats null as false.
+   - `matches` finds the pattern anywhere in the text; anchor it with `^` and `$` to match the whole text.
+   - `x is T` tests the value's own type without conversions: `1 is int` is true and `1 is decimal` is false. `x is ref<K>` also checks the kind of the entity the ref points to.
+   - A list position outside the list, a negative position, or a missing map key gives null. `substr` and `slice` clamp out-of-range positions.
+   - `add_months` keeps the day of the month but clamps it to the last day of a shorter month: `add_months(d"2026-01-31", 1)` is `d"2026-02-28"`.
+   - Aggregates skip nulls. Over no values, `count` gives 0, `collect` an empty list, `collect_set` an empty set, and the others null.
+   - `now()` and `today()` are fixed for the whole statement, in UTC.
+   - `typeof(x)` gives the type family (`"int"`, `"list"`), or `"doc<F>"` for documents.
+   - A path value is a list alternating node refs and relation IDs. `len(path)` counts relations, `nodes(path)` and `rels(path)` pick them out.

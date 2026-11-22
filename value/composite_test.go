@@ -341,10 +341,25 @@ func TestDerivedFormat(t *testing.T) {
 	if _, err := Conform(d, DocOf("json")); err == nil {
 		t.Error("invoice doc accepted as doc<json>")
 	}
-	for _, bad := range []string{`{"number": "A1"}`, `{"number": 1, "total": 1, "lines": []}`, `{"number": "A", "total": 1.5, "lines": []}`} {
+	for _, bad := range []string{`{"number": "A1"}`, `{"number": 1, "total": 1, "lines": []}`, `{"number": "A", "total": "1.5", "lines": []}`} {
 		if _, err := NewDoc(inv, bad); err == nil {
 			t.Errorf("accepted %s", bad)
 		}
+	}
+	// JSON numbers at decimal positions are read exactly; elsewhere they
+	// stay floats.
+	mixed := must(NewDerivedFormat("mixed", jsonFormat(),
+		MustParseType("record{d: decimal, f: float, a: any, l: list<decimal>, u: union<decimal | text>}")))
+	v, err = mixed.Parse(`{"d": 0.12345678901234567890123, "f": 0.5, "a": 2.5, "l": [1.5, 2e-3, 3], "u": 1.10}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{d: 0.12345678901234567890123d, f: 0.5, a: 2.5, l: [1.5d, 0.002d, 3d], u: 1.10d}`; v.String() != want {
+		t.Errorf("got  %s\nwant %s", v, want)
+	}
+	v, err = inv.Parse(`{"number": "A", "total": 1.5, "lines": []}`)
+	if err != nil || v.String() != `{number: "A", total: 1.50d, lines: []}` {
+		t.Errorf("total 1.5: %v, %v", v, err)
 	}
 }
 

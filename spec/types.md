@@ -194,6 +194,8 @@ A format is a named entry in a database's catalog. There are two kinds:
 | xml | element → `record{ name: text, attrs: map<text,text>, children: list<any> }`, text node → `text` |
 | csv / tsv | `list<list<text>>`; with a header option, `list<map<text,text>>` |
 
+A **derived format based on json** reads numbers exactly where its shape expects a decimal: `"total": 2.50` in a `decimal(12,2)` field is `2.50`, not the float 2.5 (decided 2026-11-22). Elsewhere, numbers follow the json rules above.
+
 ---
 
 ## 7. Collections
