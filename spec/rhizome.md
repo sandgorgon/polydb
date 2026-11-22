@@ -490,7 +490,6 @@ find Person p
 ### 8.5 Parameters
 `$name` values are supplied separately by the client (Go API, CLI `\set` command). Use them instead of building query text from user input; that prevents injection.
 
-
 ### 8.6 Paths inside documents
 `->` steps into a `doc` value. The steps work on the parsed form (types.md §6.2), which is cached, and each base format defines what a step means. A step that finds nothing gives `null`, the same as reading an absent field.
 
