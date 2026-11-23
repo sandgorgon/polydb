@@ -12,6 +12,11 @@ type memtable struct {
 	list *skiplist
 	size atomic.Int64 // approximate bytes
 
+	// Set when the memtable stops taking writes: its last sequence
+	// number, and the first log segment written after it.
+	maxSeq uint64
+	logSeg uint64
+
 	mu         sync.RWMutex
 	tombstones []tombstone
 }
