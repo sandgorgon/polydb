@@ -46,6 +46,9 @@ func (x *executor) query(pl *lang.Pipeline) (*Result, error) {
 		return nil, errAt(pl, "limit", "the result has more than %d rows (max_rows); add a limit step or raise max_rows", max)
 	}
 	for _, c := range x.info.Columns[pl] {
+		if pl.AsOf != nil && (c.Type.Form == lang.FormEntity || c.Type.Form == lang.FormNode || c.Type.Form == lang.FormRelation) {
+			return nil, errAt(pl, "unsupported", "an as of query shows fields (like p.name), not whole entities or relations: %s", c.Name)
+		}
 		res.Columns = append(res.Columns, Column{c.Name, c.Type})
 	}
 	for _, r := range rows {
@@ -67,7 +70,11 @@ func (x *executor) query(pl *lang.Pipeline) (*Result, error) {
 // whether the pipeline ended with a data step that returns no rows.
 func (x *executor) pipeline(pl *lang.Pipeline) ([]prow, []string, int, bool, error) {
 	if pl.AsOf != nil {
-		return nil, nil, 0, false, errAt(pl.AsOf, "unsupported", "as of queries need history, which arrives in a later phase")
+		restore, err := x.asOf(pl)
+		if err != nil {
+			return nil, nil, 0, false, err
+		}
+		defer restore()
 	}
 	began := time.Now()
 	rows, names, err := x.source(pl)
@@ -225,13 +232,22 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
 			} else {
 				filter = x.ctx.Access != nil
 			}
-			err := x.tx.Entities(kv.Kind, func(id value.ID) bool {
+			entities := x.tx.Entities
+			if x.past != nil {
+				entities = x.past.Entities
+			}
+			err := entities(kv.Kind, func(id value.ID) bool {
 				if stop = x.tick(pl); stop != nil {
 					return false
 				}
 				if filter {
 					var ok bool
-					if _, ok, stop = x.graph.entity(id); stop != nil || !ok {
+					if x.past != nil {
+						_, ok, stop = (&pastGraph{a: x.past, g: x.graph}).entity(id)
+					} else {
+						_, ok, stop = x.graph.entity(id)
+					}
+					if stop != nil || !ok {
 						return stop == nil
 					}
 				}
@@ -297,11 +313,21 @@ func (x *executor) inList(e lang.Expr, kind string) ([]value.Value, error) {
 			continue
 		}
 		seen[id] = true
-		ent, ok, err := x.graph.entity(id)
+		var k *model.Kind
+		var ok bool
+		var err error
+		if x.past != nil {
+			k, ok, err = (&pastGraph{a: x.past, g: x.graph}).entity(id)
+		} else {
+			var ent *engine.Entity
+			if ent, ok, err = x.graph.entity(id); ok {
+				k = ent.Kind
+			}
+		}
 		if err != nil {
 			return nil, fail(e, err)
 		}
-		if ok && (kind == "" || ent.Kind != nil && ent.Kind.Name == kind) {
+		if ok && (kind == "" || k != nil && k.Name == kind) {
 			out = append(out, value.Ref{Target: id})
 		}
 	}

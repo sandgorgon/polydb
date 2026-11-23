@@ -258,6 +258,10 @@ func (tx *Tx) save(st *entState) error {
 		}
 	}
 
+	if err := tx.recordHistory(st); err != nil {
+		return err
+	}
+
 	// Side keys: compute before and after, then write the difference.
 	var before, after map[string][]byte
 	if !st.isNew {

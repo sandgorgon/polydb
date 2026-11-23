@@ -108,8 +108,6 @@ pop @w.jobs wait 10ms;
 // => null
 
 // Things later phases add.
-history @a.balance;
-// error unsupported: history
 
 // Security statements don't run inside transactions.
 begin;

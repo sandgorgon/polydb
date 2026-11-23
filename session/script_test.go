@@ -38,7 +38,8 @@ import (
 // changes. A statement without expectations must succeed. Each script
 // runs in a fresh engine as the admin user, with database "test" in use
 // and a fixed clock (2026-11-22T12:00:00Z). "// as name" continues in a
-// new session for that user, using "test" if the user may.
+// new session for that user, using "test" if the user may. "// clock
+// <RFC 3339 time>" moves the clock, for history.
 //
 // IDs change from run to run, so rendered rows show every ID as #ID.
 //
@@ -81,8 +82,17 @@ func (e *expect) empty() bool { return !e.hasRows && !e.hasErr && !e.hasAff && l
 
 func newScriptSession(t *testing.T, disk bool) *Session {
 	t.Helper()
-	clock := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
-	o := engine.Options{Now: func() time.Time { return clock }, MaxPopWait: time.Minute,
+	s, _ := newClockedSession(t, disk)
+	return s
+}
+
+// newClockedSession also returns the engine's clock, which the caller may
+// move.
+func newClockedSession(t *testing.T, disk bool) (*Session, *time.Time) {
+	t.Helper()
+	clock := new(time.Time)
+	*clock = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	o := engine.Options{Now: func() time.Time { return *clock }, MaxPopWait: time.Minute,
 		PasswordIterations: security.MinIterations}
 	if disk {
 		o.Dir, o.FS = "/data", vfs.NewMem()
@@ -98,7 +108,7 @@ func newScriptSession(t *testing.T, disk bool) *Session {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.Close)
-	return s
+	return s, clock
 }
 
 func runScript(t *testing.T, file string, disk bool) {
@@ -106,13 +116,25 @@ func runScript(t *testing.T, file string, disk bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newScriptSession(t, disk)
+	s, clock := newClockedSession(t, disk)
 	lines := strings.Split(string(data), "\n")
 	var out []string // the rewritten file, with -update
 	var chunk []string
 	chunkStart := 1
 	for i := 0; i < len(lines); {
 		line := strings.TrimSpace(lines[i])
+		if when, ok := strings.CutPrefix(line, "// clock "); ok {
+			runChunk(t, s, file, chunkStart, strings.Join(chunk, "\n"), &expect{})
+			c, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(when))
+			if err != nil {
+				t.Fatalf("%s:%d: %v", file, i+1, err)
+			}
+			*clock = c
+			out = append(out, lines[i])
+			chunk, chunkStart = nil, i+2
+			i++
+			continue
+		}
 		if user, ok := strings.CutPrefix(line, "// as "); ok {
 			runChunk(t, s, file, chunkStart, strings.Join(chunk, "\n"), &expect{})
 			s = New(s.eng, strings.TrimSpace(user))

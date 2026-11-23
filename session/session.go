@@ -466,8 +466,6 @@ func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 			}
 			return r.env(nil).security(st, params)
 		}
-	case *lang.History:
-		return nil, sessionErr(st, "unsupported", "history arrives in a later phase")
 	}
 	return r.inTx(ctx, st, params)
 }

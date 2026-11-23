@@ -59,6 +59,9 @@ func (tx *Tx) AlterKind(name string, fn func(k *model.Kind) error) error {
 	if err := tx.validateExprs(newK.Fields, fieldTypes(newK.Fields)); err != nil {
 		return tx.fail(err)
 	}
+	if err := tx.historyBaseline(old, newK); err != nil {
+		return tx.fail(err)
+	}
 	if sameData(old, newK) {
 		return nil
 	}
@@ -187,6 +190,9 @@ func (tx *Tx) DropKind(name string) error {
 	}
 	e, err := tx.editing()
 	if err != nil {
+		return err
+	}
+	if err := tx.dropKindHistory(k.ID); err != nil {
 		return err
 	}
 	return wrap(CodeConstraint, e.DropKind(name))

@@ -22,7 +22,9 @@
 //	                                           name = field) or a unique index
 //	                                           (name empty), values are key
 //	                                           encodings (value.Key)
-//	0x40 history  (opt-in field history)
+//	0x40 history  0x40 entity len name time    opt-in field history (history.go)
+//	0x41 histkind 0x41 kind entity
+//	0x42 life     0x42 entity
 //
 // An entity's fields are contiguous under its field prefix, so reading a
 // whole entity is one short range scan. Kinds and relation types appear in

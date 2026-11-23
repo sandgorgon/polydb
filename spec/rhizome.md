@@ -153,7 +153,7 @@ define kind Person "A human being" {
   tags     : set<text> default {}
   manager  : ref<Person>? on delete restrict
   inbox    : queue.priority<text>
-  salary   : decimal(12,2)? history keep 365d
+  salary   : decimal(12,2)? history keep 365 * 24h
 }
 ```
 

@@ -139,6 +139,7 @@ type executor struct {
 	info  *lang.Info
 	tx    *engine.Tx
 	graph *graph
+	past  *engine.AsOf // set while an as of pipeline runs
 	ev    *lang.Evaluator
 	now   time.Time
 	ticks int
@@ -290,6 +291,8 @@ func (x *executor) stmt(s lang.Stmt) (*Result, error) {
 		return &Result{Columns: []Column{{"value", lang.Static{Type: value.TypeAny}}}, Rows: [][]any{{v}}}, nil
 	case *lang.Pipeline:
 		return x.query(s)
+	case *lang.History:
+		return x.historyStmt(s)
 	}
 	return nil, errAt(s, "unsupported", "%s statements aren't handled by the executor", stmtName(s))
 }

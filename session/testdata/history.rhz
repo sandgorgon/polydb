@@ -1,0 +1,122 @@
+// Field history and time travel (spec/rhizome.md §10).
+
+define kind Person {
+  name   : text
+  salary : int? history
+  title  : text? history keep 720h
+  note   : text?
+};
+define kind Account history {
+  owner   : text
+  balance : int
+};
+
+// clock 2026-01-01T00:00:00Z
+create Person @alice { name: "Alice", salary: 100, title: "dev", note: "n1" };
+create Account @a1 { owner: "Alice", balance: 10 };
+create Account @a2 { owner: "Bob", balance: 20 };
+
+// clock 2026-02-01T00:00:00Z
+update @alice set salary = 120;
+update @a1 set balance = 15;
+
+// clock 2026-03-01T00:00:00Z
+update @alice set salary = 150, title = "lead";
+update @alice set note = "n2";
+update @alice unset salary;
+delete @a2;
+
+// clock 2026-03-15T00:00:00Z
+// Every version, oldest first. Unset reads as null.
+history @alice.salary;
+// => t"2026-01-01T00:00:00Z" | 100
+// => t"2026-02-01T00:00:00Z" | 120
+// => t"2026-03-01T00:00:00Z" | null
+
+// Setting a field to the value it has adds no version.
+update @alice set title = "lead";
+history @alice.title;
+// => t"2026-01-01T00:00:00Z" | "dev"
+// => t"2026-03-01T00:00:00Z" | "lead"
+
+// Fields without history have none to show.
+history @alice.note;
+// error not_found: note has no history
+history @alice.nope;
+// error not_found
+
+// The past: fields with history read as they were.
+find Person p as of t"2026-01-15T00:00:00Z" | show p.name;
+// error not_found: name has no history
+find Person p as of t"2026-01-15T00:00:00Z" | show p.salary;
+// => 100
+find Person p as of t"2026-02-15T00:00:00Z" | show p.salary;
+// => 120
+find Person p as of t"2026-03-10T00:00:00Z" | show p.salary;
+// => null
+
+// Before an entity existed, it isn't returned.
+find Person p as of t"2025-12-01T00:00:00Z" | show count();
+// => 0
+
+// A kind with history keeps deleted entities in the past.
+find Account a as of t"2026-02-15T00:00:00Z" | sort a.owner | show a.owner, a.balance;
+// => "Alice" | 15
+// => "Bob" | 20
+find Account a | show count();
+// => 1
+find Account a as of t"2026-03-10T00:00:00Z" | show a.owner, a.balance;
+// => "Alice" | 15
+find Account a as of t"2026-02-15T00:00:00Z" | where a.balance > 12 | show a.owner, a::created;
+// => "Alice" | t"2026-01-01T00:00:00Z"
+// => "Bob" | t"2026-01-01T00:00:00Z"
+
+// What has no history can't be read in the past.
+find Account a as of t"2026-02-15T00:00:00Z" | show a::updated;
+// error not_found: ::updated has no history
+find Account a as of t"2026-02-15T00:00:00Z" | show a;
+// error unsupported: shows fields
+find Account a as of t"2026-02-15T00:00:00Z" | match a ~knows~> b | show b.owner;
+// error unsupported: can't follow
+find Account a as of t"2026-02-15T00:00:00Z" | update a set balance = 0;
+// error unsupported: can't change data
+find Account a as of "yesterday" | show a.owner;
+// error type
+
+// Retention: title keeps 30 days of history. Versions replaced before
+// then are dropped, and older times can't be read.
+// clock 2026-06-01T00:00:00Z
+update @alice set title = "cto";
+history @alice.title;
+// => t"2026-03-01T00:00:00Z" | "lead"
+// => t"2026-06-01T00:00:00Z" | "cto"
+find Person p as of t"2026-03-15T00:00:00Z" | show p.title;
+// error not_found: keeps history for 720h
+find Person p as of t"2026-05-20T00:00:00Z" | show p.title;
+// => "lead"
+
+// Turning history on records the current values, so it starts complete.
+alter kind Person alter note: text? history;
+history @alice.note;
+// => t"2026-06-01T00:00:00Z" | "n2"
+// clock 2026-06-02T00:00:00Z
+update @alice set note = "n3";
+find Person p as of t"2026-06-01T12:00:00Z" | show p.note;
+// => "n2"
+
+// A field added to one entity can have history of its own.
+create @loose { x: 1 } add y: int = 5 history;
+// clock 2026-06-03T00:00:00Z
+update @loose set y = 6;
+history @loose.y;
+// => t"2026-06-02T00:00:00Z" | 5
+// => t"2026-06-03T00:00:00Z" | 6
+
+// Reading the past needs read permission.
+create user eve password "pw";
+grant read on kind Account to eve;
+// as eve
+find Account a as of t"2026-02-15T00:00:00Z" | show count();
+// => 2
+find Person p as of t"2026-02-15T00:00:00Z" | show p.salary;
+// error permission

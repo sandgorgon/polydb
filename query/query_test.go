@@ -325,7 +325,7 @@ func TestDefinitionsAndErrors(t *testing.T) {
 	s.wantErr(`drop kind Person`, "constraint", "")
 
 	// Things later phases add.
-	s.wantErr(`find Person p as of t"2026-01-01T00:00:00Z"`, "unsupported", "history")
+	s.wantErr(`find Person p as of t"2026-01-01T00:00:00Z"`, "unsupported", "shows fields")
 	s.wantErr(`create user ramon password "x"`, "unsupported", "security")
 	s.wantErr(`find Person p | show search(p.name, "x")`, "unsupported", "full-text")
 }
