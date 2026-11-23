@@ -27,7 +27,7 @@ func (a access) Can(p security.Perm, kind *model.Kind) bool {
 	return a.sec.Allowed(a.user, p, a.db, id)
 }
 
-func (s *Session) access() access {
+func (s *env) access() access {
 	return access{sec: s.eng.Security(), user: s.user, db: s.Database()}
 }
 
@@ -49,7 +49,7 @@ func (s *Session) needAdmin(st lang.Node, what string) error {
 
 // need requires p on a kind of the current database (nil: database
 // level).
-func (s *Session) need(st lang.Node, p security.Perm, kind *model.Kind) error {
+func (s *env) need(st lang.Node, p security.Perm, kind *model.Kind) error {
 	if s.access().Can(p, kind) {
 		return nil
 	}
@@ -62,7 +62,7 @@ func (s *Session) need(st lang.Node, p security.Perm, kind *model.Kind) error {
 // authorize checks the permissions a statement needs before it runs.
 // Data statements and queries are checked by the executor as they touch
 // entities; definitions and introspection are checked here.
-func (s *Session) authorize(qc *query.Context, st lang.Stmt) error {
+func (s *env) authorize(qc *query.Context, st lang.Stmt) error {
 	cat := qc.Tx.Catalog()
 	kind := func(name string) *model.Kind {
 		k, _ := cat.Kind(name)
@@ -115,7 +115,7 @@ func (s *Session) authorize(qc *query.Context, st lang.Stmt) error {
 
 // constant checks and evaluates an expression that uses no rows, such as
 // a password.
-func (s *Session) constant(e lang.Expr, params map[string]value.Value) (value.Value, error) {
+func (s *env) constant(e lang.Expr, params map[string]value.Value) (value.Value, error) {
 	info, _, err := lang.CheckExpr(&lang.Env{Params: params}, e, nil)
 	if err != nil {
 		return nil, err
@@ -124,7 +124,7 @@ func (s *Session) constant(e lang.Expr, params map[string]value.Value) (value.Va
 	return ev.Eval(e, nil)
 }
 
-func (s *Session) password(e lang.Expr, params map[string]value.Value) (string, error) {
+func (s *env) password(e lang.Expr, params map[string]value.Value) (string, error) {
 	v, err := s.constant(e, params)
 	if err != nil {
 		return "", err
@@ -136,7 +136,7 @@ func (s *Session) password(e lang.Expr, params map[string]value.Value) (string, 
 	return t.Go(), nil
 }
 
-func (s *Session) secErr(st lang.Node, err error) error {
+func (s *env) secErr(st lang.Node, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -144,15 +144,12 @@ func (s *Session) secErr(st lang.Node, err error) error {
 		msg := err.Error()[len(code)+2:]
 		return sessionErr(st, code, "%s", msg)
 	}
-	return s.fail(st, err)
+	return fail(st, err)
 }
 
 // security runs users, roles, grants and keys statements. They change
 // the system store at once and can't run inside a transaction.
-func (s *Session) security(st lang.Stmt, params map[string]value.Value) (*query.Result, error) {
-	if s.tx != nil {
-		return nil, sessionErr(st, "constraint", "users, roles and grants can't change inside a transaction")
-	}
+func (s *env) security(st lang.Stmt, params map[string]value.Value) (*query.Result, error) {
 	sec := s.eng.Security()
 	var err error
 	switch st := st.(type) {
@@ -204,7 +201,7 @@ func (s *Session) security(st lang.Stmt, params map[string]value.Value) (*query.
 	return &query.Result{}, nil
 }
 
-func (s *Session) grant(st *lang.Grant) error {
+func (s *env) grant(st *lang.Grant) error {
 	sec := s.eng.Security()
 	if st.Role != "" {
 		if err := s.needAdmin(st, "granting roles"); err != nil {
@@ -242,13 +239,13 @@ func (s *Session) grant(st *lang.Grant) error {
 
 // scope resolves a grant's scope. A kind is given as db.Kind, or Kind in
 // the current database.
-func (s *Session) scope(st *lang.Grant) (security.Scope, error) {
+func (s *env) scope(st *lang.Grant) (security.Scope, error) {
 	switch st.Scope.What {
 	case "server":
 		return security.Scope{Level: security.ServerLevel}, nil
 	case "database":
 		if _, err := s.eng.Database(st.Scope.Database); err != nil {
-			return security.Scope{}, s.fail(st, err)
+			return security.Scope{}, fail(st, err)
 		}
 		return security.Scope{Level: security.DatabaseLevel, Database: st.Scope.Database}, nil
 	}
@@ -261,7 +258,7 @@ func (s *Session) scope(st *lang.Grant) (security.Scope, error) {
 	}
 	db, err := s.eng.Database(dbName)
 	if err != nil {
-		return security.Scope{}, s.fail(st, err)
+		return security.Scope{}, fail(st, err)
 	}
 	k, ok := db.Catalog().Kind(st.Scope.Kind)
 	if !ok {
@@ -271,7 +268,7 @@ func (s *Session) scope(st *lang.Grant) (security.Scope, error) {
 }
 
 // scopeText describes a scope, naming kinds by their current name.
-func (s *Session) scopeText(sc security.Scope) string {
+func (s *env) scopeText(sc security.Scope) string {
 	switch sc.Level {
 	case security.ServerLevel:
 		return "server"
@@ -288,7 +285,7 @@ func (s *Session) scopeText(sc security.Scope) string {
 }
 
 // showSecurity runs show users, roles, grants and keys.
-func (s *Session) showSecurity(st *lang.ShowStmt) (*query.Result, error) {
+func (s *env) showSecurity(st *lang.ShowStmt) (*query.Result, error) {
 	sec := s.eng.Security()
 	switch st.What {
 	case "users":
@@ -351,6 +348,18 @@ func (s *Session) showSecurity(st *lang.ShowStmt) (*query.Result, error) {
 			add(r, k.Fingerprint, k.Label)
 		}
 		return r, nil
+	case "sessions":
+		if err := s.needAdmin(st, "show sessions"); err != nil {
+			return nil, err
+		}
+		if s.Directory == nil {
+			return nil, sessionErr(st, "unsupported", "show sessions needs the server")
+		}
+		r := table("id", "user", "database", "remote", "connected", "requests")
+		for _, in := range s.Directory() {
+			add(r, in.ID, in.User, in.Database, in.Remote, value.Duration(time.Since(in.Connected).Round(time.Second)), in.Requests)
+		}
+		return r, nil
 	}
-	return nil, sessionErr(st, "unsupported", "show %s arrives with the server", st.What)
+	return nil, sessionErr(st, "unsupported", "show %s isn't supported", st.What)
 }

@@ -20,7 +20,7 @@ import (
 // runs the statement in a scratch transaction that is rolled back, and
 // reports what would change or what blocks it. explain analyze runs the
 // statement for real and reports rows and timings.
-func (s *Session) explain(ctx context.Context, qc *query.Context, st *lang.Explain) (*query.Result, error) {
+func (s *env) explain(ctx context.Context, qc *query.Context, st *lang.Explain) (*query.Result, error) {
 	switch inner := st.Stmt.(type) {
 	case *lang.Explain:
 		return nil, sessionErr(st, "syntax", "explain can't be nested")
@@ -46,7 +46,7 @@ func (s *Session) explain(ctx context.Context, qc *query.Context, st *lang.Expla
 }
 
 // plan describes a pipeline's steps without running it.
-func (s *Session) plan(qc *query.Context, pl *lang.Pipeline) (*query.Result, error) {
+func (s *env) plan(qc *query.Context, pl *lang.Pipeline) (*query.Result, error) {
 	info, err := lang.Check(envOf(qc), pl)
 	if err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func stepName(st lang.Step) string {
 }
 
 // analyze runs a pipeline and reports each step's rows and time.
-func (s *Session) analyze(qc *query.Context, pl *lang.Pipeline) (*query.Result, error) {
+func (s *env) analyze(qc *query.Context, pl *lang.Pipeline) (*query.Result, error) {
 	r := table("step", "rows", "time")
 	traced := *qc
 	traced.Trace = func(step lang.Step, rows int, d time.Duration) {
@@ -149,7 +149,7 @@ func (s *Session) analyze(qc *query.Context, pl *lang.Pipeline) (*query.Result, 
 // dryRun runs a data statement in a scratch transaction and reports what
 // it would do. The scratch transaction sees committed data only, not the
 // session's open transaction.
-func (s *Session) dryRun(qc *query.Context, st lang.Stmt) (*query.Result, error) {
+func (s *env) dryRun(qc *query.Context, st lang.Stmt) (*query.Result, error) {
 	scratch := s.db.Begin(engine.TxOptions{User: s.user})
 	defer scratch.Rollback()
 	sc := *qc

@@ -974,7 +974,7 @@ None.
    - Grants on a kind follow it when it is renamed. `show grants for x` lists x's grants and those of its roles; users who aren't admins see only their own.
    - The built-in user `admin` has admin on the server and can't be dropped or lose that grant.
 12. Sessions (Phase 2, 2026-11-22):
-   - **Any error inside a transaction aborts it.** Later statements fail until `rollback`, and `commit` rolls back and reports `conflict`. This stops the rest of a script from running as if the failed statement had worked.
+   - **Any error inside a transaction aborts it.** Later statements fail with `txn_aborted` until `rollback`, and `commit` rolls back and reports `txn_aborted` too (protocol.md §6.3). This stops the rest of a script from running as if the failed statement had worked.
    - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.
    - `create database`, `drop database` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.

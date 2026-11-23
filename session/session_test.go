@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/sandgorgon/polydb/lang"
+	"github.com/sandgorgon/polydb/query"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -70,3 +73,161 @@ func TestCancel(t *testing.T) {
 }
 
 func itoa(i int) string { return value.Int(i).String() }
+
+// run executes a script in a request and returns the results.
+func runIn(t *testing.T, r *Request, src string) ([]*query.Result, error) {
+	t.Helper()
+	stmts, err := lang.ParseScript(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []*query.Result
+	for _, st := range stmts {
+		res, err := r.Exec(context.Background(), st, nil)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, res)
+	}
+	return out, nil
+}
+
+func TestRequestsAndTransactions(t *testing.T) {
+	s := newScriptSession(t)
+	ctx := context.Background()
+	if _, err := s.Exec(ctx, `define kind K { a: int }`, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	// A request that begins a transaction leaves it open for later ones.
+	r1, _ := s.Request(nil)
+	if _, err := runIn(t, r1, `begin; create K @x { a: 1 }`); err != nil {
+		t.Fatal(err)
+	}
+	id, state := r1.Txn()
+	if id == nil || state != "open" {
+		t.Fatalf("after begin: %v %s", id, state)
+	}
+	r1.Close()
+
+	// Handles bound in the transaction aren't visible outside it yet.
+	if _, err := s.Exec(ctx, `find @x as k`, nil); err == nil {
+		t.Error("an uncommitted handle is visible outside its transaction")
+	}
+
+	// The transaction runs one request at a time.
+	r2, err := s.Request(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Request(id); codeOf(err) != "txn_busy" {
+		t.Errorf("second request: %v", err)
+	}
+	res, err := runIn(t, r2, `find @x as k | show k.a`)
+	if err != nil || len(res[0].Rows) != 1 {
+		t.Fatalf("inside: %v %v", res, err)
+	}
+	// A second transaction runs alongside the first.
+	r3, _ := s.Request(nil)
+	if _, err := runIn(t, r3, `begin; create K @y { a: 2 }`); err != nil {
+		t.Fatal(err)
+	}
+	id3, _ := r3.Txn()
+	r3.Close()
+	if _, err := runIn(t, r2, `commit`); err != nil {
+		t.Fatal(err)
+	}
+	if _, st := r2.Txn(); st != "committed" {
+		t.Errorf("after commit: %s", st)
+	}
+	r2.Close()
+	if _, err := s.Exec(ctx, `find @x as k`, nil); err != nil {
+		t.Errorf("committed handle: %v", err)
+	}
+	if _, err := s.Request(id); codeOf(err) != "txn_not_found" {
+		t.Errorf("finished transaction: %v", err)
+	}
+
+	// A failed statement aborts the transaction; rollback drops its handles.
+	r4, _ := s.Request(id3)
+	if _, err := runIn(t, r4, `create K { a: "x" }`); err == nil {
+		t.Fatal("bad create succeeded")
+	}
+	if _, st := r4.Txn(); st != "failed" {
+		t.Errorf("after failure: %s", st)
+	}
+	if _, err := runIn(t, r4, `find K k`); codeOf(err) != "txn_aborted" {
+		t.Errorf("after failure: %v", err)
+	}
+	if _, err := runIn(t, r4, `rollback`); err != nil {
+		t.Fatal(err)
+	}
+	r4.Close()
+	if _, err := s.Exec(ctx, `find @y as k`, nil); err == nil {
+		t.Error("a rolled-back handle survived")
+	}
+
+	// Idle transactions expire.
+	r5, _ := s.Request(nil)
+	runIn(t, r5, `begin`)
+	id5, _ := r5.Txn()
+	r5.Close()
+	if got := s.ExpireIdle(0); len(got) != 1 || got[0] != *id5 {
+		t.Errorf("expired %v", got)
+	}
+
+	// Prepared statements.
+	pid, _, err := s.Prepare(`find K k | where k.a > $min | show count()`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := s.Prepared(pid)
+	if !ok {
+		t.Fatal("prepared statement missing")
+	}
+	r6, _ := s.Request(nil)
+	res6, err := r6.Exec(ctx, st, map[string]value.Value{"min": value.Int(0)})
+	if err != nil || res6.Rows[0][0].(value.Value).String() != "1" {
+		t.Errorf("execute: %v %v", res6, err)
+	}
+	if !s.ClosePrepared(pid) || s.ClosePrepared(pid) {
+		t.Error("ClosePrepared")
+	}
+}
+
+func TestConcurrentRequests(t *testing.T) {
+	s := newScriptSession(t)
+	ctx := context.Background()
+	s.Exec(ctx, `define kind K { a: int }`, nil)
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range 20 {
+				r, _ := s.Request(nil)
+				st, _ := lang.ParseStatement("create K @h" + itoa(i) + " { a: " + itoa(j) + " }")
+				if _, err := r.Exec(ctx, st, nil); err != nil {
+					t.Error(err)
+				}
+				r.Close()
+			}
+		}()
+	}
+	wg.Wait()
+	res, err := s.Exec(ctx, `find K k | show count()`, nil)
+	if err != nil || res[0].Rows[0][0].(value.Value).String() != "160" {
+		t.Errorf("count: %v %v", res, err)
+	}
+	if len(s.Handles()) != 8 {
+		t.Errorf("handles: %d", len(s.Handles()))
+	}
+}
+
+func codeOf(err error) string {
+	var le *lang.Error
+	if errors.As(err, &le) {
+		return le.Code
+	}
+	return ""
+}

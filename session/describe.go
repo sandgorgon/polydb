@@ -77,7 +77,7 @@ func fieldOptions(fd *model.FieldDef) string {
 	return strings.Join(opts, ", ")
 }
 
-func (s *Session) describe(qc *query.Context, st *lang.Describe) (*query.Result, error) {
+func (s *env) describe(qc *query.Context, st *lang.Describe) (*query.Result, error) {
 	if _, err := lang.Check(envOf(qc), st); err != nil {
 		return nil, err
 	}
@@ -101,7 +101,7 @@ func (s *Session) describe(qc *query.Context, st *lang.Describe) (*query.Result,
 		k, _ := cat.Kind(st.Name)
 		n, err := tx.CountEntities(k.Name)
 		if err != nil {
-			return nil, s.fail(st, err)
+			return nil, fail(st, err)
 		}
 		mode := "extensible"
 		if k.Closed {
@@ -121,7 +121,7 @@ func (s *Session) describe(qc *query.Context, st *lang.Describe) (*query.Result,
 		rt, _ := cat.RelationType(st.Name)
 		n, err := tx.CountRelations(rt.Name)
 		if err != nil {
-			return nil, s.fail(st, err)
+			return nil, fail(st, err)
 		}
 		r := table("section", "name", "type", "detail", "doc")
 		add(r, "relation", rt.Name, "from "+endpoint(cat, rt.From)+" to "+endpoint(cat, rt.To),
@@ -241,7 +241,7 @@ func indexStatus(ix *model.Index) string {
 }
 
 // targetID resolves a describe target to a node ID.
-func (s *Session) targetID(qc *query.Context, e lang.Expr) (value.ID, error) {
+func (s *env) targetID(qc *query.Context, e lang.Expr) (value.ID, error) {
 	var v value.Value
 	switch e := e.(type) {
 	case *lang.HandleRef:
@@ -382,7 +382,7 @@ func envOf(qc *query.Context) *lang.Env {
 	return env
 }
 
-func (s *Session) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) {
+func (s *env) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) {
 	tx, cat := qc.Tx, qc.Tx.Catalog()
 	switch st.What {
 	case "kinds":
@@ -468,7 +468,7 @@ func (s *Session) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, err
 // kindStats shows, for each declared field of a kind, how many entities
 // have a value, how many hold null, and how many distinct values there
 // are.
-func (s *Session) kindStats(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) {
+func (s *env) kindStats(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) {
 	tx := qc.Tx
 	k, ok := tx.Catalog().Kind(st.For)
 	if !ok {

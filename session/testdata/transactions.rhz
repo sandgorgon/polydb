@@ -28,9 +28,9 @@ begin;
   update @a set balance -= 1000.00d;
   // error constraint: check failed for balance
   update @b set balance = 1.00d;
-  // error constraint: the transaction failed earlier
+  // error txn_aborted: the transaction failed earlier
 commit;
-// error conflict: rolled back because a statement failed
+// error txn_aborted: rolled back because a statement failed
 find @b as x | show x.balance;
 // => 200.00d
 
