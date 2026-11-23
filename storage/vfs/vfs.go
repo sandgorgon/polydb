@@ -48,6 +48,10 @@ type FS interface {
 	List(dir string) ([]string, error)
 	// MkdirAll creates a directory and its parents.
 	MkdirAll(dir string) error
+	// RemoveAll deletes a directory and everything in it; it is not
+	// durable until SyncDir of its parent, and may be partly undone by a
+	// crash.
+	RemoveAll(dir string) error
 	// SyncDir makes the directory's entries durable.
 	SyncDir(dir string) error
 	// Lock takes an exclusive lock on a file, so that two processes can't
@@ -102,6 +106,7 @@ func (osFS) Open(name string) (File, error) {
 func (osFS) Remove(name string) error             { return os.Remove(name) }
 func (osFS) Rename(oldname, newname string) error { return os.Rename(oldname, newname) }
 func (osFS) MkdirAll(dir string) error            { return os.MkdirAll(dir, 0o700) }
+func (osFS) RemoveAll(dir string) error           { return os.RemoveAll(dir) }
 
 func (osFS) List(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)

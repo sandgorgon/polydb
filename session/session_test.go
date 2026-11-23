@@ -13,7 +13,7 @@ import (
 )
 
 func TestExecErrorIndex(t *testing.T) {
-	s := newScriptSession(t)
+	s := newScriptSession(t, false)
 	res, err := s.Exec(context.Background(), `define kind K { a: int }; create K { a: 1 }; create K { a: "x" }; create K { a: 2 }`, nil)
 	var se *Error
 	if !errors.As(err, &se) || se.Index != 2 || se.Code != "type" || se.Pos.Line != 1 {
@@ -28,7 +28,7 @@ func TestExecErrorIndex(t *testing.T) {
 }
 
 func TestParamsAndExplainAnalyze(t *testing.T) {
-	s := newScriptSession(t)
+	s := newScriptSession(t, false)
 	ctx := context.Background()
 	if _, err := s.Exec(ctx, `define kind K { a: int }; create K { a: 1 }; create K { a: 5 }; create K { a: 9 }`, nil); err != nil {
 		t.Fatal(err)
@@ -51,7 +51,7 @@ func TestParamsAndExplainAnalyze(t *testing.T) {
 }
 
 func TestCancel(t *testing.T) {
-	s := newScriptSession(t)
+	s := newScriptSession(t, false)
 	ctx := context.Background()
 	if _, err := s.Exec(ctx, `define kind K { a: int }`, nil); err != nil {
 		t.Fatal(err)
@@ -93,7 +93,7 @@ func runIn(t *testing.T, r *Request, src string) ([]*query.Result, error) {
 }
 
 func TestRequestsAndTransactions(t *testing.T) {
-	s := newScriptSession(t)
+	s := newScriptSession(t, false)
 	ctx := context.Background()
 	if _, err := s.Exec(ctx, `define kind K { a: int }`, nil); err != nil {
 		t.Fatal(err)
@@ -196,7 +196,7 @@ func TestRequestsAndTransactions(t *testing.T) {
 }
 
 func TestConcurrentRequests(t *testing.T) {
-	s := newScriptSession(t)
+	s := newScriptSession(t, false)
 	ctx := context.Background()
 	s.Exec(ctx, `define kind K { a: int }`, nil)
 	var wg sync.WaitGroup

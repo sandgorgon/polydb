@@ -93,6 +93,27 @@ func (m *Mem) Remove(name string) error {
 	return nil
 }
 
+// RemoveAll deletes a directory and what is in it. Like the other name
+// changes, it isn't durable: a crash before SyncDir of the parent brings
+// back whatever was durable.
+func (m *Mem) RemoveAll(dir string) error {
+	dir = clean(dir)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prefix := dir + "/"
+	for name := range m.files {
+		if strings.HasPrefix(name, prefix) {
+			delete(m.files, name)
+		}
+	}
+	for d := range m.dirs {
+		if d == dir || strings.HasPrefix(d, prefix) {
+			delete(m.dirs, d)
+		}
+	}
+	return nil
+}
+
 func (m *Mem) Rename(oldname, newname string) error {
 	oldname, newname = clean(oldname), clean(newname)
 	m.mu.Lock()
@@ -151,6 +172,15 @@ func (m *Mem) SyncDir(dir string) error {
 	for name := range m.durable {
 		if filepath.Dir(name) == dir {
 			delete(m.durable, name)
+			continue
+		}
+		// Files under a subdirectory that was removed go with it.
+		if strings.HasPrefix(name, dir+"/") {
+			rel := strings.TrimPrefix(name, dir+"/")
+			sub := dir + "/" + rel[:strings.IndexByte(rel, '/')]
+			if !m.dirs[sub] {
+				delete(m.durable, name)
+			}
 		}
 	}
 	for name, n := range m.files {
@@ -209,6 +239,10 @@ func (m *Mem) Crash(tear *rand.Rand) *Mem {
 		}
 		out.files[name] = c
 		out.durable[name] = c
+		// A removed directory comes back with the files that survive.
+		for d := filepath.Dir(name); !out.dirs[d]; d = filepath.Dir(d) {
+			out.dirs[d] = true
+		}
 	}
 	return out
 }

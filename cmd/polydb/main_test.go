@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -136,56 +137,113 @@ func TestRunScript(t *testing.T) {
 	}
 }
 
-func TestServeAndConnect(t *testing.T) {
-	home := isolate(t)
-	t.Setenv("POLYDB_ADMIN_PASSWORD", "secret")
+// startServe runs serve in the background until the returned stop.
+func startServe(t *testing.T, cfg serveConfig) (tcp, unix string, out *syncBuffer, stop func()) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var out, errOut syncBuffer
+	out = &syncBuffer{}
+	var errOut syncBuffer
 	addrs := make(chan [2]string, 1)
-	cfg := serveConfig{listen: "127.0.0.1:0", dataDir: filepath.Join(home, "data"), adminKey: "self", iterations: 4096}
 	done := make(chan error, 1)
 	go func() {
-		done <- serve(ctx, cfg, &out, &errOut, func(tcp, unix string) { addrs <- [2]string{tcp, unix} })
+		done <- serve(ctx, cfg, out, &errOut, func(tcp, unix string) { addrs <- [2]string{tcp, unix} })
 	}()
-	var a [2]string
 	select {
-	case a = <-addrs:
+	case a := <-addrs:
+		tcp, unix = a[0], a[1]
 	case err := <-done:
+		cancel()
 		t.Fatalf("serve: %v %s", err, errOut.String())
 	case <-time.After(5 * time.Second):
+		cancel()
 		t.Fatal("server didn't start")
 	}
+	stop = func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Errorf("serve ended with %v", err)
+		}
+		if _, err := os.Stat(unix); !os.IsNotExist(err) {
+			t.Error("socket file left behind")
+		}
+	}
+	return tcp, unix, out, stop
+}
+
+// TestServeAndConnect follows a server's life: serving before init (only
+// the OS user, over the socket), polydb init, serving with a password and
+// a key, and keeping its data across restarts.
+func TestServeAndConnect(t *testing.T) {
+	home := isolate(t)
+	data := filepath.Join(home, "data")
+	cfg := serveConfig{listen: "127.0.0.1:0", dataDir: data, iterations: 4096}
+
+	// Before init: PEER over the socket works; passwords don't.
+	tcp, unix, out, stop := startServe(t, cfg)
+	if !strings.Contains(out.String(), "not initialized") {
+		t.Errorf("serve output before init:\n%s", out.String())
+	}
 	fp := regexp.MustCompile(`server fingerprint: ([0-9a-f]{64})`).FindStringSubmatch(out.String())
-	if fp == nil || strings.Contains(out.String(), "admin password (shown once)") {
+	if fp == nil {
 		t.Fatalf("serve output:\n%s", out.String())
 	}
-
-	// TCP with TLS: password login, pinned fingerprint. The client's
-	// 9auth identity (registered with --admin-key self) logs in with KEY.
+	got, errText, code := runCLI(t, "create database shop; show databases;\n", "--no-rc", "polydb+unix://"+unix)
+	if code != 0 || !strings.Contains(got, "shop") {
+		t.Fatalf("unix before init: %d %q %q", code, got, errText)
+	}
 	t.Setenv("POLYDB_PASSWORD", "secret")
-	got, errText, code := runCLI(t, "create database shop; use shop; define kind K { a: int }; create K { a: 1 }; find K k | show count()",
-		"run", "--fingerprint", fp[1], "polydb://admin@"+a[0], "-")
+	if _, _, code := runCLI(t, "show databases", "run", "--fingerprint", fp[1], "polydb://admin@"+tcp, "-"); code == 0 {
+		t.Error("a password login worked before init")
+	}
+	// init can't run while the server has the data directory.
+	if err := initData(initConfig{dataDir: data, iterations: 4096}, io.Discard); err == nil || !strings.Contains(err.Error(), "stop it first") {
+		t.Errorf("init with the server running: %v", err)
+	}
+	stop()
+
+	// init: a password from the environment, and this user's key.
+	t.Setenv("POLYDB_ADMIN_PASSWORD", "secret")
+	var initOut strings.Builder
+	if err := initData(initConfig{dataDir: data, key: true, iterations: 4096}, &initOut); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(initOut.String(), "admin key: ") || strings.Contains(initOut.String(), "shown once") {
+		t.Errorf("init output: %q", initOut.String())
+	}
+	if err := initData(initConfig{dataDir: data, iterations: 4096}, io.Discard); err == nil || !strings.Contains(err.Error(), "already initialized") {
+		t.Errorf("second init: %v", err)
+	}
+
+	// TCP with TLS: password login, pinned fingerprint; the client's
+	// 9auth identity logs in with KEY.
+	tcp, unix, out, stop = startServe(t, cfg)
+	if strings.Contains(out.String(), "not initialized") {
+		t.Error("serve says it isn't initialized after init")
+	}
+	got, errText, code = runCLI(t, "use shop; define kind K { a: int }; create K { a: 1 }; find K k | show count()",
+		"run", "--fingerprint", fp[1], "polydb://admin@"+tcp, "-")
 	if code != 0 || !strings.Contains(got, "count()\n───────\n1") {
 		t.Fatalf("tcp: %d %q %q", code, got, errText)
 	}
-	// The Unix socket: PEER login as the OS user running the server.
-	t.Setenv("POLYDB_PASSWORD", "")
-	got, errText, code = runCLI(t, "show databases;\n", "--no-rc", "polydb+unix://"+a[1]+"?db=shop")
-	if code != 0 || !strings.Contains(got, "shop") {
-		t.Fatalf("unix: %d %q %q", code, got, errText)
-	}
 	// --trace prints messages without secrets.
-	_, errText, _ = runCLI(t, "show databases", "--trace", "polydb+unix://"+a[1])
+	t.Setenv("POLYDB_PASSWORD", "")
+	_, errText, _ = runCLI(t, "show databases", "--trace", "polydb+unix://"+unix)
 	if !strings.Contains(errText, "send   0 Hello") || !strings.Contains(errText, "recv   1 ResultHeader") {
 		t.Errorf("trace:\n%s", errText)
 	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Errorf("serve ended with %v", err)
+	stop()
+
+	// A restart keeps everything, including the server's identity.
+	tcp, _, out, stop = startServe(t, cfg)
+	defer stop()
+	if !strings.Contains(out.String(), fp[1]) {
+		t.Error("the server's fingerprint changed across a restart")
 	}
-	if _, err := os.Stat(a[1]); !os.IsNotExist(err) {
-		t.Error("socket file left behind")
+	t.Setenv("POLYDB_PASSWORD", "secret")
+	got, errText, code = runCLI(t, "use shop; find K k | show k.a",
+		"run", "--fingerprint", fp[1], "polydb://admin@"+tcp, "-")
+	if code != 0 || !strings.Contains(got, "1") || strings.Contains(got, "0 rows") {
+		t.Fatalf("after restart: %d %q %q", code, got, errText)
 	}
 }
 
@@ -267,4 +325,20 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
+}
+
+func TestInitCommand(t *testing.T) {
+	home := isolate(t)
+	t.Setenv("POLYDB_ADMIN_PASSWORD", "")
+	dir := filepath.Join(home, "fresh")
+	out, errOut, code := runCLI(t, "", "init", "--data-dir", dir, "--generate")
+	if code != 0 || !regexp.MustCompile(`admin password \(shown once\): \S{20,}`).MatchString(out) {
+		t.Fatalf("init: %d %q %q", code, out, errOut)
+	}
+	if _, errOut, code := runCLI(t, "", "init", "--data-dir", dir); code != 1 || !strings.Contains(errOut, "already initialized") {
+		t.Errorf("second init: %d %q", code, errOut)
+	}
+	if _, _, code := runCLI(t, "", "init", "extra"); code != 2 {
+		t.Errorf("extra argument: exit %d", code)
+	}
 }

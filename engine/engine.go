@@ -20,7 +20,10 @@ import (
 	"github.com/sandgorgon/polydb/catalog"
 	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/storage"
+	"github.com/sandgorgon/polydb/storage/lsm"
 	"github.com/sandgorgon/polydb/storage/mem"
+	"github.com/sandgorgon/polydb/storage/vfs"
+	"github.com/sandgorgon/polydb/storage/wal"
 	"github.com/sandgorgon/polydb/txn"
 	"github.com/sandgorgon/polydb/value"
 )
@@ -30,8 +33,23 @@ type Options struct {
 	// Node is this machine's node ID, embedded in generated IDs (0 on a
 	// single machine).
 	Node uint16
-	// NewStore creates the store for a new database. The default is an
-	// in-memory store.
+	// Dir is where the engine keeps its data: a system store (the list of
+	// databases, and users, roles, grants and keys) and one store per
+	// database, all reopened by the next Open. "" keeps everything in
+	// memory, as NewStore says.
+	Dir string
+	// FS is the file system Dir is on; the default is the OS's.
+	FS vfs.FS
+	// Durability is when a commit is acknowledged: once it is on stable
+	// storage (Durable, the default), or once it is written, with the
+	// log synced in the background (Relaxed, for bulk loads; a crash can
+	// lose the last moments of commits, never part of one).
+	Durability wal.Durability
+	// Storage tunes the on-disk stores (memtable and table sizes, cache);
+	// the engine sets their FS, Dir and Durability.
+	Storage lsm.Options
+	// NewStore creates the store for a new database when Dir is "". The
+	// default is an in-memory store.
 	NewStore func(database string) (storage.Store, error)
 	// Now returns the current time; the default is time.Now. Tests set it.
 	Now func() time.Time
@@ -48,6 +66,7 @@ type Engine struct {
 	ids  *value.IDGenerator
 
 	sec *security.Store
+	sys *lsm.Store // the system store, with a Dir
 
 	mu     sync.RWMutex
 	dbs    map[string]*DB
@@ -58,10 +77,14 @@ type Engine struct {
 // keys.
 func (e *Engine) Security() *security.Store { return e.sec }
 
-// Open returns a new engine.
+// Open returns an engine: a new, empty one in memory, or the one kept in
+// opts.Dir (created if needed).
 func Open(opts Options) (*Engine, error) {
 	if opts.NewStore == nil {
 		opts.NewStore = func(string) (storage.Store, error) { return mem.New(), nil }
+	}
+	if opts.FS == nil {
+		opts.FS = vfs.OS
 	}
 	if opts.Now == nil {
 		opts.Now = time.Now
@@ -69,8 +92,14 @@ func Open(opts Options) (*Engine, error) {
 	if opts.MaxPopWait <= 0 {
 		opts.MaxPopWait = 15 * time.Minute
 	}
-	return &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{},
-		sec: security.New(opts.PasswordIterations)}, nil
+	e := &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{},
+		sec: security.New(opts.PasswordIterations)}
+	if opts.Dir != "" {
+		if err := e.load(); err != nil {
+			return nil, err
+		}
+	}
+	return e, nil
 }
 
 // CreateDatabase creates a new, empty database.
@@ -85,6 +114,14 @@ func (e *Engine) CreateDatabase(name string) (*DB, error) {
 	}
 	if _, ok := e.dbs[name]; ok {
 		return nil, errorf(CodeConstraint, "database %s already exists", name)
+	}
+	if e.sys != nil {
+		db, err := e.createOnDisk(name)
+		if err != nil {
+			return nil, err
+		}
+		e.dbs[name] = db
+		return db, nil
 	}
 	s, err := e.opts.NewStore(name)
 	if err != nil {
@@ -125,13 +162,25 @@ func (e *Engine) Databases() []string {
 // DropDatabase closes and removes a database and all its data.
 func (e *Engine) DropDatabase(name string) error {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	db, ok := e.dbs[name]
-	delete(e.dbs, name)
-	e.mu.Unlock()
 	if !ok {
 		return errorf(CodeNotFound, "no database %s", name)
 	}
-	e.sec.DropDatabase(name)
+	// Grants go first: if a crash interrupts the drop, the database may
+	// survive without them, but a database created later with the same
+	// name never inherits them.
+	if err := e.sec.DropDatabase(name); err != nil {
+		return wrap(CodeInternal, err)
+	}
+	if e.sys != nil {
+		if err := e.dropOnDisk(name, db); err != nil {
+			return err
+		}
+		delete(e.dbs, name)
+		return nil
+	}
+	delete(e.dbs, name)
 	return db.close()
 }
 
@@ -144,6 +193,11 @@ func (e *Engine) Close() error {
 	var first error
 	for _, db := range dbs {
 		if err := db.close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	if e.sys != nil {
+		if err := e.sys.Close(); err != nil && first == nil {
 			first = err
 		}
 	}

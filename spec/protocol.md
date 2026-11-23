@@ -577,7 +577,8 @@ None.
    - authenticated remote 9P over TLS
 5. Phase 3 decisions (2026-11-22):
    - Users, roles, grants and keys live in a **system store** with typed records, separate from the databases, so credentials can never be read through Rhizome.
-   - Until persistence (Phase 4), `polydb serve` creates `admin` at startup: its password comes from `POLYDB_ADMIN_PASSWORD` or is generated and printed once, the OS user running the server maps to `admin` for `PEER`, and `--admin-key` registers a 9auth key. `polydb init` (§3.3) arrives with persistence.
+   - Until persistence (Phase 4), `polydb serve` created `admin` at startup. Since Phase 4, `polydb init` (§3.3) does it once: the password comes from `POLYDB_ADMIN_PASSWORD`, a prompt (asked twice), or is generated and printed once (`--generate`, or when there is no terminal), and `--key` registers the running user's 9auth key. `init` refuses once admin has a password or key, and while a server holds the data directory. Before `init`, `polydb serve` says so and admits only the OS user running it, over the Unix socket.
+   - The data directory holds the server's identity, its Unix socket, and its data: a system store (databases, users, roles, grants, keys) and one store per database. `polydb serve --durability relaxed` acknowledges commits before they are synced, for bulk loads; a crash can then lose the last moments of commits, never part of one.
    - Blob references (§7) are part of the Phase 3 server, served from values the server holds for the lease time.
    - The inline value limit is configurable by the server and requested by the client (HELLO field 7). The Go client offers `WithInlineLimit(n)`.
 6. Server behaviour (Phase 3, 2026-11-22):

@@ -139,6 +139,7 @@ type Store struct {
 	grants     []Grant
 	keys       map[string]string // fingerprint → user
 	iterations int
+	save       func([]byte) error // see PersistTo
 }
 
 // New returns a store holding only the built-in admin user, with
@@ -183,13 +184,13 @@ func (s *Store) CreateUser(name, password string) error {
 		}
 		creds = &c
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.newName("user", name); err != nil {
-		return err
-	}
-	s.users[name] = &User{Name: name, Creds: creds}
-	return nil
+	return s.edit(func() error {
+		if err := s.newName("user", name); err != nil {
+			return err
+		}
+		s.users[name] = &User{Name: name, Creds: creds}
+		return nil
+	})
 }
 
 func (s *Store) iterationCount() int {
@@ -200,13 +201,13 @@ func (s *Store) iterationCount() int {
 
 // CreateRole adds a role.
 func (s *Store) CreateRole(name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := s.newName("role", name); err != nil {
-		return err
-	}
-	s.roles[name] = true
-	return nil
+	return s.edit(func() error {
+		if err := s.newName("role", name); err != nil {
+			return err
+		}
+		s.roles[name] = true
+		return nil
+	})
 }
 
 // SetPassword sets or replaces a user's password.
@@ -215,16 +216,16 @@ func (s *Store) SetPassword(name, password string) error {
 	if err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.users[name]
-	if !ok {
-		return errorf("not_found", "no user %s", name)
-	}
-	cp := *u
-	cp.Creds = &c
-	s.users[name] = &cp
-	return nil
+	return s.edit(func() error {
+		u, ok := s.users[name]
+		if !ok {
+			return errorf("not_found", "no user %s", name)
+		}
+		cp := *u
+		cp.Creds = &c
+		s.users[name] = &cp
+		return nil
+	})
 }
 
 var fingerprintRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -235,143 +236,143 @@ func (s *Store) AddKey(name, fingerprint, label string) error {
 	if !fingerprintRE.MatchString(fingerprint) {
 		return errorf("constraint", "a key fingerprint is 64 lowercase hex digits (polydb whoami --fingerprint prints yours)")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.users[name]
-	if !ok {
-		return errorf("not_found", "no user %s", name)
-	}
-	if owner, taken := s.keys[fingerprint]; taken {
-		if owner == name {
-			return errorf("constraint", "the key is already registered to %s", name)
-		}
-		return errorf("constraint", "the key is registered to another user")
-	}
-	cp := *u
-	cp.Keys = append(slices.Clone(u.Keys), Key{fingerprint, label})
-	s.users[name] = &cp
-	s.keys[fingerprint] = name
-	return nil
-}
-
-// DropKey removes a key from a user.
-func (s *Store) DropKey(name, fingerprint string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	u, ok := s.users[name]
-	if !ok {
-		return errorf("not_found", "no user %s", name)
-	}
-	i := slices.IndexFunc(u.Keys, func(k Key) bool { return k.Fingerprint == fingerprint })
-	if i < 0 {
-		return errorf("not_found", "%s has no key %s", name, fingerprint)
-	}
-	cp := *u
-	cp.Keys = slices.Delete(slices.Clone(u.Keys), i, i+1)
-	s.users[name] = &cp
-	delete(s.keys, fingerprint)
-	return nil
-}
-
-// Drop removes a user or role, with its grants and memberships.
-func (s *Store) Drop(what, name string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if name == AdminUser {
-		return errorf("constraint", "the built-in admin user can't be dropped")
-	}
-	switch what {
-	case "user":
+	return s.edit(func() error {
 		u, ok := s.users[name]
 		if !ok {
 			return errorf("not_found", "no user %s", name)
 		}
-		for _, k := range u.Keys {
-			delete(s.keys, k.Fingerprint)
-		}
-		delete(s.users, name)
-	default:
-		if !s.roles[name] {
-			if _, isUser := s.users[name]; isUser {
-				return errorf("constraint", "%s is a user; use drop user", name)
+		if owner, taken := s.keys[fingerprint]; taken {
+			if owner == name {
+				return errorf("constraint", "the key is already registered to %s", name)
 			}
-			return errorf("not_found", "no role %s", name)
+			return errorf("constraint", "the key is registered to another user")
 		}
-		delete(s.roles, name)
-	}
-	delete(s.memberOf, name)
-	for _, m := range s.memberOf {
-		delete(m, name)
-	}
-	s.grants = slices.DeleteFunc(s.grants, func(g Grant) bool { return g.Role == name })
-	return nil
+		cp := *u
+		cp.Keys = append(slices.Clone(u.Keys), Key{fingerprint, label})
+		s.users[name] = &cp
+		s.keys[fingerprint] = name
+		return nil
+	})
+}
+
+// DropKey removes a key from a user.
+func (s *Store) DropKey(name, fingerprint string) error {
+	return s.edit(func() error {
+		u, ok := s.users[name]
+		if !ok {
+			return errorf("not_found", "no user %s", name)
+		}
+		i := slices.IndexFunc(u.Keys, func(k Key) bool { return k.Fingerprint == fingerprint })
+		if i < 0 {
+			return errorf("not_found", "%s has no key %s", name, fingerprint)
+		}
+		cp := *u
+		cp.Keys = slices.Delete(slices.Clone(u.Keys), i, i+1)
+		s.users[name] = &cp
+		delete(s.keys, fingerprint)
+		return nil
+	})
+}
+
+// Drop removes a user or role, with its grants and memberships.
+func (s *Store) Drop(what, name string) error {
+	return s.edit(func() error {
+		if name == AdminUser {
+			return errorf("constraint", "the built-in admin user can't be dropped")
+		}
+		switch what {
+		case "user":
+			u, ok := s.users[name]
+			if !ok {
+				return errorf("not_found", "no user %s", name)
+			}
+			for _, k := range u.Keys {
+				delete(s.keys, k.Fingerprint)
+			}
+			delete(s.users, name)
+		default:
+			if !s.roles[name] {
+				if _, isUser := s.users[name]; isUser {
+					return errorf("constraint", "%s is a user; use drop user", name)
+				}
+				return errorf("not_found", "no role %s", name)
+			}
+			delete(s.roles, name)
+		}
+		delete(s.memberOf, name)
+		for _, m := range s.memberOf {
+			delete(m, name)
+		}
+		s.grants = slices.DeleteFunc(s.grants, func(g Grant) bool { return g.Role == name })
+		return nil
+	})
 }
 
 // GrantPerm gives a role a permission. Granting what is already granted
 // is not an error.
 func (s *Store) GrantPerm(role string, p Perm, sc Scope) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.isRole(role) {
-		return errorf("not_found", "no user or role %s", role)
-	}
-	g := Grant{role, p, sc}
-	if !slices.Contains(s.grants, g) {
-		s.grants = append(s.grants, g)
-	}
-	return nil
+	return s.edit(func() error {
+		if !s.isRole(role) {
+			return errorf("not_found", "no user or role %s", role)
+		}
+		g := Grant{role, p, sc}
+		if !slices.Contains(s.grants, g) {
+			s.grants = append(s.grants, g)
+		}
+		return nil
+	})
 }
 
 // RevokePerm takes a permission back.
 func (s *Store) RevokePerm(role string, p Perm, sc Scope) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.isRole(role) {
-		return errorf("not_found", "no user or role %s", role)
-	}
-	if role == AdminUser && p == Admin && sc.Level == ServerLevel {
-		return errorf("constraint", "the built-in admin user keeps admin on the server")
-	}
-	n := len(s.grants)
-	s.grants = slices.DeleteFunc(s.grants, func(g Grant) bool { return g == Grant{role, p, sc} })
-	if len(s.grants) == n {
-		return errorf("not_found", "%s doesn't have that permission", role)
-	}
-	return nil
+	return s.edit(func() error {
+		if !s.isRole(role) {
+			return errorf("not_found", "no user or role %s", role)
+		}
+		if role == AdminUser && p == Admin && sc.Level == ServerLevel {
+			return errorf("constraint", "the built-in admin user keeps admin on the server")
+		}
+		n := len(s.grants)
+		s.grants = slices.DeleteFunc(s.grants, func(g Grant) bool { return g == Grant{role, p, sc} })
+		if len(s.grants) == n {
+			return errorf("not_found", "%s doesn't have that permission", role)
+		}
+		return nil
+	})
 }
 
 // GrantRole makes who a member of role.
 func (s *Store) GrantRole(role, who string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.roles[role] {
-		if _, isUser := s.users[role]; isUser {
-			return errorf("constraint", "%s is a user; only roles can be granted", role)
+	return s.edit(func() error {
+		if !s.roles[role] {
+			if _, isUser := s.users[role]; isUser {
+				return errorf("constraint", "%s is a user; only roles can be granted", role)
+			}
+			return errorf("not_found", "no role %s", role)
 		}
-		return errorf("not_found", "no role %s", role)
-	}
-	if !s.isRole(who) {
-		return errorf("not_found", "no user or role %s", who)
-	}
-	if role == who || s.closure(role)[who] {
-		return errorf("constraint", "granting %s to %s would make a cycle", role, who)
-	}
-	if s.memberOf[who] == nil {
-		s.memberOf[who] = map[string]bool{}
-	}
-	s.memberOf[who][role] = true
-	return nil
+		if !s.isRole(who) {
+			return errorf("not_found", "no user or role %s", who)
+		}
+		if role == who || s.closure(role)[who] {
+			return errorf("constraint", "granting %s to %s would make a cycle", role, who)
+		}
+		if s.memberOf[who] == nil {
+			s.memberOf[who] = map[string]bool{}
+		}
+		s.memberOf[who][role] = true
+		return nil
+	})
 }
 
 // RevokeRole removes who from role.
 func (s *Store) RevokeRole(role, who string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.memberOf[who][role] {
-		return errorf("not_found", "%s isn't a member of %s", who, role)
-	}
-	delete(s.memberOf[who], role)
-	return nil
+	return s.edit(func() error {
+		if !s.memberOf[who][role] {
+			return errorf("not_found", "%s isn't a member of %s", who, role)
+		}
+		delete(s.memberOf[who], role)
+		return nil
+	})
 }
 
 // closure returns name and every role it belongs to, directly or not.
@@ -427,18 +428,20 @@ func (s *Store) CanSee(user, db string) bool {
 }
 
 // DropDatabase removes the grants on a database that no longer exists.
-func (s *Store) DropDatabase(db string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.grants = slices.DeleteFunc(s.grants, func(g Grant) bool { return g.Scope.Level != ServerLevel && g.Scope.Database == db })
+func (s *Store) DropDatabase(db string) error {
+	return s.edit(func() error {
+		s.grants = slices.DeleteFunc(s.grants, func(g Grant) bool { return g.Scope.Level != ServerLevel && g.Scope.Database == db })
+		return nil
+	})
 }
 
 // DropKind removes the grants on a kind that no longer exists.
-func (s *Store) DropKind(db string, kind value.ID) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.grants = slices.DeleteFunc(s.grants, func(g Grant) bool {
-		return g.Scope.Level == KindLevel && g.Scope.Database == db && g.Scope.Kind == kind
+func (s *Store) DropKind(db string, kind value.ID) error {
+	return s.edit(func() error {
+		s.grants = slices.DeleteFunc(s.grants, func(g Grant) bool {
+			return g.Scope.Level == KindLevel && g.Scope.Database == db && g.Scope.Kind == kind
+		})
+		return nil
 	})
 }
 

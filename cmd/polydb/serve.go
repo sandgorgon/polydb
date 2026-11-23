@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,7 +11,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -21,6 +18,7 @@ import (
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/server"
+	"github.com/sandgorgon/polydb/storage/wal"
 )
 
 // serveConfig is what serve needs, parsed from flags.
@@ -31,7 +29,7 @@ type serveConfig struct {
 	insecure    bool
 	tlsCert     string
 	tlsKey      string
-	adminKey    string
+	durability  string
 	compression bool
 	inlineLimit int64
 	verbose     bool
@@ -43,12 +41,12 @@ func serveCmd(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.SetOutput(errOut)
 	c := serveConfig{}
 	fs.StringVar(&c.listen, "listen", ":7377", "TCP address to listen on (empty: no TCP)")
-	fs.StringVar(&c.dataDir, "data-dir", dataDir(), "directory for the server's identity and socket")
+	fs.StringVar(&c.dataDir, "data-dir", dataDir(), "directory for the server's data, identity and socket")
 	fs.StringVar(&c.socket, "socket", "", "Unix socket path (default: <data-dir>/polydb.sock; \"none\" disables it)")
 	fs.BoolVar(&c.insecure, "insecure", false, "serve TCP without TLS, from loopback addresses only (development)")
 	fs.StringVar(&c.tlsCert, "tls-cert", "", "certificate file for CA mode (default: the server's 9auth identity)")
 	fs.StringVar(&c.tlsKey, "tls-key", "", "key file for CA mode")
-	fs.StringVar(&c.adminKey, "admin-key", "", `9auth fingerprint to register for admin ("self": this user's identity)`)
+	fs.StringVar(&c.durability, "durability", "durable", "when commits are acknowledged: durable (on stable storage) or relaxed (written; synced in the background, for bulk loads)")
 	fs.BoolVar(&c.compression, "compression", false, "allow deflate compression")
 	fs.Int64Var(&c.inlineLimit, "inline-limit", 0, "largest value sent inline, in bytes (default 16384)")
 	fs.BoolVar(&c.verbose, "v", false, "log connections")
@@ -79,38 +77,27 @@ func serve(ctx context.Context, c serveConfig, out, errOut io.Writer, ready func
 		level = slog.LevelInfo
 	}
 	logger := slog.New(slog.NewTextHandler(errOut, &slog.HandlerOptions{Level: level}))
-	eng, err := engine.Open(engine.Options{PasswordIterations: c.iterations})
+	var durability wal.Durability
+	switch c.durability {
+	case "", "durable":
+	case "relaxed":
+		durability = wal.Relaxed
+	default:
+		return fmt.Errorf("--durability is durable or relaxed, not %q", c.durability)
+	}
+	eng, err := engine.Open(engine.Options{Dir: c.dataDir, Durability: durability, PasswordIterations: c.iterations})
 	if err != nil {
 		return err
 	}
 	defer eng.Close()
-	sec := eng.Security()
-
-	// Until persistence arrives, the server starts empty: create admin
-	// (spec/protocol.md §15, decision 5).
-	pw := os.Getenv("POLYDB_ADMIN_PASSWORD")
-	if pw == "" {
-		b := make([]byte, 18)
-		rand.Read(b)
-		pw = base64.RawURLEncoding.EncodeToString(b)
-		fmt.Fprintf(out, "admin password (shown once): %s\n", pw)
+	// Until polydb init gives admin a password or key, only the OS user
+	// running the server can log in, over the Unix socket (spec/protocol.md
+	// §3.3).
+	if u, _ := eng.Security().User(security.AdminUser); u.Creds == nil && len(u.Keys) == 0 {
+		fmt.Fprintln(out, "not initialized: only this OS user can log in, over the Unix socket (run polydb init)")
 	}
-	if err := sec.SetPassword(security.AdminUser, pw); err != nil {
-		return err
-	}
-	if c.adminKey != "" {
-		fp := strings.ToLower(c.adminKey)
-		if fp == "self" {
-			id, err := auth9.Load()
-			if err != nil {
-				return err
-			}
-			fp = id.Fingerprint()
-		}
-		if err := sec.AddKey(security.AdminUser, fp, "--admin-key"); err != nil {
-			return fmt.Errorf("--admin-key: %w", err)
-		}
-		fmt.Fprintf(out, "admin key: %s\n", fp)
+	if durability == wal.Relaxed {
+		fmt.Fprintln(out, "durability relaxed: a crash can lose the last moments of commits")
 	}
 
 	cfg := server.Config{Engine: eng, Logger: logger, Compression: c.compression, InlineLimit: c.inlineLimit,

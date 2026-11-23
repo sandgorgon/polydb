@@ -11,6 +11,7 @@ import (
 // DB is one database. It is safe for concurrent use.
 type DB struct {
 	name string
+	dir  string // its directory's number, with an engine Dir
 	eng  *Engine
 	mgr  *txn.Manager
 	cat  atomic.Pointer[catalog.Catalog]

@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) and Phase 2 (Rhizome language) complete and merged into `master`. Phase 3 (security, wire protocol, authentication, server, Go client, CLI) complete on branch `phase-3`. Next: Phase 4 (persistence). Until then the server starts empty on every run and creates `admin` at startup. Non-unique indexes are recorded but not built yet (Phase 5).
+Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) and Phase 2 (Rhizome language) complete and merged into `master`. Phase 3 (security, wire protocol, authentication, server, Go client, CLI) complete and merged into `master`. Phase 4 (persistence) in progress on branch `phase-4`: the server keeps its databases and users in its data directory, and `polydb init` sets up the first admin. Non-unique indexes are recorded but not built yet (Phase 5).
 Source requirements: [req.md](req.md)
 
 ---

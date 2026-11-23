@@ -98,3 +98,33 @@ func TestMemCrash(t *testing.T) {
 		t.Errorf("lock after release: %v", err)
 	}
 }
+
+func TestMemRemoveAll(t *testing.T) {
+	m := NewMem()
+	m.MkdirAll("/d/sub")
+	write(t, m, "/d/sub/f", "data", true)
+	m.SyncDir("/d/sub")
+	write(t, m, "/d/keep", "x", true)
+	m.SyncDir("/d")
+	m.RemoveAll("/d/sub")
+	if read(t, m, "/d/sub/f") != "<missing>" || read(t, m, "/d/keep") != "x" {
+		t.Error("RemoveAll removed the wrong things")
+	}
+	if names, _ := m.List("/d"); len(names) != 1 {
+		t.Errorf("List after RemoveAll: %v", names)
+	}
+	// Not durable: a crash brings the directory back with its file.
+	c := m.Crash(nil)
+	if read(t, c, "/d/sub/f") != "data" {
+		t.Error("RemoveAll was durable without a SyncDir")
+	}
+	if names, err := c.List("/d/sub"); err != nil || len(names) != 1 {
+		t.Errorf("the restored directory lists %v (%v)", names, err)
+	}
+	// Syncing the parent makes the removal durable.
+	m.SyncDir("/d")
+	c = m.Crash(nil)
+	if read(t, c, "/d/sub/f") != "<missing>" || read(t, c, "/d/keep") != "x" {
+		t.Error("the removal didn't survive a SyncDir of the parent")
+	}
+}

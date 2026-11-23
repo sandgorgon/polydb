@@ -97,6 +97,13 @@ func (f *Faulty) MkdirAll(dir string) error {
 	return f.FS.MkdirAll(dir)
 }
 
+func (f *Faulty) RemoveAll(dir string) error {
+	if err := f.check("remove-all " + dir); err != nil {
+		return err
+	}
+	return f.FS.RemoveAll(dir)
+}
+
 func (f *Faulty) SyncDir(dir string) error {
 	if err := f.check("syncdir " + dir); err != nil {
 		return err

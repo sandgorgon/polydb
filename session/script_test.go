@@ -17,6 +17,8 @@ import (
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/query"
 	"github.com/sandgorgon/polydb/security"
+	"github.com/sandgorgon/polydb/storage/lsm"
+	"github.com/sandgorgon/polydb/storage/vfs"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -49,8 +51,16 @@ func TestScripts(t *testing.T) {
 	if err != nil || len(files) == 0 {
 		t.Fatalf("no scripts: %v", err)
 	}
-	for _, file := range files {
-		t.Run(filepath.Base(file), func(t *testing.T) { runScript(t, file) })
+	// Every script runs in memory and on disk (a simulated file system,
+	// with sizes small enough that memtables flush and tables compact).
+	for _, disk := range []bool{false, true} {
+		mode := "memory"
+		if disk {
+			mode = "disk"
+		}
+		for _, file := range files {
+			t.Run(mode+"/"+filepath.Base(file), func(t *testing.T) { runScript(t, file, disk) })
+		}
 	}
 }
 
@@ -69,11 +79,16 @@ type expect struct {
 
 func (e *expect) empty() bool { return !e.hasRows && !e.hasErr && !e.hasAff && len(e.warnings) == 0 }
 
-func newScriptSession(t *testing.T) *Session {
+func newScriptSession(t *testing.T, disk bool) *Session {
 	t.Helper()
 	clock := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
-	eng, err := engine.Open(engine.Options{Now: func() time.Time { return clock }, MaxPopWait: time.Minute,
-		PasswordIterations: security.MinIterations})
+	o := engine.Options{Now: func() time.Time { return clock }, MaxPopWait: time.Minute,
+		PasswordIterations: security.MinIterations}
+	if disk {
+		o.Dir, o.FS = "/data", vfs.NewMem()
+		o.Storage = lsm.Options{MemtableSize: 1 << 10, TableSize: 4 << 10, LevelBaseSize: 16 << 10, BlockSize: 512}
+	}
+	eng, err := engine.Open(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,12 +101,12 @@ func newScriptSession(t *testing.T) *Session {
 	return s
 }
 
-func runScript(t *testing.T, file string) {
+func runScript(t *testing.T, file string, disk bool) {
 	data, err := os.ReadFile(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newScriptSession(t)
+	s := newScriptSession(t, disk)
 	lines := strings.Split(string(data), "\n")
 	var out []string // the rewritten file, with -update
 	var chunk []string

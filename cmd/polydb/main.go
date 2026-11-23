@@ -1,5 +1,6 @@
 // Command polydb is PolyDB's server and command-line client.
 //
+//	polydb init [flags]               set up the first admin
 //	polydb serve [flags]              run the server
 //	polydb [flags] [url]              open an interactive shell
 //	polydb run [flags] [url] file.rhz run a script
@@ -30,6 +31,7 @@ func main() {
 }
 
 const usage = `usage:
+  polydb init [--key] [--generate]   set up the server's first admin (polydb init -h for flags)
   polydb serve [flags]               run the server (polydb serve -h for flags)
   polydb [flags] [url]               open an interactive shell
   polydb run [flags] [url] file.rhz  run a script ("-" reads standard input)
@@ -48,6 +50,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	switch cmd {
 	case "", "shell":
 		return shellCmd(ctx, args, in, out, errOut)
+	case "init":
+		return initCmd(args, out, errOut)
 	case "serve":
 		return serveCmd(ctx, args, out, errOut)
 	case "run":

@@ -226,6 +226,11 @@ func Open(o Options) (_ *Store, err error) {
 	if err := s.log.RemoveBefore(s.logNum); err != nil {
 		return nil, err
 	}
+	// The log and manifest directories and the lock file must survive a
+	// crash of a new store.
+	if err := o.FS.SyncDir(o.Dir); err != nil {
+		return nil, err
+	}
 	s.next = last + 1
 	s.published.Store(last)
 	s.wg.Add(2)
