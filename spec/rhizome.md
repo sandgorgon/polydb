@@ -9,7 +9,7 @@ Rhizome is PolyDB's language for defining, changing, querying and inspecting dat
 - **Queries are pipelines.** Steps are joined with `|` and read top to bottom. A `match` step handles complex graph shapes.
 - **Edges use tilde arrows:** `~type~>` outgoing, `<~type~` incoming, `~type~` either direction.
 - **Keywords are lowercase only.** Names are case-sensitive.
-- **Statements end with `;`.** Comments are `//` and `/* */`. The REPL adds the `;` itself when you press Enter on a complete statement.
+- **Statements end with `;`.** Comments are `//` and `/* */`. The REPL adds the `;` itself when you press Enter on a complete statement. To continue a pipeline on the next line, end the line with `|`; an empty line runs whatever has been typed. Unterminated text, raw text and comments continue onto the next line.
 
 ---
 

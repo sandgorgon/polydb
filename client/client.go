@@ -30,6 +30,7 @@ type Option func(*options)
 type options struct {
 	identity      *auth9.Identity
 	password      func() (string, error)
+	passwordGiven bool
 	fingerprint   string
 	knownPeers    string
 	confirmPeer   func(addr, fingerprint string) bool
@@ -48,10 +49,14 @@ func WithIdentity(id *auth9.Identity) Option { return func(o *options) { o.ident
 
 // WithPassword logs in with a password (SCRAM).
 func WithPassword(pw string) Option {
-	return func(o *options) { o.password = func() (string, error) { return pw, nil } }
+	return func(o *options) {
+		o.password = func() (string, error) { return pw, nil }
+		o.passwordGiven = true
+	}
 }
 
-// WithPasswordFunc asks for a password only when one is needed.
+// WithPasswordFunc asks for a password only when one is needed: PEER
+// login on a Unix socket is tried first when the server offers it.
 func WithPasswordFunc(f func() (string, error)) Option { return func(o *options) { o.password = f } }
 
 // WithServerFingerprint trusts the server only if its 9auth identity has
@@ -160,11 +165,23 @@ func Dial(ctx context.Context, rawURL string, opts ...Option) (polydb.DB, error)
 	if o.password == nil && t.Password != "" {
 		pw := t.Password
 		o.password = func() (string, error) { return pw, nil }
+		o.passwordGiven = true
 	}
 	return dial(ctx, t, o)
 }
 
+// dial connects. If a KEY login fails (the identity isn't registered to
+// the user) and a password is available, it connects again and logs in
+// with the password: the server closes a connection after a failed login.
 func dial(ctx context.Context, t Target, o *options) (*Conn, error) {
+	c, err := dialOnce(ctx, t, o, false)
+	if polydb.CodeOf(err) == "auth_failed" && o.identity != nil && o.password != nil {
+		return dialOnce(ctx, t, o, true)
+	}
+	return c, err
+}
+
+func dialOnce(ctx context.Context, t Target, o *options, skipKey bool) (*Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, o.handshakeTime)
 	defer cancel()
 	var d net.Dialer
@@ -190,7 +207,7 @@ func dial(ctx context.Context, t Target, o *options) (*Conn, error) {
 	if dl, ok := ctx.Deadline(); ok {
 		nc.SetDeadline(dl)
 	}
-	c, err := handshake(nc, t, o, tlsState)
+	c, err := handshake(nc, t, o, tlsState, skipKey)
 	if err != nil {
 		nc.Close()
 		return nil, err
@@ -261,7 +278,7 @@ func (o *options) verifyPeer(addr string, certs []*x509.Certificate) error {
 }
 
 // handshake sends the preface and HELLO and logs in.
-func handshake(nc net.Conn, t Target, o *options, tlsState *tls.ConnectionState) (*Conn, error) {
+func handshake(nc net.Conn, t Target, o *options, tlsState *tls.ConnectionState, skipKey bool) (*Conn, error) {
 	c := newConn(nc, o.trace)
 	if err := wire.WritePreface(nc); err != nil {
 		return nil, err
@@ -286,8 +303,8 @@ func handshake(nc net.Conn, t Target, o *options, tlsState *tls.ConnectionState)
 	c.hello = ok
 	c.r.SetMaxFrameSize(int(ok.MaxFrameSize))
 	c.w.SetMaxFrameSize(int(ok.MaxFrameSize))
-	cfg := authn.ClientConfig{User: t.User, Password: o.password,
-		HasKey: o.identity != nil && tlsState != nil && len(tlsState.PeerCertificates) > 0}
+	cfg := authn.ClientConfig{User: t.User, Password: o.password, PasswordGiven: o.passwordGiven,
+		HasKey: !skipKey && o.identity != nil && tlsState != nil && len(tlsState.PeerCertificates) > 0}
 	authOK, err := authn.Login(&loginTransport{c}, cfg, ok.AuthMechanisms, tlsState)
 	if err != nil {
 		if errors.Is(err, authn.ErrFailed) {

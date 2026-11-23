@@ -154,6 +154,9 @@ func (cfg *ServerConfig) fake(user string) security.Credentials {
 type ClientConfig struct {
 	User     string
 	Password func() (string, error) // nil: no password available
+	// PasswordGiven says the password was supplied up front, not asked for
+	// on demand; without it, PEER is preferred when offered.
+	PasswordGiven bool
 	// HasKey reports that the client presented its 9auth identity in the
 	// TLS handshake, so KEY can be tried.
 	HasKey bool
@@ -161,14 +164,14 @@ type ClientConfig struct {
 
 // Login runs the client side of a login, choosing a mechanism from those
 // the server offered: KEY when the client has a key, PEER when it has no
-// password, then SCRAM (with channel binding over TLS). It returns the
-// server's AUTH_OK.
+// password given up front, then SCRAM (with channel binding over TLS). It
+// returns the server's AUTH_OK.
 func Login(t Transport, cfg ClientConfig, offered []string, tlsState *tls.ConnectionState) (*wire.AuthOK, error) {
 	has := func(m string) bool { return slices.Contains(offered, m) }
 	switch {
 	case cfg.HasKey && has(Key):
 		return finish(t, &wire.Auth{Mechanism: Key, User: cfg.User}, nil)
-	case cfg.Password == nil && has(Peer):
+	case !cfg.PasswordGiven && has(Peer):
 		return finish(t, &wire.Auth{Mechanism: Peer, User: cfg.User}, nil)
 	}
 	if cfg.Password == nil {

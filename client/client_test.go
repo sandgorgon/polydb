@@ -340,6 +340,14 @@ func TestTrustAndLogins(t *testing.T) {
 	}
 	db.Close()
 
+	// An identity that isn't registered falls back to the password.
+	stranger, _ := auth9.LoadFrom(filepath.Join(t.TempDir(), "stranger"))
+	db, err = client.Dial(ctx, url, client.WithIdentity(stranger), pw, client.WithServerFingerprint(ts.fingerprint))
+	if err != nil {
+		t.Fatalf("unregistered key with a password: %v", err)
+	}
+	db.Close()
+
 	// PEER login on the Unix socket.
 	db, err = client.Dial(ctx, "polydb+unix://"+ts.sock+"?user=admin")
 	if err != nil {

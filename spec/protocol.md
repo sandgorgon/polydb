@@ -587,3 +587,8 @@ None.
    - A blob reference stays valid for the lease time (10 minutes by default) from when its result was sent, whether or not a transaction is open.
    - CANCEL stops statements that haven't finished. A statement that completed before the cancel arrived keeps its effects and its result is sent.
    - `show sessions` (admin) lists each connection's session ID, user, database, remote address, time connected and request count.
+7. Client and CLI behaviour (Phase 3, 2026-11-22):
+   - A client with a 9auth identity tries `KEY` first. If the identity isn't registered to the user, the login fails and the server closes the connection, so the client connects again and logs in with its password, if it has one.
+   - On a Unix socket, `PEER` is preferred unless a password was given up front (`WithPassword`, the URL, or `POLYDB_PASSWORD` in the CLI); a password prompt is only a fallback.
+   - `polydb serve` keeps its identity and Unix socket in its data directory (`$POLYDB_DATA`, default `~/.local/share/polydb`), because `/var/run/polydb` needs root; a system service passes `--socket /var/run/polydb/polydb.sock`. Socket paths are limited to about 100 bytes by the OS, and longer ones are refused with a clear message.
+   - The CLI connects to `$POLYDB_URL`, or to the local server's socket. It uses the user's 9auth identity and known-peers file automatically, asks before trusting a new server, and asks for a password only when one is needed.
