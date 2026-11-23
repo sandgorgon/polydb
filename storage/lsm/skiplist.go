@@ -68,15 +68,18 @@ func (s *skiplist) insert(key []byte, seq uint64, kind uint8, value []byte) {
 	}
 }
 
-// seekGE returns the first node at or after (key, seq).
+// seekGE returns the first node at or after (key, seq). It returns the
+// node it compared, not a fresh load of x.next[0]: a node inserted after
+// x in the meantime may sort before (key, seq).
 func (s *skiplist) seekGE(key []byte, seq uint64) *node {
 	x := s.head
+	var next *node
 	for level := int(s.height.Load()) - 1; level >= 0; level-- {
-		for next := x.next[level].Load(); before(next, key, seq); next = x.next[level].Load() {
+		for next = x.next[level].Load(); before(next, key, seq); next = x.next[level].Load() {
 			x = next
 		}
 	}
-	return x.next[0].Load()
+	return next
 }
 
 // seekLT returns the last node before (key, seq), or nil.
