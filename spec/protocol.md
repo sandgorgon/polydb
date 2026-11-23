@@ -241,7 +241,7 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 8 | initial_conn_window | int | |
 | 9 | inline_value_limit | int | values up to this size are sent inline: the smaller of the server setting (default 16,384; from 1,024 up to the 64 MiB message limit) and the client's request in HELLO |
 
-**AUTH / AUTH_CONTINUE / AUTH_OK:** carry the mechanism name (first AUTH only) and opaque `bytes` for the mechanism's messages. AUTH_OK additionally carries `session_id` (id), `user` (text) and `database` (text?).
+**AUTH / AUTH_CONTINUE / AUTH_OK:** carry the mechanism name (first AUTH only) and opaque `bytes` for the mechanism's messages. AUTH fields: 1 `mechanism` (text?), 2 `data` (bytes), 3 `user` (text?, names the user for `KEY`). AUTH_CONTINUE: 1 `data`. AUTH_OK: 1 `data` (SCRAM server-final), 2 `session_id` (id), 3 `user` (text), 4 `database` (text?).
 
 **PING / PONG:** 8 bytes of opaque data, echoed back.
 
@@ -298,7 +298,7 @@ A request produces, per statement in order: **RESULT_HEADER**, zero or more **RO
 | 8 | warnings | `list<text>` |
 | 9 | plan | any? (for `explain`) |
 
-**NOTICE**: warnings or progress during a long statement (for example, index build progress). Clients may show or ignore it.
+**NOTICE**: warnings or progress during a long statement (for example, index build progress): 1 `message` (text), 2 `code` (text?). Clients may show or ignore it.
 
 **ERROR**
 
@@ -306,8 +306,8 @@ A request produces, per statement in order: **RESULT_HEADER**, zero or more **RO
 |---|---|---|
 | 1 | code | text (§11.2) |
 | 2 | message | text |
-| 3 | line, column | int? (position in the statement text) |
-| 4 | statement_index | int? |
+| 3 | position | `pair<int, int>?`: line and column in the statement text |
+| 4 | statement_index | int? (null when the error isn't tied to a statement) |
 | 5 | retryable | bool |
 | 6 | details | `map<text, any>` (for example the suggested field for `unknown_field`) |
 
@@ -317,11 +317,23 @@ Column values use the value encoding from types.md §12.1, with these additions 
 
 | Tag | Value | Contents |
 |---|---|---|
-| 0x22 | blob reference | content hash, total length, media type, **lease token** (§7) |
+| 0x22 | blob reference | value type (`text`, `bytes` or `image`), content hash, total length, media type, **lease token** (§7) |
 | 0x80 | entity | `id`, `kind`, metadata record, `fields: list<field>` |
 | 0x81 | field | `id`, `name`, `type`, `doc`, `declared`, `value` |
 | 0x82 | relation | `id`, `type`, `from` (id), `to` (id), `props: map<text, any>` |
 | 0x83 | path | `nodes: list<entity or field>`, `rels: list<relation>` |
+
+Byte layouts after the tag ("str" is a varint length then bytes; ids are 16 raw bytes; "value" is a value encoding, which may itself be one of these result values):
+
+| Tag | Layout |
+|---|---|
+| 0x22 | str type, str hash, varint length, str media type, str token |
+| 0x80 | id, value kind (text or null), value metadata `record{created, updated, version, labels, owner, props}`, varint count, that many 0x81 fields |
+| 0x81 | id, str name, str type expression, str doc, byte declared (0/1), byte present (0/1), then the value if present (absent fields have none) |
+| 0x82 | id, str type, id from, id to, value props (map) |
+| 0x83 | varint count, that many nodes (0x80 entities, or ids for field nodes), varint count, that many 0x82 relations |
+
+A list (0x50) in a result may hold these values, for example `ROWS`. Blob references only stand in for whole text, bytes or image values: a cell, or an entity field's value.
 
 Values larger than `inline_value_limit` (bytes, text, image data) are sent as **blob references** instead of inline. A large collection is always sent inline, because a whole field value was asked for. Its size is bounded by the 64 MiB message limit and by flow control.
 
@@ -370,7 +382,7 @@ Flow control stops a fast sender from flooding a slow receiver. It works like HT
 
 ## 10. Compression
 
-- Available only when the `deflate` feature is negotiated **and** the client requests it in HELLO options. It is off by default, and the Go client doesn't request it on Unix sockets.
+- Available only when the `deflate` feature is negotiated: the client lists it in HELLO `features` only when it wants compression, and the server enables it if it allows it. It is off by default, and the Go client doesn't request it on Unix sockets.
 - The sender compresses a whole message (before splitting into frames) with raw deflate (`compress/flate`) and sets `COMPRESSED` on its frames.
 - **The sender decides per message.** Messages under 1 KiB and BLOB_DATA for already-compressed formats (images, typical binaries) should be sent uncompressed.
 - Flow control windows count **compressed** bytes, since that's what crosses the wire.
