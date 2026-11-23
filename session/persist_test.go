@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/security"
@@ -269,4 +270,59 @@ func TestSecuritySaveFailure(t *testing.T) {
 	if _, ok := eng.Security().User("mallory"); ok {
 		t.Error("the user exists although saving failed")
 	}
+}
+
+// TestHistoryPersists checks that versions, life records and as of reads
+// survive a reopen and a crash, and that compaction keeps them.
+func TestHistoryPersists(t *testing.T) {
+	fs := vfs.NewMem()
+	clock := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	o := diskOptions(fs)
+	o.Now = func() time.Time { return clock }
+	eng := openDisk(t, o)
+	run := func(src string) {
+		t.Helper()
+		if err := execAs(t, eng, security.AdminUser, "h", src); err != nil {
+			t.Fatalf("%s: %v", src, err)
+		}
+	}
+	if err := execAs(t, eng, security.AdminUser, "", "create database h"); err != nil {
+		t.Fatal(err)
+	}
+	run(`define kind Acct history { owner: text, balance: int }`)
+	for i := range 40 { // enough versions to flush and compact
+		clock = clock.Add(24 * time.Hour)
+		run(fmt.Sprintf(`create Acct { owner: "o%02d", balance: %d }`, i, i))
+		run(fmt.Sprintf(`find Acct a | where a.owner = "o%02d" | update a set balance = %d`, i/2, 1000+i))
+	}
+	clock = clock.Add(24 * time.Hour)
+	run(`find Acct a | where a.owner = "o00" | delete a`)
+	past := `find Acct a as of t"2026-01-10T12:00:00Z" | sort a.owner | show a.owner, a.balance`
+	pastAll := `find Acct a as of t"2026-02-10T12:00:00Z" | show count()` // o00 is deleted on Feb 11
+	want := rows(t, eng, security.AdminUser, "h", past)
+	wantAll := rows(t, eng, security.AdminUser, "h", pastAll)
+	if !strings.Contains(want, `"o00" | 1001`) || wantAll != "40" {
+		t.Fatalf("before reopen: %q, %s", want, wantAll)
+	}
+	check := func(what string) {
+		t.Helper()
+		if got := rows(t, eng, security.AdminUser, "h", past); got != want {
+			t.Errorf("%s: as of\n got %s\nwant %s", what, got, want)
+		}
+		if got := rows(t, eng, security.AdminUser, "h", pastAll); got != wantAll {
+			t.Errorf("%s: deleted entity in the past: %s, want %s", what, got, wantAll)
+		}
+		if got := rows(t, eng, security.AdminUser, "h", `find Acct a | show count()`); got != "39" {
+			t.Errorf("%s: %s accounts now", what, got)
+		}
+	}
+	eng.Close()
+	eng = openDisk(t, o)
+	check("after reopen")
+	crashed := fs.Crash(rand.New(rand.NewPCG(1, 2)))
+	eng.Close()
+	o.FS = crashed
+	eng = openDisk(t, o)
+	defer eng.Close()
+	check("after a crash")
 }
