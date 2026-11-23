@@ -293,7 +293,17 @@ func (t *Txn) Commit() (uint64, error) {
 			return 0, ErrConflict
 		}
 	}
-	seq, err := m.store.Apply(&b)
+	// With a Preparer, the order and the conflict record are settled under
+	// the lock, and the wait for durability happens outside it, so
+	// concurrent commits can share a sync.
+	var seq uint64
+	var err error
+	commit := func() error { return nil }
+	if p, ok := m.store.(storage.Preparer); ok {
+		seq, commit, err = p.Prepare(&b)
+	} else {
+		seq, err = m.store.Apply(&b)
+	}
 	if err != nil {
 		m.finish(t)
 		m.mu.Unlock()
@@ -303,6 +313,9 @@ func (t *Txn) Commit() (uint64, error) {
 	m.finish(t)
 	hook := m.hook
 	m.mu.Unlock()
+	if err := commit(); err != nil {
+		return 0, err
+	}
 	if hook != nil {
 		hook(seq, keys)
 	}

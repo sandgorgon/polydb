@@ -83,6 +83,17 @@ type Store interface {
 	Close() error
 }
 
+// Preparer is implemented by stores that can split a commit in two, so
+// that the transaction layer can check conflicts and order commits under
+// its lock while waiting for durability outside it. That is what lets
+// concurrent commits share one sync (group commit).
+type Preparer interface {
+	// Prepare assigns b its sequence number and starts writing it. The
+	// batch becomes visible to readers when commit returns nil; batches
+	// become visible in sequence order. commit must be called exactly once.
+	Prepare(b *Batch) (seq uint64, commit func() error, err error)
+}
+
 // OpKind is the kind of a batch operation.
 type OpKind uint8
 

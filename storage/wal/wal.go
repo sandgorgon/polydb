@@ -273,8 +273,20 @@ func (l *Log) newSegment(n uint64) error {
 // Append writes a record. In durable mode it returns once the record is
 // synced; concurrent appends share syncs.
 func (l *Log) Append(rec []byte) error {
+	wait, err := l.Write(rec)
+	if err != nil {
+		return err
+	}
+	return wait()
+}
+
+// Write writes a record and returns a function that waits until it is
+// durable (in relaxed mode, it returns at once). Records are written in
+// the order Write is called; callers that need an order serialize their
+// calls, then wait outside their lock so that waits can share a sync.
+func (l *Log) Write(rec []byte) (wait func() error, err error) {
 	if len(rec) > maxRecord {
-		return fmt.Errorf("wal: record of %d bytes is too large", len(rec))
+		return nil, fmt.Errorf("wal: record of %d bytes is too large", len(rec))
 	}
 	buf := make([]byte, headerSize+len(rec))
 	binary.BigEndian.PutUint32(buf[4:8], uint32(len(rec)))
@@ -285,27 +297,27 @@ func (l *Log) Append(rec []byte) error {
 	l.mu.Lock()
 	if err := l.writable(); err != nil {
 		l.mu.Unlock()
-		return err
+		return nil, err
 	}
 	if l.size > int64(len(magic)) && l.size+int64(len(buf)) > l.o.SegmentSize {
 		if err := l.rotate(); err != nil {
 			l.mu.Unlock()
-			return err
+			return nil, err
 		}
 	}
 	if _, err := l.f.Write(buf); err != nil {
 		l.fail(err)
 		l.mu.Unlock()
-		return err
+		return nil, err
 	}
 	l.size += int64(len(buf))
 	l.written += uint64(len(buf))
 	target := l.written
 	l.mu.Unlock()
 	if l.o.Durability == Relaxed {
-		return nil
+		return func() error { return nil }, nil
 	}
-	return l.syncTo(target)
+	return func() error { return l.syncTo(target) }, nil
 }
 
 func (l *Log) writable() error {
