@@ -573,3 +573,10 @@ None.
    - Until persistence (Phase 4), `polydb serve` creates `admin` at startup: its password comes from `POLYDB_ADMIN_PASSWORD` or is generated and printed once, the OS user running the server maps to `admin` for `PEER`, and `--admin-key` registers a 9auth key. `polydb init` (§3.3) arrives with persistence.
    - Blob references (§7) are part of the Phase 3 server, served from values the server holds for the lease time.
    - The inline value limit is configurable by the server and requested by the client (HELLO field 7). The Go client offers `WithInlineLimit(n)`.
+6. Server behaviour (Phase 3, 2026-11-22):
+   - If the database named in HELLO can't be used (it doesn't exist, or the user has no permission on it), the login still succeeds and AUTH_OK's `database` is null.
+   - Prepared statements are checked again on every EXECUTE, so a schema change makes them fail only when they no longer fit. `stale_statement` is returned for an unknown or closed statement ID. PREPARED reports every parameter with type `any`, because parameter types come from the values supplied.
+   - `created_ids` in RESULT_END lists the IDs returned by `create` and `relate`.
+   - A blob reference stays valid for the lease time (10 minutes by default) from when its result was sent, whether or not a transaction is open.
+   - CANCEL stops statements that haven't finished. A statement that completed before the cancel arrived keeps its effects and its result is sent.
+   - `show sessions` (admin) lists each connection's session ID, user, database, remote address, time connected and request count.
