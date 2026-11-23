@@ -3,22 +3,32 @@ package query
 import (
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/model"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/value"
 )
 
 // graph implements lang.Graph on a transaction. Entities are cached for
 // the statement; writes reset the cache.
 type graph struct {
-	tx   *engine.Tx
-	ents map[value.ID]*engine.Entity
+	tx     *engine.Tx
+	ents   map[value.ID]*engine.Entity
+	hidden map[value.ID]bool // entities the user can't read
+	access Access
 }
 
-func (g *graph) reset() { clear(g.ents) }
+func (g *graph) reset() {
+	clear(g.ents)
+	clear(g.hidden)
+}
 
-// entity loads an entity, or reports false if id isn't one.
+// entity loads an entity, or reports false if id isn't one or is of a
+// kind the user can't read.
 func (g *graph) entity(id value.ID) (*engine.Entity, bool, error) {
 	if e, ok := g.ents[id]; ok {
 		return e, true, nil
+	}
+	if g.hidden[id] {
+		return nil, false, nil
 	}
 	n, ok, err := g.tx.Exists(id)
 	if err != nil || !ok || n != model.NodeEntity {
@@ -27,6 +37,10 @@ func (g *graph) entity(id value.ID) (*engine.Entity, bool, error) {
 	e, err := g.tx.Get(id)
 	if err != nil {
 		return nil, false, err
+	}
+	if g.access != nil && !g.access.Can(security.Read, e.Kind) {
+		g.hidden[id] = true
+		return nil, false, nil
 	}
 	g.ents[id] = e
 	return e, true, nil
@@ -160,7 +174,44 @@ func (g *graph) Degree(id value.ID, typ, dir string) (int, error) {
 		d = engine.In
 	}
 	rels, err := g.tx.Relations(id, d, typ)
-	return len(rels), err
+	if err != nil || g.access == nil {
+		return len(rels), err
+	}
+	// Count only relations whose other end the user can see.
+	n := 0
+	for _, r := range rels {
+		other := r.To
+		if r.To == id {
+			other = r.From
+		}
+		if visible, err := g.visible(other); err != nil {
+			return 0, err
+		} else if visible {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// visible reports whether the user can see a node: an entity of a
+// readable kind, or a field of one. Relations count as visible.
+func (g *graph) visible(id value.ID) (bool, error) {
+	n, ok, err := g.tx.Exists(id)
+	if err != nil || !ok {
+		return false, err
+	}
+	switch n {
+	case model.NodeField:
+		f, err := g.tx.FieldByID(id)
+		if err != nil {
+			return false, err
+		}
+		id = f.Entity
+	case model.NodeRelation:
+		return true, nil
+	}
+	_, ok, err = g.entity(id)
+	return ok, err
 }
 
 func (g *graph) Format(name string) (value.Format, bool) { return g.tx.Catalog().Format(name) }

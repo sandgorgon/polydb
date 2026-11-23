@@ -6,6 +6,7 @@ import (
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/model"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -48,13 +49,40 @@ func (x *executor) target(e lang.Expr, row lang.Row) (value.ID, model.NodeKind, 
 	return id, n, nil
 }
 
-// entityTarget is target for statements that need an entity.
-func (x *executor) entityTarget(e lang.Expr, row lang.Row) (value.ID, error) {
+// entityTarget is target for statements that change an entity: it
+// checks that the user may do p on the entity's kind.
+func (x *executor) entityTarget(e lang.Expr, row lang.Row, p security.Perm) (value.ID, error) {
 	id, n, err := x.target(e, row)
-	if err == nil && n != model.NodeEntity {
-		err = errAt(e, "type", "%s is a %s, not an entity", lang.FormatExpr(e), n)
+	if err != nil {
+		return id, err
 	}
-	return id, err
+	if n != model.NodeEntity {
+		return id, errAt(e, "type", "%s is a %s, not an entity", lang.FormatExpr(e), n)
+	}
+	if x.ctx.Access != nil {
+		k, err := x.nodeKind(e, id)
+		if err != nil {
+			return id, err
+		}
+		return id, x.need(e, p, k)
+	}
+	return id, nil
+}
+
+// needVisible fails with a permission error if the user can't read the
+// entity.
+func (x *executor) needVisible(n lang.Node, id value.ID) error {
+	if x.ctx.Access == nil {
+		return nil
+	}
+	if _, ok, err := x.graph.entity(id); err != nil || ok {
+		return fail(n, err)
+	}
+	k, err := x.nodeKind(n, id)
+	if err != nil {
+		return err
+	}
+	return x.need(n, security.Read, k)
 }
 
 // added converts an add clause entry.
@@ -75,6 +103,10 @@ func (x *executor) added(a *lang.AddField, f *lang.Frame) (engine.Add, error) {
 }
 
 func (x *executor) create(s *lang.Create) (*Result, error) {
+	k, _ := x.tx.Catalog().Kind(s.Kind)
+	if err := x.need(s, security.Write, k); err != nil {
+		return nil, err
+	}
 	vals := engine.Fields{}
 	var adds []engine.Add
 	for _, in := range s.Inits {
@@ -115,7 +147,7 @@ func (x *executor) create(s *lang.Create) (*Result, error) {
 }
 
 func (x *executor) update(s *lang.Update, row lang.Row) (int, error) {
-	id, err := x.entityTarget(s.Target, row)
+	id, err := x.entityTarget(s.Target, row, security.Write)
 	if err != nil {
 		return 0, err
 	}
@@ -284,7 +316,7 @@ func (x *executor) setIn(as *lang.Assign, cur value.Value, steps []lang.LStep, f
 }
 
 func (x *executor) delete(s *lang.Delete, row lang.Row) (int, error) {
-	id, err := x.entityTarget(s.Target, row)
+	id, err := x.entityTarget(s.Target, row, security.Write)
 	if err != nil {
 		return 0, err
 	}
@@ -314,6 +346,26 @@ func (x *executor) node(n lang.NodeRef, row lang.Row) (value.ID, error) {
 	return f.ID, nil
 }
 
+// mayRelate checks the permissions relate and unrelate need: relate on
+// the source's kind and read on the target's (spec/rhizome.md §11).
+func (x *executor) mayRelate(n lang.Node, from, to value.ID) error {
+	if x.ctx.Access == nil {
+		return nil
+	}
+	fk, err := x.nodeKind(n, from)
+	if err != nil {
+		return err
+	}
+	if err := x.need(n, security.Relate, fk); err != nil {
+		return err
+	}
+	tk, err := x.nodeKind(n, to)
+	if err != nil {
+		return err
+	}
+	return x.need(n, security.Read, tk)
+}
+
 func (x *executor) relate(s *lang.Relate, row lang.Row) (*Result, error) {
 	from, err := x.node(s.From, row)
 	if err != nil {
@@ -325,6 +377,9 @@ func (x *executor) relate(s *lang.Relate, row lang.Row) (*Result, error) {
 	}
 	if s.Edge.Dir == lang.DirIn {
 		from, to = to, from
+	}
+	if err := x.mayRelate(s, from, to); err != nil {
+		return nil, err
 	}
 	props := engine.Fields{}
 	if s.Edge.Props != nil {
@@ -360,6 +415,13 @@ func (x *executor) unrelate(s *lang.Unrelate, row lang.Row) (int, error) {
 		if n != model.NodeRelation {
 			return 0, errAt(s.Target, "type", "%s is a %s, not a relation", lang.FormatExpr(s.Target), n)
 		}
+		rel, err := x.tx.Relation(id)
+		if err != nil {
+			return 0, fail(s, err)
+		}
+		if err := x.mayRelate(s, rel.From, rel.To); err != nil {
+			return 0, err
+		}
 		return 1, fail(s, x.tx.Unrelate(id))
 	}
 	from, err := x.node(*s.From, row)
@@ -373,12 +435,15 @@ func (x *executor) unrelate(s *lang.Unrelate, row lang.Row) (int, error) {
 	if s.Edge.Dir == lang.DirIn {
 		from, to = to, from
 	}
+	if err := x.mayRelate(s, from, to); err != nil {
+		return 0, err
+	}
 	n, err := x.tx.UnrelateAll(from, s.Edge.Types[0], to)
 	return n, fail(s, err)
 }
 
 func (x *executor) push(s *lang.Push, row lang.Row) (int, error) {
-	id, err := x.entityTarget(s.Field.Target, row)
+	id, err := x.entityTarget(s.Field.Target, row, security.Write)
 	if err != nil {
 		return 0, err
 	}
@@ -405,7 +470,7 @@ func (x *executor) push(s *lang.Push, row lang.Row) (int, error) {
 
 // pop runs a pop and returns the value, or a list with a count.
 func (x *executor) pop(s *lang.Pop, row lang.Row) (value.Value, error) {
-	id, err := x.entityTarget(s.Field.Target, row)
+	id, err := x.entityTarget(s.Field.Target, row, security.Write)
 	if err != nil {
 		return nil, err
 	}

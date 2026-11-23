@@ -98,7 +98,7 @@ HELLO_OK lists the mechanisms the server allows on this connection. The client p
 - Follows RFC 5802 and RFC 7677 exactly. The client-first, server-first, client-final and server-final messages travel in AUTH, AUTH_CONTINUE, AUTH and AUTH_OK respectively.
 - **Stored credentials:** the server stores only the salt, iteration count, StoredKey and ServerKey. It never stores the password or a plain password hash.
 - **Iterations:** PBKDF2-SHA-256 with 100,000 iterations by default, configurable per server, minimum 4,096.
-- Usernames and passwords are normalized with SASLprep (RFC 4013 profile), implemented with `golang.org/x/text`.
+- Passwords are normalized with the PRECIS OpaqueString profile (RFC 8265, the successor to SASLprep), from `golang.org/x/text/secure/precis`. User names are PolyDB identifiers, NFC-normalized (types.md §14).
 - **The client verifies the server's final signature** before treating the login as successful. A server that can't produce it is treated as an impostor.
 
 ### 3.3 Failed logins
@@ -225,6 +225,7 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 4 | client_version | text | |
 | 5 | database | text? | database to `use` after login |
 | 6 | user | text? | user name (SCRAM) |
+| 7 | inline_value_limit | int? | the largest value the client wants inline; the connection uses the smaller of this and the server's setting |
 
 **HELLO_OK** (server)
 
@@ -238,7 +239,7 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 6 | max_streams | int | |
 | 7 | initial_stream_window | int | flow control (§8) |
 | 8 | initial_conn_window | int | |
-| 9 | inline_value_limit | int | values up to this size are sent inline (default 16,384) |
+| 9 | inline_value_limit | int | values up to this size are sent inline: the smaller of the server setting (default 16,384; from 1,024 up to the 64 MiB message limit) and the client's request in HELLO |
 
 **AUTH / AUTH_CONTINUE / AUTH_OK:** carry the mechanism name (first AUTH only) and opaque `bytes` for the mechanism's messages. AUTH_OK additionally carries `session_id` (id), `user` (text) and `database` (text?).
 
@@ -551,3 +552,8 @@ None.
    - `KEY` login, which replaces the post-v1 `CERT` plan
    - trust-on-first-use server pinning in the CLI
    - authenticated remote 9P over TLS
+5. Phase 3 decisions (2026-11-22):
+   - Users, roles, grants and keys live in a **system store** with typed records, separate from the databases, so credentials can never be read through Rhizome.
+   - Until persistence (Phase 4), `polydb serve` creates `admin` at startup: its password comes from `POLYDB_ADMIN_PASSWORD` or is generated and printed once, the OS user running the server maps to `admin` for `PEER`, and `--admin-key` registers a 9auth key. `polydb init` (§3.3) arrives with persistence.
+   - Blob references (§7) are part of the Phase 3 server, served from values the server holds for the lease time.
+   - The inline value limit is configurable by the server and requested by the client (HELLO field 7). The Go client offers `WithInlineLimit(n)`.

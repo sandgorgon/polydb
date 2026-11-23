@@ -965,6 +965,14 @@ None.
    - `typeof(x)` gives the type family (`"int"`, `"list"`), or `"doc<F>"` for documents.
    - A path value is a list alternating node refs and relation IDs. `len(path)` counts relations, `nodes(path)` and `rels(path)` pick them out.
 11. Table formats (2026-11-22): csv and tsv derived formats take a `header` option and declare their columns, with `at n` for a position and `default` for empty or missing cells. Undeclared columns are ignored (§5.3).
+13. Permissions (Phase 3, 2026-11-22):
+   - **Entities of kinds you can't read are invisible:** scans and patterns skip them, reads through refs give null, and `degree` doesn't count relations to them. `find Kind x` without read on that kind, or naming such an entity by handle or ID, is a `permission` error.
+   - Kindless entities are covered by database-level and server-level grants only.
+   - `use` needs some permission on the database, and `show databases` lists only those. `create database` and `drop database` need admin on the server.
+   - `relate` and `unrelate` need `relate` on the source's kind and `read` on the target's. Writing to an entity needs `write` on its kind, and `define` at kind level covers `alter kind`, `drop kind` and indexes on that kind.
+   - Users, roles, grants and keys change at once, outside transactions: running one of those statements inside a transaction is an error. Admins of a database can grant permissions on it; roles and server grants need a server admin.
+   - Grants on a kind follow it when it is renamed. `show grants for x` lists x's grants and those of its roles; users who aren't admins see only their own.
+   - The built-in user `admin` has admin on the server and can't be dropped or lose that grant.
 12. Sessions (Phase 2, 2026-11-22):
    - **Any error inside a transaction aborts it.** Later statements fail until `rollback`, and `commit` rolls back and reports `conflict`. This stops the rest of a script from running as if the failed statement had worked.
    - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.

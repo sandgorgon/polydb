@@ -868,9 +868,13 @@ func (p *parser) grant() (Stmt, error) {
 		}
 		return false
 	}
-	if isPerm(p.tok()) && (p.peekTok(1).Is("on") || p.peekTok(1).Is(",")) {
+	// A name followed by "on" or "," starts a permission list (§15.5).
+	if t := p.tok(); (t.Kind == Ident || t.Kind == Keyword) && (p.peekTok(1).Is("on") || p.peekTok(1).Is(",")) {
 		for {
-			if !isPerm(p.tok()) {
+			if t := p.tok(); !isPerm(t) {
+				if t.Kind == Ident || t.Kind == Keyword {
+					return nil, syntaxErr(t.Pos, "unknown permission %s: use read, write, relate, define or admin", t.Text)
+				}
 				return nil, p.errExpected("read, write, relate, define or admin")
 			}
 			g.Perms = append(g.Perms, p.advance().Text)

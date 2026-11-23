@@ -9,6 +9,7 @@ import (
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/model"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -197,6 +198,11 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		if n == model.NodeEntity {
+			if err := x.needVisible(src.Start, id); err != nil {
+				return nil, nil, err
+			}
+		}
 		return []prow{{vars: lang.Row{src.StartAs: nodeValue(id, n)}}}, []string{src.StartAs}, nil
 	}
 	rows := []prow{{vars: lang.Row{}}}
@@ -210,10 +216,27 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
 			}
 		} else {
 			var stop error
+			filter := false
+			if kv.Kind != "" {
+				k, _ := x.tx.Catalog().Kind(kv.Kind)
+				if err := x.need(pl, security.Read, k); err != nil {
+					return nil, nil, err
+				}
+			} else {
+				filter = x.ctx.Access != nil
+			}
 			err := x.tx.Entities(kv.Kind, func(id value.ID) bool {
+				if stop = x.tick(pl); stop != nil {
+					return false
+				}
+				if filter {
+					var ok bool
+					if _, ok, stop = x.graph.entity(id); stop != nil || !ok {
+						return stop == nil
+					}
+				}
 				cands = append(cands, value.Ref{Target: id})
-				stop = x.tick(pl)
-				return stop == nil
+				return true
 			})
 			if stop != nil {
 				return nil, nil, stop
@@ -598,10 +621,20 @@ func (x *executor) startNodes(pn *lang.PNode, r prow) ([]start, error) {
 			break
 		}
 		var out []start
+		var hidden error
 		err := x.tx.Entities(pn.Kind, func(id value.ID) bool {
-			out = append(out, start{id, r.with(pn.Var, value.Ref{Target: id})})
+			var ok bool
+			if _, ok, hidden = x.graph.entity(id); hidden != nil {
+				return false
+			}
+			if ok {
+				out = append(out, start{id, r.with(pn.Var, value.Ref{Target: id})})
+			}
 			return true
 		})
+		if hidden != nil {
+			return nil, fail(pn, hidden)
+		}
 		if err != nil || pn.Field == "" {
 			return out, fail(pn, err)
 		}
@@ -618,6 +651,11 @@ func (x *executor) startNodes(pn *lang.PNode, r prow) ([]start, error) {
 	id, ok, err := x.nodeOf(pn, v, pn.Field)
 	if err != nil || !ok {
 		return nil, err
+	}
+	if owner, isRef := v.(value.Ref); isRef {
+		if _, visible, err := x.graph.entity(owner.Target); err != nil || !visible {
+			return nil, fail(pn, err)
+		}
 	}
 	return []start{{id, r}}, nil
 }

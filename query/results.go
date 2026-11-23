@@ -24,7 +24,11 @@ func (x *executor) cell(v value.Value, t lang.Static) (any, error) {
 		}
 		switch n {
 		case model.NodeEntity:
-			return x.entityCell(id)
+			e, err := x.entityCell(id)
+			if e == nil || err != nil {
+				return value.Null, err
+			}
+			return e, nil
 		case model.NodeRelation:
 			return x.relationCell(id)
 		}
@@ -55,6 +59,10 @@ func (x *executor) cell(v value.Value, t lang.Static) (any, error) {
 				e, err := x.entityCell(id)
 				if err != nil {
 					return nil, err
+				}
+				if e == nil {
+					p.Nodes = append(p.Nodes, value.Null)
+					continue
 				}
 				p.Nodes = append(p.Nodes, e)
 			} else {

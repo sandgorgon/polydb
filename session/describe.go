@@ -9,6 +9,7 @@ import (
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/model"
 	"github.com/sandgorgon/polydb/query"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -85,6 +86,13 @@ func (s *Session) describe(qc *query.Context, st *lang.Describe) (*query.Result,
 		id, err := s.targetID(qc, st.Target)
 		if err != nil {
 			return nil, err
+		}
+		if n, ok, _ := tx.Exists(id); ok && n == model.NodeEntity {
+			if e, err := tx.Get(id); err == nil {
+				if err := s.need(st, security.Read, e.Kind); err != nil {
+					return nil, err
+				}
+			}
 		}
 		return describeNode(tx, st, id)
 	}
@@ -380,6 +388,9 @@ func (s *Session) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, err
 	case "kinds":
 		r := table("name", "mode", "fields", "entities", "doc")
 		for _, k := range cat.Kinds() {
+			if !s.access().Can(security.Read, k) {
+				continue
+			}
 			n, err := tx.CountEntities(k.Name)
 			if err != nil {
 				return nil, failAt(st, err)
@@ -428,6 +439,9 @@ func (s *Session) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, err
 		}
 		add(r, "entities", total)
 		for _, k := range cat.Kinds() {
+			if !s.access().Can(security.Read, k) {
+				continue
+			}
 			n, err := tx.CountEntities(k.Name)
 			if err != nil {
 				return nil, failAt(st, err)
@@ -459,6 +473,9 @@ func (s *Session) kindStats(qc *query.Context, st *lang.ShowStmt) (*query.Result
 	k, ok := tx.Catalog().Kind(st.For)
 	if !ok {
 		_, err := lang.Check(envOf(qc), st) // for the suggestion
+		return nil, err
+	}
+	if err := s.need(st, security.Read, k); err != nil {
 		return nil, err
 	}
 	type stat struct {

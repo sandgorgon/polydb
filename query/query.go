@@ -11,6 +11,7 @@ import (
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/model"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -48,6 +49,17 @@ type Context struct {
 	// Trace, if set, receives the rows each pipeline step produced and
 	// the time it took, for explain analyze. The source has a nil step.
 	Trace func(step lang.Step, rows int, d time.Duration)
+	// Access, if set, decides what the user may do. Entities of kinds the
+	// user can't read are invisible: scans and patterns skip them, and
+	// naming one directly is a permission error. Nil allows everything
+	// (embedded mode).
+	Access Access
+}
+
+// Access decides what the user running a statement may do with entities
+// of a kind (nil: kindless entities, decided at database level).
+type Access interface {
+	Can(p security.Perm, kind *model.Kind) bool
 }
 
 // Column is a result column.
@@ -111,7 +123,7 @@ func Exec(ctx *Context, s lang.Stmt) (*Result, error) {
 		return nil, err
 	}
 	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
-	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}}
+	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}, hidden: map[value.ID]bool{}, access: ctx.Access}
 	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, Handles: x.handleValues(), Now: x.now}
 	res, err := x.stmt(s)
 	if err != nil {
@@ -130,6 +142,46 @@ type executor struct {
 	ev    *lang.Evaluator
 	now   time.Time
 	ticks int
+}
+
+// can reports whether the user may do p on entities of kind.
+func (x *executor) can(p security.Perm, kind *model.Kind) bool {
+	return x.ctx.Access == nil || x.ctx.Access.Can(p, kind)
+}
+
+// need fails with a permission error unless the user may do p on kind.
+func (x *executor) need(n lang.Node, p security.Perm, kind *model.Kind) error {
+	if x.can(p, kind) {
+		return nil
+	}
+	if kind == nil {
+		return errAt(n, "permission", "you don't have %s permission on kindless entities in this database", p)
+	}
+	return errAt(n, "permission", "you don't have %s permission on kind %s", p, kind.Name)
+}
+
+// nodeKind returns the kind of a node's entity: the entity itself, or the
+// entity a field belongs to. Relations have none.
+func (x *executor) nodeKind(n lang.Node, id value.ID) (*model.Kind, error) {
+	nk, ok, err := x.tx.Exists(id)
+	if err != nil || !ok {
+		return nil, fail(n, err)
+	}
+	switch nk {
+	case model.NodeField:
+		f, err := x.tx.FieldByID(id)
+		if err != nil {
+			return nil, fail(n, err)
+		}
+		id = f.Entity
+	case model.NodeRelation:
+		return nil, nil
+	}
+	e, err := x.tx.Get(id)
+	if err != nil {
+		return nil, fail(n, err)
+	}
+	return e.Kind, nil
 }
 
 // tick calls the Interrupt hook every so often.

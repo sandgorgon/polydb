@@ -31,10 +31,15 @@ type Session struct {
 	aborted error                   // the error that aborted the open transaction
 }
 
-// New starts a session for user. No database is in use until "use".
+// New starts a session for user, whose permissions come from the
+// engine's system store; embedded programs usually run as
+// security.AdminUser. No database is in use until "use".
 func New(eng *engine.Engine, user string) *Session {
 	return &Session{eng: eng, user: user, handles: map[string]query.Handle{}, settings: query.DefaultSettings}
 }
+
+// User returns the session's user.
+func (s *Session) User() string { return s.user }
 
 // Database returns the name of the database in use, or "".
 func (s *Session) Database() string {
@@ -136,10 +141,16 @@ func (s *Session) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 		if err := s.noTx(st, "create database"); err != nil {
 			return nil, err
 		}
+		if err := s.needAdmin(st, "create database"); err != nil {
+			return nil, err
+		}
 		_, err := s.eng.CreateDatabase(st.Name)
 		return &query.Result{}, s.fail(st, err)
 	case *lang.DropDatabase:
 		if err := s.noTx(st, "drop database"); err != nil {
+			return nil, err
+		}
+		if err := s.needAdmin(st, "drop database"); err != nil {
 			return nil, err
 		}
 		if err := s.eng.DropDatabase(st.Name); err != nil {
@@ -157,6 +168,9 @@ func (s *Session) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 		if err != nil {
 			return nil, s.fail(st, err)
 		}
+		if !s.eng.Security().CanSee(s.user, st.Name) {
+			return nil, denied(st, "you don't have permission on database %s", st.Name)
+		}
 		if s.db != db {
 			s.handles = map[string]query.Handle{} // handles name entities of one database
 		}
@@ -166,9 +180,15 @@ func (s *Session) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 		if st.What == "databases" {
 			res := &query.Result{Columns: []query.Column{textCol("name")}}
 			for _, n := range s.eng.Databases() {
-				res.Rows = append(res.Rows, []any{value.MustText(n)})
+				if s.eng.Security().CanSee(s.user, n) {
+					res.Rows = append(res.Rows, []any{value.MustText(n)})
+				}
 			}
 			return res, nil
+		}
+		switch st.What {
+		case "users", "roles", "grants", "keys", "sessions":
+			return s.showSecurity(st)
 		}
 	case *lang.SetSetting:
 		return s.set(st, params)
@@ -197,10 +217,10 @@ func (s *Session) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 		s.endTx(false)
 		return &query.Result{}, nil
 	case *lang.CreateUser, *lang.CreateRole, *lang.Grant, *lang.AlterUser:
-		return nil, sessionErr(st, "unsupported", "users, roles and grants arrive with security in a later phase")
+		return s.security(st, params)
 	case *lang.Drop:
 		if st.What == "user" || st.What == "role" {
-			return nil, sessionErr(st, "unsupported", "users, roles and grants arrive with security in a later phase")
+			return s.security(st, params)
 		}
 	case *lang.History:
 		return nil, sessionErr(st, "unsupported", "history arrives in a later phase")
@@ -309,6 +329,7 @@ func (s *Session) inTx(ctx context.Context, st lang.Stmt, params map[string]valu
 	qc := &query.Context{
 		Tx: tx, Handles: handles, Params: params, Settings: s.settings,
 		Interrupt: func() error { return interrupted(ctx, s.settings.Timeout) },
+		Access:    s.access(),
 	}
 	if auto {
 		qc.Wait = func(id value.ID, field string, wait time.Duration) (value.Value, error) {
@@ -361,6 +382,9 @@ func readOnly(st lang.Stmt) bool {
 // run dispatches database statements: introspection here, the rest to
 // the executor.
 func (s *Session) run(ctx context.Context, qc *query.Context, st lang.Stmt) (*query.Result, error) {
+	if err := s.authorize(qc, st); err != nil {
+		return nil, err
+	}
 	switch st := st.(type) {
 	case *lang.Describe:
 		return s.describe(qc, st)

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/sandgorgon/polydb/catalog"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/storage"
 	"github.com/sandgorgon/polydb/storage/mem"
 	"github.com/sandgorgon/polydb/txn"
@@ -36,6 +37,9 @@ type Options struct {
 	Now func() time.Time
 	// MaxPopWait caps how long PopWait may wait (default 15 minutes).
 	MaxPopWait time.Duration
+	// PasswordIterations is the PBKDF2 iteration count for new passwords
+	// (default security.DefaultIterations, at least security.MinIterations).
+	PasswordIterations int
 }
 
 // Engine hosts databases. It is safe for concurrent use.
@@ -43,10 +47,16 @@ type Engine struct {
 	opts Options
 	ids  *value.IDGenerator
 
+	sec *security.Store
+
 	mu     sync.RWMutex
 	dbs    map[string]*DB
 	closed bool
 }
+
+// Security returns the engine's system store: users, roles, grants and
+// keys.
+func (e *Engine) Security() *security.Store { return e.sec }
 
 // Open returns a new engine.
 func Open(opts Options) (*Engine, error) {
@@ -59,7 +69,8 @@ func Open(opts Options) (*Engine, error) {
 	if opts.MaxPopWait <= 0 {
 		opts.MaxPopWait = 15 * time.Minute
 	}
-	return &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{}}, nil
+	return &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{},
+		sec: security.New(opts.PasswordIterations)}, nil
 }
 
 // CreateDatabase creates a new, empty database.
@@ -120,6 +131,7 @@ func (e *Engine) DropDatabase(name string) error {
 	if !ok {
 		return errorf(CodeNotFound, "no database %s", name)
 	}
+	e.sec.DropDatabase(name)
 	return db.close()
 }
 

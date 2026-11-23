@@ -16,6 +16,7 @@ import (
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/query"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -33,8 +34,9 @@ import (
 // text" expects an error with that code whose message contains the text.
 // "// warning: text" expects a warning, and "// affected: n" a count of
 // changes. A statement without expectations must succeed. Each script
-// runs in a fresh engine, with database "test" in use and a fixed clock
-// (2026-11-22T12:00:00Z).
+// runs in a fresh engine as the admin user, with database "test" in use
+// and a fixed clock (2026-11-22T12:00:00Z). "// as name" continues in a
+// new session for that user, using "test" if the user may.
 //
 // IDs change from run to run, so rendered rows show every ID as #ID.
 //
@@ -70,12 +72,13 @@ func (e *expect) empty() bool { return !e.hasRows && !e.hasErr && !e.hasAff && l
 func newScriptSession(t *testing.T) *Session {
 	t.Helper()
 	clock := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
-	eng, err := engine.Open(engine.Options{Now: func() time.Time { return clock }, MaxPopWait: time.Minute})
+	eng, err := engine.Open(engine.Options{Now: func() time.Time { return clock }, MaxPopWait: time.Minute,
+		PasswordIterations: security.MinIterations})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { eng.Close() })
-	s := New(eng, "tester")
+	s := New(eng, security.AdminUser)
 	if _, err := s.Exec(context.Background(), "create database test; use test;", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +98,16 @@ func runScript(t *testing.T, file string) {
 	chunkStart := 1
 	for i := 0; i < len(lines); {
 		line := strings.TrimSpace(lines[i])
+		if user, ok := strings.CutPrefix(line, "// as "); ok {
+			runChunk(t, s, file, chunkStart, strings.Join(chunk, "\n"), &expect{})
+			s = New(s.eng, strings.TrimSpace(user))
+			s.ExecStmt(context.Background(), &lang.Use{Name: "test"}, nil)
+			t.Cleanup(s.Close)
+			out = append(out, lines[i])
+			chunk, chunkStart = nil, i+2
+			i++
+			continue
+		}
 		if !isExpect(line) {
 			chunk = append(chunk, lines[i])
 			out = append(out, lines[i])

@@ -108,9 +108,11 @@ pop @w.jobs wait 10ms;
 // => null
 
 // Things later phases add.
-create user ramon password "secret";
-// error unsupported: security
 history @a.balance;
 // error unsupported: history
-show users;
-// error unsupported: security
+
+// Security statements don't run inside transactions.
+begin;
+create role analyst;
+// error constraint: can't change inside a transaction
+rollback;

@@ -268,6 +268,8 @@ func TestParseErrors(t *testing.T) {
 		`relate @a ~knows~> `:                                   "expected a handle, ID, parameter or variable",
 		`grant read on planet x to y`:                           "expected server, database or kind",
 		`find p | where x is 5`:                                 "expected null, a type or a kind",
+		`grant flying on database x to y`:                       "unknown permission flying",
+		`grant read, fly on server to y`:                        "unknown permission fly",
 		`select * from t`:                                       "expected a statement",
 		`define kind P { a: int unique unique }`:                "unique is given more than once",
 		`define kind P { a: int "x" doc "y" }`:                  "doc is given more than once",
