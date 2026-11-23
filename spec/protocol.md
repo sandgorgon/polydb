@@ -473,6 +473,13 @@ err = polydb.RetryTx(ctx, db, func(tx polydb.Tx) error {   // retries on 'confli
 - **Client identity:** `WithIdentity(id)` presents a 9auth identity. The CLI uses the per-user identity from `auth.Load()` (`~/.config/9`) automatically. `WithPasswordFunc(f)` supplies a password for SCRAM.
 - **Debugging:** the CLI's `--trace` option prints every frame and message in readable form (field names, decoded values, with secrets redacted).
 
+**As built (Phase 3, 2026-11-22):**
+- The interfaces live in the root package `polydb` (`DB`, `Querier`, `Tx`, `Stmt`, `Rows`, `Params`, `Result`, `Error`, `RetryTx`), with plain result types `Entity`, `Field`, `Relation`, `Path` and the lazy `Blob` (an `io.ReaderAt`). `client.Dial` returns a `polydb.DB`; `polydb.Embed(ctx, engine, user, database)` returns one backed by an engine in the same program.
+- `Rows` has one result set per statement: `Next` and `Scan` read the current one, `NextResultSet` moves on. If a later statement of a script fails, the earlier results can still be read and the error appears in `Rows.Err` once `NextResultSet` reaches it. `Exec` runs a whole script and sums what it changed.
+- `Scan` converts to Go types (`*string`, `*int64`, `*float64`, `*bool`, `*[]byte`, `*time.Time`, `*time.Duration`, `*value.ID`), keeps values as they are for `*any` and `*value.Value`, and takes null only into pointers to pointers. Blob references are fetched when scanned into anything but `*any` or `**Blob`.
+- More options: `WithPassword`, `WithConfirmPeer` (ask before trusting a new server), `WithTLSConfig`, `WithInsecure` (plain TCP to a loopback server), `WithCompression` and `WithTrace`. Dial refuses to connect over TLS without a way to trust the server.
+- Prepared statements that come back `stale_statement` are prepared again once, automatically.
+
 ---
 
 ## 14. 9P access layer (browsing and Unix tools)
