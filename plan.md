@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) and Phase 2 (Rhizome language) complete and merged into `master`. Phase 3 (security, wire protocol, authentication, server, Go client, CLI) complete and merged into `master`. Phase 4 (persistence) in progress on branch `phase-4`: the server keeps its databases and users in its data directory, and `polydb init` sets up the first admin. Non-unique indexes are recorded but not built yet (Phase 5).
+Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) and Phase 2 (Rhizome language) complete and merged into `master`. Phase 3 (security, wire protocol, authentication, server, Go client, CLI) complete and merged into `master`. Phase 4 (persistence: write-ahead log, LSM storage, crash safety, on-disk databases and users, `polydb init`, field history) complete and merged into `master`. Next: Phase 5 (indexes, full-text search, planner). Non-unique indexes are recorded but not built yet (Phase 5).
 Source requirements: [req.md](req.md)
 
 ---
@@ -176,7 +176,7 @@ Both modes implement the same Go interface, so application code can switch betwe
 3. **Server + client + binary wire protocol + CLI REPL connected to the server**, plus users, roles and permissions (still on in-memory storage)
 4. Persistence: WAL + LSM, MVCC, crash recovery
 5. Indexes, full-text search, planner, `explain`
-6. Large-data work: blob store, compaction tuning, stats, transformations, backup/restore, import/export, graph export (DOT/JSON)
+6. Large-data work: blob store, compaction tuning, stats, transformations, backup/restore, import/export, graph export (DOT/JSON), and maintenance: a sweep that removes history past its retention for fields that are no longer written and for deleted entities (Phase 4 prunes only when a field is written)
 7. 9P access layer (`server/ninep`): file tree, query files, Linux mount testing
 8. Embedded mode polish and packaging; API stability review
 9. **v1.0 release**
@@ -232,4 +232,4 @@ None. All planning questions are settled; next step is Phase 0 (specifications).
 | 2026-11-22 | Field IDs assigned when a field is first written | `::id` always works and any field can be related at any time |
 | 2026-11-22 | Guarded reads for constraint checks | Snapshot isolation plus read guards on the keys and ranges a check depends on, so `unique`, `max out/in` and `restrict` hold under concurrency. Definition changes write a catalog-version key that every data writer guards |
 | 2026-11-22 | Phase 4 storage choices | Durable commits by default with group commit (a `relaxed` setting for bulk loads); no block compression yet, with a per-block compression type in the format; leveled compaction; opt-in field history and `as of` built in Phase 4 |
-| 2026-11-22 | One compaction at a time, for now | Flushes run independently, but compactions are serialized, so a long deep compaction delays level 0→1 and sustained writes faster than the disk can compact (bulk loads) can stall at 12 level-0 tables. Revisit with a bulk-load benchmark once the engine uses the store (Phase 4 step 6 or the Phase 6 compaction tuning): run level 0→1 alongside deeper compactions, and slow writes gradually instead of stopping them |
+| 2026-11-22 | One compaction at a time, for now (confirmed 2026-11-23) | Flushes run independently, but compactions are serialized, so a long deep compaction delays level 0→1 and sustained writes faster than the disk can compact (bulk loads) can stall at 12 level-0 tables. Revisit once the system is in real use, if stalls show up: run level 0→1 alongside deeper compactions, and slow writes gradually instead of stopping them |
