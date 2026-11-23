@@ -156,7 +156,7 @@ func (s *env) describe(qc *query.Context, st *lang.Describe) (*query.Result, err
 		ix, _ := cat.Index(st.Name)
 		k, _ := cat.KindByID(ix.Kind)
 		r := table("section", "name", "type", "detail", "doc")
-		add(r, "index", ix.Name, indexType(ix), "on "+k.Name+"("+indexKeys(ix)+"), "+indexStatus(ix), "")
+		add(r, "index", ix.Name, indexType(ix), "on "+k.Name+"("+indexKeys(ix)+"), "+indexStatus(qc.Tx, ix), "")
 		return r, nil
 	}
 	return nil, sessionErr(st, "syntax", "can't describe %s", st.What)
@@ -230,14 +230,20 @@ func indexKeys(ix *model.Index) string {
 	return strings.Join(ks, ", ")
 }
 
-// indexStatus says whether an index is in use. Unique indexes are kept
-// up to date by every write; other indexes are recorded now and built by
-// the query planner in a later phase.
-func indexStatus(ix *model.Index) string {
-	if ix.Unique {
+// indexStatus says whether an index is ready, or how far its background
+// build has got.
+func indexStatus(tx *engine.Tx, ix *model.Index) string {
+	if ix.Text {
+		return "recorded, not built yet"
+	}
+	st, err := tx.IndexState(ix)
+	switch {
+	case err != nil:
+		return "unknown: " + err.Error()
+	case st.Ready:
 		return "ready"
 	}
-	return "recorded, not built yet"
+	return fmt.Sprintf("building: %d entities indexed", st.Done)
 }
 
 // targetID resolves a describe target to a node ID.
@@ -425,7 +431,7 @@ func (s *env) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) 
 		r := table("name", "kind", "type", "keys", "status")
 		for _, ix := range cat.Indexes() {
 			k, _ := cat.KindByID(ix.Kind)
-			add(r, ix.Name, k.Name, indexType(ix), indexKeys(ix), indexStatus(ix))
+			add(r, ix.Name, k.Name, indexType(ix), indexKeys(ix), indexStatus(qc.Tx, ix))
 		}
 		return r, nil
 	case "stats":
