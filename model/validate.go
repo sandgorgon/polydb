@@ -50,8 +50,11 @@ func ValidateFieldDef(fd *FieldDef, ctx FieldContext) error {
 			return fmt.Errorf("field %q: unique needs a keyable type, not %s", fd.Name, fd.Type)
 		}
 	}
-	if fd.Default != "" && ctx != KindField {
+	if fd.Default != "" && ctx != KindField && ctx != FormatField {
 		return what("default")
+	}
+	if (fd.Column != nil || fd.DefaultValue != nil) && ctx != FormatField {
+		return what("a column option")
 	}
 	if ctx == FormatField && (fd.Check != "" || fd.History.On || fd.OnDelete != RefDangle) {
 		return what("an option other than doc")
@@ -140,10 +143,32 @@ func (f *Format) Validate() error {
 	if f.Base == "" {
 		return fmt.Errorf("%s: no base format", owner)
 	}
+	if err := validateFields(owner, f.Fields, FormatField); err != nil {
+		return err
+	}
+	if f.IsTable() {
+		for _, fd := range f.Fields {
+			if fd.Default != "" && fd.DefaultValue == nil {
+				return fmt.Errorf("%s: column %s: the default must be given as a value", owner, fd.Name)
+			}
+		}
+		if err := f.Table().Validate(); err != nil {
+			return fmt.Errorf("%s: %w", owner, err)
+		}
+		return nil
+	}
+	if f.Header {
+		return fmt.Errorf("%s: header only applies to csv and tsv formats", owner)
+	}
+	for _, fd := range f.Fields {
+		if fd.Column != nil || fd.Default != "" || fd.DefaultValue != nil {
+			return fmt.Errorf("%s: field %s: at and default only apply to csv and tsv columns", owner, fd.Name)
+		}
+	}
 	if len(f.Fields) == 0 {
 		return fmt.Errorf("%s: needs at least one field", owner)
 	}
-	return validateFields(owner, f.Fields, FormatField)
+	return nil
 }
 
 // Validate checks an index on its own.

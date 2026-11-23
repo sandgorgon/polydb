@@ -82,6 +82,7 @@ type FieldDef struct {
 	Check    Expr
 	OnDelete string // "", "dangle" or "restrict"
 	History  *HistoryOpt
+	Column   *int // csv and tsv format columns: "at n"
 }
 
 // HistoryOpt is "history [keep expr]".
@@ -114,6 +115,7 @@ type DefineFormat struct {
 	Name   string
 	Base   string
 	Doc    *string
+	Header bool // csv and tsv: the first line names the columns
 	Fields []*FieldDef
 }
 

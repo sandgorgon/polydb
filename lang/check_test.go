@@ -24,6 +24,14 @@ func testEnv(t *testing.T) *Env {
 		{Name: "total", Type: ty("decimal(12,2)")},
 		{Name: "lines", Type: ty("list<record{sku: text, qty: int}>")},
 	}}))
+	four := 4
+	must(ed.DefineFormat(model.Format{Name: "staff", Base: "csv", Header: true, Fields: []model.FieldDef{
+		{Name: "name", Type: ty("text")},
+		{Name: "email", Type: ty("text"), Column: &four},
+		{Name: "age", Type: ty("int?")},
+		{Name: "status", Type: ty("text"), Default: `"active"`, DefaultValue: value.MustText("active")},
+	}}))
+	must(ed.DefineFormat(model.Format{Name: "contacts", Base: "csv", Header: true}))
 	must(ed.DefineKind(model.Kind{Name: "Company", Fields: []model.FieldDef{{Name: "name", Type: ty("text")}}}))
 	must(ed.DefineKind(model.Kind{Name: "Person", Fields: []model.FieldDef{
 		{Name: "name", Type: ty("text")},
@@ -44,6 +52,9 @@ func testEnv(t *testing.T) *Env {
 		{Name: "scores", Type: ty("list<int>?")},
 		{Name: "data", Type: ty("bytes?")},
 		{Name: "started", Type: ty("time?")},
+		{Name: "team", Type: ty("doc<staff>?")},
+		{Name: "book", Type: ty("doc<contacts>?")},
+		{Name: "rows", Type: ty("doc<csv>?")},
 	}}))
 	must(ed.DefineKind(model.Kind{Name: "Invoice", Closed: true, Fields: []model.FieldDef{
 		{Name: "number", Type: ty("text")},
@@ -99,6 +110,11 @@ func TestCheckValid(t *testing.T) {
 		`define relation manages from Person to Person max out 3 { since: date?, weight: float? check weight >= 0.0 }`,
 		`define relation tagged from any to field`,
 		`define format order : json { id: text, items: list<text> }`,
+		`define format people : csv header "Export" { name: text, email: text at 4, age: int?, status: text default "active" }`,
+		`define format pts : tsv { x: int, y: float?, day: date default "2026-01-01" }`,
+		`define format raw : csv`,
+		`find Person p | where p.team->[0]->age > 30 and p.team->[0]->status = "active"`,
+		`find Person p | show p.book->[0]->email, p.rows->[2]->[0], len(parse(p.team))`,
 		`define index cfg_port on Person(config->server->port)`,
 		`define index inv_total on Person(inv->total)`,
 		`define text index person_name on Person(name)`,
@@ -334,6 +350,17 @@ func TestCheckErrors(t *testing.T) {
 		{`define kind K history keep 3 { a: int }`, "type", "can't be stored as duration"},
 		{`define relation r from Persn to any`, "not_found", "no kind Persn"},
 		{`define format f : yaml { a: int }`, "not_found", "no base format yaml"},
+		{`define format f : json header { a: int }`, "syntax", "header only applies to csv and tsv formats"},
+		{`define format f : json { a: int at 1 }`, "syntax", "at and default only apply to csv and tsv columns"},
+		{`define format f : xml`, "syntax", "a xml format needs fields"},
+		{`define format f : csv { a: list<int> }`, "type", "a column holds"},
+		{`define format f : csv { a: int, b: int at 0 }`, "constraint", "columns a and b both read column 0"},
+		{`define format f : csv { a: int default "x" }`, "type", `"x" (text) can't be stored as int`},
+		{`define format f : csv header { a: int default b }`, "syntax", "a default needs a constant value"},
+		{`find Person p | where p.team->[0]->agee > 1`, "unknown_field", "format staff has no field agee here (did you mean age?)"},
+		{`find Person p | where p.team->[0]->age = "x"`, "type", "can't compare int? with text"},
+		{`find Person p | where p.team->name = "x"`, "type", ".name reads fields"},
+		{`find Person p | where p.rows->[0]->email = "x"`, "type", "->email reads a column by name, which needs a header"},
 		{`alter kind Person add name : text`, "constraint", "already has a field name"},
 		{`alter kind Person alter nme : text`, "unknown_field", "no field nme (did you mean name?)"},
 		{`alter kind Person drop nme`, "unknown_field", "no field nme"},

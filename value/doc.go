@@ -116,6 +116,7 @@ type DerivedFormat struct {
 	name  string
 	base  Format
 	shape *Type
+	table *TableSpec // set for table formats (NewTableFormat)
 }
 
 // NewDerivedFormat returns a format named name that accepts text valid in
@@ -127,7 +128,7 @@ func NewDerivedFormat(name string, base Format, shape *Type) (*DerivedFormat, er
 	if err := shape.Validate(); err != nil {
 		return nil, err
 	}
-	return &DerivedFormat{name, base, shape}, nil
+	return &DerivedFormat{name: name, base: base, shape: shape}, nil
 }
 
 func (f *DerivedFormat) Name() string { return f.name }
@@ -141,6 +142,12 @@ func (f *DerivedFormat) Shape() *Type { return f.shape }
 func (f *DerivedFormat) Parse(text string) (Value, error) {
 	var v Value
 	var err error
+	if f.table != nil {
+		if v, err = f.base.Parse(text); err != nil {
+			return nil, err
+		}
+		return f.table.parse(v)
+	}
 	if f.base.Name() == "json" {
 		if v, err = parseJSONMode(text, true); err == nil {
 			v, err = settleNumbers(v, f.shape)

@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 
@@ -50,6 +51,12 @@ func dump(c *Catalog) string {
 			if f.Default != "" {
 				b.WriteString(" default " + f.Default)
 			}
+			if f.Column != nil {
+				b.WriteString(" at " + strconv.Itoa(*f.Column))
+			}
+			if f.DefaultValue != nil {
+				b.WriteString(" = " + f.DefaultValue.String())
+			}
 		}
 	}
 	for _, k := range c.Kinds() {
@@ -69,6 +76,9 @@ func dump(c *Catalog) string {
 	}
 	for _, f := range c.Formats() {
 		b.WriteString("\nformat " + f.Name + " : " + f.Base)
+		if f.Header {
+			b.WriteString(" header")
+		}
 		fields(f.Fields)
 	}
 	for _, ix := range c.Indexes() {
@@ -104,6 +114,19 @@ func TestDefineAndLoad(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
+	four := 4
+	status := fd("status", "text")
+	status.Default, status.DefaultValue = `"active"`, value.MustText("active")
+	email4 := fd("email", "text")
+	email4.Column = &four
+	if _, err := e.DefineFormat(model.Format{Name: "staff", Base: "csv", Header: true, Fields: []model.FieldDef{
+		fd("name", "text"), email4, fd("age", "int?"), status,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.DefineFormat(model.Format{Name: "contacts", Base: "csv", Header: true}); err != nil {
+		t.Fatal(err)
+	}
 	order, err := e.DefineKind(model.Kind{Name: "Order", Closed: true, Fields: []model.FieldDef{
 		fd("customer", "ref<Person>"), fd("invoice", "doc<invoice>?"), fd("raw", "doc<json>?"),
 	}})
@@ -135,6 +158,11 @@ func TestDefineAndLoad(t *testing.T) {
 	}
 	if _, ok := c.Format("json"); !ok {
 		t.Error("base format not available")
+	}
+	staff, _ := c.Format("staff")
+	if v, err := staff.Parse("name,age,x,status,mail\nAnn,,y,,a@x.io\n"); err != nil ||
+		v.String() != `[{name: "Ann", email: "a@x.io", age: null, status: "active"}]` {
+		t.Errorf("staff table: %v, %v", v, err)
 	}
 	if k, _ := c.Kind("Order"); !k.Closed {
 		t.Error("closed flag lost")

@@ -192,9 +192,21 @@ A format is a named entry in a database's catalog. There are two kinds:
 |---|---|
 | json | object → `map<text, any>`, array → `list<any>`, number → `int` if whole and in range, else `float`, plus string → `text`, bool, null |
 | xml | element → `record{ name: text, attrs: map<text,text>, children: list<any> }`, text node → `text` |
-| csv / tsv | `list<list<text>>`; with a header option, `list<map<text,text>>` |
+| csv / tsv | `list<list<text>>`; table formats read rows as maps or records (§6.3) |
 
 A **derived format based on json** reads numbers exactly where its shape expects a decimal: `"total": 2.50` in a `decimal(12,2)` field is `2.50`, not the float 2.5 (decided 2026-11-22). Elsewhere, numbers follow the json rules above.
+
+### 6.3 Table formats
+
+A derived format on `csv` or `tsv` is a **table format** (Rhizome spec §5.3). Its fields declare columns rather than a document shape, and the `header` option says the first line names the columns:
+
+| Declared | Parsed value |
+|---|---|
+| neither | `list<list<text>>`, as the base format |
+| `header` only | `list<map<text, text>>`, keyed by column name |
+| columns | `list<record{ columns }>`, with each cell converted from text to its column's type |
+
+Columns are found by `at n` (position from 0), by header name, or by declared order. Undeclared columns are ignored. Empty or missing cells take the column's `default`, or null for an optional column, or `""` for a required text column; otherwise the document is invalid.
 
 ---
 
@@ -438,6 +450,6 @@ None.
 - **Image and doc literals:** there is no dedicated literal, so they print as `cast(x"…" as image)` and `cast("…" as doc<F>)`.
 - **JSON:** a number is an `int` when its value is whole and fits in 64 bits, including forms like `1.0` and `1e3`. A repeated object key keeps its last value. Numbers outside the float range are rejected.
 - **XML:** the parsed form is the root element. Whitespace-only text, comments, processing instructions and directives are dropped. Adjacent text is merged. Namespaced names are written `{uri}local`, and namespace declarations keep their `xmlns:p` form.
-- **CSV/TSV:** every row must have the same number of fields. The header option (`list<map<text,text>>`) will come as a derived-format option with the catalog.
+- **CSV/TSV:** every row must have the same number of fields. Headers and typed columns come from table formats (§6.3).
 - **Doc conformance:** a `doc<F>` value must carry format `F` exactly. A derived format's document is not accepted as its base format.
 - **Queue fields start empty:** a declared queue field never needs a value on `create`. An entity gets an empty queue of the declared type, including when `alter kind` adds a queue field.

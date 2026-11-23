@@ -547,7 +547,55 @@ func (c *checker) defineFormat(s *DefineFormat) error {
 	if _, ok := value.LookupFormat(s.Base); !ok {
 		return errAt(s.P, "not_found", "no base format %s%s", s.Base, didYouMean(s.Base, []string{"json", "xml", "csv", "tsv"}))
 	}
-	return c.fieldDefs(s.Fields, newScope(), "field")
+	if err := c.fieldDefs(s.Fields, newScope(), "field"); err != nil {
+		return err
+	}
+	if s.Base != "csv" && s.Base != "tsv" {
+		if s.Header {
+			return errAt(s.P, "syntax", "header only applies to csv and tsv formats")
+		}
+		for _, d := range s.Fields {
+			if d.Column != nil || d.Default != nil {
+				return errAt(d.P, "syntax", "at and default only apply to csv and tsv columns; %s documents are read by name", s.Base)
+			}
+		}
+		if len(s.Fields) == 0 {
+			return errAt(s.P, "syntax", "a %s format needs fields describing its documents", s.Base)
+		}
+		return nil
+	}
+	// A table format: the fields are columns (spec/types.md §6.3).
+	used := map[int]string{}
+	for i, d := range s.Fields {
+		if !columnType(d.Type) {
+			return typeErr(d.P, "a column holds bool, int, bigint, float, decimal, text, date, time, duration, id or any, not %s", d.Type)
+		}
+		pos := -1
+		switch {
+		case d.Column != nil:
+			pos = *d.Column
+		case !s.Header:
+			pos = i
+		}
+		if pos >= 0 {
+			if other, dup := used[pos]; dup {
+				return errAt(d.P, "constraint", "columns %s and %s both read column %d", other, d.Name, pos)
+			}
+			used[pos] = d.Name
+		}
+	}
+	return nil
+}
+
+// columnType reports whether a table column may have type t: one that
+// cell text converts to.
+func columnType(t *value.Type) bool {
+	switch t.Code {
+	case value.CodeBool, value.CodeInt, value.CodeBigInt, value.CodeFloat, value.CodeDecimal, value.CodeText,
+		value.CodeDate, value.CodeTime, value.CodeDuration, value.CodeID, value.CodeAny:
+		return true
+	}
+	return false
 }
 
 func (c *checker) defineIndex(s *DefineIndex) error {

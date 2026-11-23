@@ -150,6 +150,10 @@ var corpus = []string{
 	`find p | show p.name::id, p::created, p::props.source, p.tags[0], m["k"]`,
 	`find p | follow p ~knows r~> f | show p::kind, p.name::doc, r::from, r::to, r::type`,
 	`update @a set ::labels ++= {"x"}, ::props = {}`,
+	`define format contacts : csv header`,
+	`define format staff : csv header "Staff export" { name: text, email: text at 4, age: int?, status: text default "active" }`,
+	`define format points : tsv { x: int, y: float "Height" at 2 }`,
+	`define format f : csv { at: int at 0, header: text }`,
 	`find p | sort sort(p.tags)[0] desc | show sort([3, 1])`,
 	`find p | show {}, {1, 2}, {a: 1, "b c": 2, 3: x}, [], [1, [2]], "k" => 1, {k: 1 => 2}`,
 	`find p | show 42, 1_000, 0x1F, 0b1010, 123n, 3.14, 1e-9, 19.99d, 250ms, 1h30m, true, false, null, nan, inf, -inf`,
@@ -271,6 +275,9 @@ func TestParseErrors(t *testing.T) {
 		`define relation r from any to any max out 1 max out 2`: "max out is given more than once",
 		`update @a add x = 1 check x > 0 check x < 5`:           "check is given more than once",
 		`update @a add x = 1 unique`:                            "unique isn't allowed in an add clause",
+		`define format f : csv header header`:                   "header is given more than once",
+		`define format f : csv { a: int at 1 at 2 }`:            "at is given more than once",
+		`define format f : csv { a: int unique }`:               "expected",
 	}
 	for src, want := range cases {
 		_, err := ParseStatement(src)

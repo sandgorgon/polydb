@@ -416,7 +416,7 @@ func (p *parser) define(at At) (Stmt, error) {
 			}
 			break
 		}
-		k.Fields, err = p.fieldBlock(true)
+		k.Fields, err = p.fieldBlock(kindFields)
 		return k, err
 	case p.accept("relation"):
 		r := &DefineRelation{At: at}
@@ -452,7 +452,7 @@ func (p *parser) define(at At) (Stmt, error) {
 			mergeRelOption(r, o)
 		}
 		if p.tok().Is("{") {
-			r.Props, err = p.fieldBlock(true)
+			r.Props, err = p.fieldBlock(kindFields)
 		}
 		return r, err
 	case p.accept("format"):
@@ -467,10 +467,30 @@ func (p *parser) define(at At) (Stmt, error) {
 		if f.Base, err = p.name("a base format"); err != nil {
 			return nil, err
 		}
-		if f.Doc, err = p.optDoc(true); err != nil {
-			return nil, err
+		once := options{}
+		for {
+			at := p.pos()
+			if d, err := p.optDoc(true); err != nil {
+				return nil, err
+			} else if d != nil {
+				f.Doc = d
+				if err := once.use(at, "doc"); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			if p.acceptWord("header") {
+				f.Header = true
+				if err := once.use(at, "header"); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			break
 		}
-		f.Fields, err = p.fieldBlock(false)
+		if p.tok().Is("{") {
+			f.Fields, err = p.fieldBlock(columnFields)
+		}
 		return f, err
 	}
 	ix := &DefineIndex{At: at}
@@ -605,15 +625,22 @@ func (p *parser) historyOpt() (*HistoryOpt, error) {
 	return h, nil
 }
 
-// fieldBlock reads { field_def [","] … }. full allows the kind-field
-// options; otherwise only doc strings.
-func (p *parser) fieldBlock(full bool) ([]*FieldDef, error) {
+// fieldMode says which options a field definition may have.
+type fieldMode uint8
+
+const (
+	kindFields   fieldMode = iota // kinds and relations: all field options
+	columnFields                  // formats: doc, and for csv and tsv columns at and default
+)
+
+// fieldBlock reads { field_def [","] … }.
+func (p *parser) fieldBlock(mode fieldMode) ([]*FieldDef, error) {
 	if err := p.expect("{"); err != nil {
 		return nil, err
 	}
 	var out []*FieldDef
 	for !p.accept("}") {
-		f, err := p.fieldDef(full)
+		f, err := p.fieldDef(mode)
 		if err != nil {
 			return nil, err
 		}
@@ -623,7 +650,7 @@ func (p *parser) fieldBlock(full bool) ([]*FieldDef, error) {
 	return out, nil
 }
 
-func (p *parser) fieldDef(full bool) (*FieldDef, error) {
+func (p *parser) fieldDef(mode fieldMode) (*FieldDef, error) {
 	f := &FieldDef{At: p.at()}
 	var err error
 	if f.Name, err = p.name("a field name"); err != nil {
@@ -647,7 +674,29 @@ func (p *parser) fieldDef(full bool) (*FieldDef, error) {
 			}
 			continue
 		}
-		if !full {
+		if mode == columnFields {
+			switch t := p.tok(); {
+			case t.IsWord("at") && p.peekTok(1).Kind == Literal:
+				if err := once.use(at, "at"); err != nil {
+					return nil, err
+				}
+				p.advance()
+				n, err := p.intLit("a column position")
+				if err != nil {
+					return nil, err
+				}
+				f.Column = &n
+				continue
+			case t.Is("default"):
+				if err := once.use(at, "default"); err != nil {
+					return nil, err
+				}
+				p.advance()
+				if f.Default, err = p.expr(); err != nil {
+					return nil, err
+				}
+				continue
+			}
 			return f, nil
 		}
 		var opt string
@@ -716,11 +765,11 @@ func (p *parser) alter(at At) (Stmt, error) {
 		}
 		switch {
 		case p.acceptWord("add"):
-			a.AddField, err = p.fieldDef(true)
+			a.AddField, err = p.fieldDef(kindFields)
 		case p.accept("drop"):
 			a.DropField, err = p.name("a field name")
 		case p.accept("alter"):
-			a.Alter, err = p.fieldDef(true)
+			a.Alter, err = p.fieldDef(kindFields)
 		case p.acceptWord("rename"):
 			if err = p.expect("to"); err == nil {
 				a.RenameTo, err = p.name("a kind name")
@@ -747,11 +796,11 @@ func (p *parser) alter(at At) (Stmt, error) {
 		}
 		switch {
 		case p.acceptWord("add"):
-			a.AddProp, err = p.fieldDef(true)
+			a.AddProp, err = p.fieldDef(kindFields)
 		case p.accept("drop"):
 			a.DropProp, err = p.name("a property name")
 		case p.accept("alter"):
-			a.Alter, err = p.fieldDef(true)
+			a.Alter, err = p.fieldDef(kindFields)
 		case p.acceptWord("rename"):
 			if err = p.expect("to"); err == nil {
 				a.RenameTo, err = p.name("a relation name")

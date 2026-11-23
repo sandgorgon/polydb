@@ -82,6 +82,9 @@ func newEvalFixture(t *testing.T) *evalFixture {
 				"config":  doc("json", `{"server": {"port": 80}, "list": [1, 2], "key with space": true}`),
 				"page":    doc("xml", `<config><server port="80">hi<b>x</b></server></config>`),
 				"inv":     doc("invoice", `{"number": "7", "total": 2.5, "lines": [{"sku": "a", "qty": 2}]}`),
+				"team":    doc("staff", "name,age,status,x,mail\nAnn,34,,1,a@x.io\nBob,,away,2,b@x.io\n"),
+				"book":    doc("contacts", "email,phone\na@x.io,555\n"),
+				"rows":    doc("csv", "1,2\n3,4\n"),
 			},
 			bob: {"name": value.MustText("Bob"), "age": value.Int(40)},
 		},
@@ -306,6 +309,18 @@ func TestEval(t *testing.T) {
 		`parse(p.inv).number`:           `"7"`,
 		`valid("{", "json")`:            "false",
 		`valid("{}", "invoice")`:        "false",
+		// tables
+		`p.team->[0]->age + 1`: "35",
+		`p.team->[0]->status`:  `"active"`,
+		`p.team->[1]->status`:  `"away"`,
+		`p.team->[1]->age`:     "null",
+		`p.team->[1]->email`:   `"b@x.io"`,
+		`p.team->[5]->email`:   "null",
+		`len(parse(p.team))`:   "2",
+		`p.book->[0]->phone`:   `"555"`,
+		`p.rows->[1]->[0]`:     `"3"`,
+		`valid("name,age,a,b,mail\nAnn,x,,,y\n", "staff")`:   "false",
+		`valid("name,status,a,b,mail\nAnn,,,,x\n", "staff")`: "true",
 	}
 	for src, want := range cases {
 		v, err := fx.eval(t, src)

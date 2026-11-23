@@ -495,11 +495,11 @@ func (c *checker) docSteps(at Pos, base Static, steps []DocStep, sc *scope) (Sta
 		}
 	}
 	for _, st := range steps {
-		if err := c.docStepForm(at, baseFormat, st); err != nil {
+		if err := c.docStepForm(at, baseFormat, shape != nil, st); err != nil {
 			return Static{}, err
 		}
 	}
-	if shape == nil || baseFormat != "json" {
+	if shape == nil || baseFormat != "json" && baseFormat != "csv" && baseFormat != "tsv" {
 		return stAny, nil
 	}
 	t := shape
@@ -543,8 +543,9 @@ func (c *checker) docSteps(at Pos, base Static, steps []DocStep, sc *scope) (Sta
 	return valueOf(t), nil
 }
 
-// docStepForm checks that a step is one the base format defines.
-func (c *checker) docStepForm(at Pos, format string, st DocStep) error {
+// docStepForm checks that a step is one the base format defines. derived
+// is set for derived formats, whose shapes check names.
+func (c *checker) docStepForm(at Pos, format string, derived bool, st DocStep) error {
 	switch format {
 	case "json":
 		if st.Attr {
@@ -559,6 +560,9 @@ func (c *checker) docStepForm(at Pos, format string, st DocStep) error {
 	case "xml", "csv", "tsv":
 		if st.Attr && format != "xml" {
 			return typeErr(at, "@%s is an XML attribute step; %s documents have rows and columns", st.Name, format)
+		}
+		if format != "xml" && !derived && st.Index == nil {
+			return typeErr(at, "->%s reads a column by name, which needs a header: define format f : %s header", st.Name, format)
 		}
 		if st.Index != nil {
 			t := value.Required(c.info.Types[st.Index].asValue())

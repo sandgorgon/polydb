@@ -77,7 +77,7 @@ func encodeFormat(f *model.Format, tc keys.TypeCodec) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return value.Encode(listOf(text(f.Name), text(f.Base), text(f.Doc), fields)), nil
+	return value.Encode(listOf(text(f.Name), text(f.Base), text(f.Doc), value.Bool(f.Header), fields)), nil
 }
 
 func encodeIndex(ix *model.Index) []byte {
@@ -201,7 +201,7 @@ func Load(r storage.Reader, version uint64) (*Catalog, error) {
 			}
 		case defFormat:
 			f := c.formats.byID[d.id]
-			f.Base, f.Doc = r.text(), r.text()
+			f.Base, f.Doc, f.Header = r.text(), r.text(), r.bool()
 			if r.err == nil {
 				f.Fields, err = decodeFields(item[value.List](r), c)
 			}

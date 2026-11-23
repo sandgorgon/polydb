@@ -114,16 +114,24 @@ func EncodeFieldDef(fd *model.FieldDef, tc TypeCodec) (value.Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	col := value.Int(-1)
+	if fd.Column != nil {
+		col = value.Int(*fd.Column)
+	}
+	var dv value.Value = value.Null
+	if fd.DefaultValue != nil {
+		dv = fd.DefaultValue
+	}
 	return value.NewList(value.MustText(fd.Name), must(value.NewBytes(tb, "")), value.MustText(fd.Doc),
 		value.Bool(fd.Unique), value.MustText(fd.Default), value.MustText(fd.Check),
-		value.Int(fd.OnDelete), value.Bool(fd.History.On), value.Duration(fd.History.Keep))
+		value.Int(fd.OnDelete), value.Bool(fd.History.On), value.Duration(fd.History.Keep), col, dv)
 }
 
 // DecodeFieldDef decodes a field definition written by EncodeFieldDef.
 func DecodeFieldDef(v value.Value, tc TypeCodec) (*model.FieldDef, error) {
 	l, ok := v.(value.List)
-	if !ok || l.Len() != 9 {
-		return nil, errors.New("keys: field definition is not a list of 9")
+	if !ok || l.Len() != 11 {
+		return nil, errors.New("keys: field definition is not a list of 11")
 	}
 	r := &reader{what: "field definition", vs: l.Values()}
 	fd := &model.FieldDef{Name: get[value.Text](r).Go()}
@@ -135,6 +143,13 @@ func DecodeFieldDef(v value.Value, tc TypeCodec) (*model.FieldDef, error) {
 	fd.OnDelete = model.RefAction(get[value.Int](r))
 	fd.History.On = bool(get[value.Bool](r))
 	fd.History.Keep = time.Duration(get[value.Duration](r))
+	if col := get[value.Int](r); col >= 0 {
+		c := int(col)
+		fd.Column = &c
+	}
+	if dv := r.vs[10]; !value.IsNull(dv) {
+		fd.DefaultValue = dv
+	}
 	if r.err != nil {
 		return nil, r.err
 	}

@@ -86,6 +86,9 @@ func (f *formatter) fieldDef(d *FieldDef) {
 		f.w(" on delete ", d.OnDelete)
 	}
 	f.history(d.History)
+	if d.Column != nil {
+		f.w(" at ", strconv.Itoa(*d.Column))
+	}
 }
 
 func (f *formatter) fields(fs []*FieldDef) {
@@ -197,7 +200,12 @@ func (f *formatter) stmt(s Stmt) {
 		f.w(" : ")
 		f.name(s.Base)
 		f.doc(s.Doc)
-		f.fields(s.Fields)
+		if s.Header {
+			f.w(" header")
+		}
+		if len(s.Fields) > 0 {
+			f.fields(s.Fields)
+		}
 	case *DefineIndex:
 		f.w("define ")
 		if s.Unique {

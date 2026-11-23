@@ -246,6 +246,26 @@ define format invoice : json "Customer invoice" {
 }
 ```
 
+**Table formats** (decided 2026-11-22) are derived formats on `csv` or `tsv`. Their fields describe the *columns* of each row, and the option `header` says the first line names the columns:
+
+```
+define format contacts : csv header;          // rows become maps: ->[0]->email
+define format staff : csv header "Staff export" {
+  name   : text                               // found by its header name
+  email  : text at 4                          // column 4 (counting from 0), whatever its header says
+  age    : int?                               // an empty cell is null
+  status : text default "active"              // an empty or missing cell is "active"
+}
+define format points : tsv { x: int, y: float }   // no header: columns in declared order
+```
+- **Finding columns:** `at n` picks a column by position. Otherwise a column is found by its name in the header, or, without a header, by its place in the declaration. Two columns can't read the same position.
+- **Undeclared columns** in a file are ignored. The document's text is still stored in full.
+- **Cells** are converted from text to the column's type: `bool` (`true`/`false`, any case), the number types, `date`, `time`, `duration`, `id`, or `text` (`any` reads as text). Spaces around non-text values are ignored. A value that doesn't convert makes the document invalid, and the error names the row and column.
+- **Empty or missing cells:** a `default` gives its value, which must be a constant; a `?` column gives null; a required `text` column gives `""` for an empty cell. Anything else, including a required column missing from the header, makes the document invalid. This catches a renamed column, unless the column is optional.
+- A byte order mark at the start of the header, which spreadsheet exports often add, is ignored. A header naming the same column twice is an error for that column; pick one with `at`.
+- Rows read as records, so paths are typed: for `doc<staff>`, `->[0]->age` is `int?`.
+- `header`, `at` and `default` only apply to csv and tsv formats.
+
 ### 5.4 Indexes
 
 ```
@@ -499,13 +519,13 @@ find Person p
 |---|---|---|---|
 | json | object key | array position (from 0) | `->[expr]`: a text expression is a key, an int is a position |
 | xml | first child element with that name | nth child node (elements and text) | `->@name` or `->@"name"`: attribute value (text) |
-| csv / tsv | column by header name (header option only) | row, then column | |
+| csv / tsv | column by name (table formats with a header or declared columns, §5.3) | row, then column | |
 
 - **XML** paths start at the root element, so `p.config->server->@port` reads `<config><server port="80">`. A path that ends on an element gives the element record (`record{name, attrs, children}`), which can be read further with `.` (`…->server.children`). `inner_text(e)` joins all the text inside an element. Namespaced names use the `{uri}local` form as a quoted step: `->"{urn:x}item"`.
-- **CSV/TSV:** without a header, `->[2]->[0]` is row 2, column 0. With the header option, each row is a map, so `->[0]->email` works.
+- **CSV/TSV:** in a plain `doc<csv>`, `->[2]->[0]` is row 2, column 0, and a name step is an error. In a table format with a header, each row is a map from column name to text, so `->[0]->email` works. With declared columns each row is a record of typed values.
 - **Result types:**
   - For a **base format** the result is `any`. Its type is checked at run time.
-  - For a **derived format based on json** the result has the type declared in the format's shape. For `doc<invoice>`, `->total` is `decimal(12,2)` and `->lines->[0]->qty` is `int`, so type errors are reported before the query runs, and a step the shape doesn't declare is an error. Derived formats on other bases give `any`, because their steps (child elements, rows) don't follow the shape's fields.
+  - For a **derived format based on json**, and for a **table format**, the result has the type declared in the format's shape. For `doc<invoice>`, `->total` is `decimal(12,2)` and `->lines->[0]->qty` is `int`, so type errors are reported before the query runs, and a step the shape doesn't declare is an error. Derived formats on other bases give `any`, because their steps (child elements, rows) don't follow the shape's fields.
 - Paths in `define index` (`config->server->port`) use the same rules.
 
 ---
@@ -690,7 +710,10 @@ rel_option     = doc_string
                | "max" ( "out" | "in" ) int_lit
                | "on" "delete" ( "cascade" | "restrict" ) ;
 
-format_def     = "format" ident ":" ident [ doc_string ] "{" { field_def [ "," ] } "}" ;
+format_def     = "format" ident ":" ident { doc_string | "header" }
+                 [ "{" { column_def [ "," ] } "}" ] ;
+column_def     = ident ":" type { doc_string | "at" int_lit | "default" expr } ;
+                 (* at and default: csv and tsv formats only *)
 
 index_def      = [ "unique" | "text" ] "index" ident "on" ident
                  "(" index_key { "," index_key } ")" ;
@@ -940,3 +963,4 @@ None.
    - `now()` and `today()` are fixed for the whole statement, in UTC.
    - `typeof(x)` gives the type family (`"int"`, `"list"`), or `"doc<F>"` for documents.
    - A path value is a list alternating node refs and relation IDs. `len(path)` counts relations, `nodes(path)` and `rels(path)` pick them out.
+11. Table formats (2026-11-22): csv and tsv derived formats take a `header` option and declare their columns, with `at n` for a position and `default` for empty or missing cells. Undeclared columns are ignored (§5.3).

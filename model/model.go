@@ -98,6 +98,13 @@ type FieldDef struct {
 	// deleted (spec/types.md §4.12).
 	OnDelete RefAction
 	History  History
+	// Column and DefaultValue apply to the columns of a table format (a
+	// derived csv or tsv format): Column is the column's position,
+	// counting from 0 (nil: by header name or declared order), and
+	// DefaultValue is the value for an empty or missing cell, with
+	// Default holding its source text.
+	Column       *int
+	DefaultValue value.Value
 }
 
 // RefAction is what happens to a ref when its target is deleted.
@@ -190,11 +197,33 @@ type Format struct {
 	Name   string
 	Base   string // a base format: json, xml, csv, tsv or one registered in Go
 	Doc    string
+	Header bool // table formats: the first line names the columns
 	Fields []FieldDef
 }
 
-// Shape returns the record type documents of the format must match.
+// IsTable reports whether f is a table format: one on a delimited base,
+// whose fields are columns (spec/types.md §6.3).
+func (f *Format) IsTable() bool { return f.Base == "csv" || f.Base == "tsv" }
+
+// Table returns a table format's column spec.
+func (f *Format) Table() value.TableSpec {
+	spec := value.TableSpec{Header: f.Header, Columns: make([]value.Column, len(f.Fields))}
+	for i, fd := range f.Fields {
+		c := value.Column{Name: fd.Name, Type: fd.Type, Pos: -1, Default: fd.DefaultValue}
+		if fd.Column != nil {
+			c.Pos = *fd.Column
+		}
+		spec.Columns[i] = c
+	}
+	return spec
+}
+
+// Shape returns the type of a document's parsed value: the record its
+// fields describe or, for a table format, its rows.
 func (f *Format) Shape() *value.Type {
+	if f.IsTable() {
+		return f.Table().Shape()
+	}
 	fields := make([]value.RecordField, len(f.Fields))
 	for i, fd := range f.Fields {
 		fields[i] = value.RecordField{Name: fd.Name, Type: fd.Type, Doc: fd.Doc}

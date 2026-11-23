@@ -74,6 +74,28 @@ func TestValidateDefinitions(t *testing.T) {
 	if err := f.Validate(); err == nil {
 		t.Error("format without fields accepted")
 	}
+	pos := 2
+	for _, c := range []struct {
+		f    Format
+		want string
+	}{
+		{Format{Name: "t", Base: "csv", Header: true}, ""},
+		{Format{Name: "t", Base: "tsv"}, ""},
+		{Format{Name: "t", Base: "json", Header: true, Fields: []FieldDef{fd("a", "int")}}, "header only applies to csv and tsv"},
+		{Format{Name: "t", Base: "json", Fields: []FieldDef{{Name: "a", Type: value.TypeInt, Column: &pos}}}, "at and default only apply"},
+		{Format{Name: "t", Base: "csv", Fields: []FieldDef{{Name: "a", Type: value.TypeInt, Default: "1"}}}, "must be given as a value"},
+		{Format{Name: "t", Base: "csv", Fields: []FieldDef{{Name: "a", Type: value.TypeInt, Default: "1", DefaultValue: value.Int(1), Column: &pos}}}, ""},
+		{Format{Name: "t", Base: "csv", Fields: []FieldDef{fd("a", "list<int>")}}, "a column holds"},
+	} {
+		err := c.f.Validate()
+		if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+			t.Errorf("%+v: got %v, want %q", c.f, err, c.want)
+		}
+	}
+	col := FieldDef{Name: "a", Type: value.TypeInt, Column: &pos}
+	if err := ValidateFieldDef(&col, KindField); err == nil || !strings.Contains(err.Error(), "column option") {
+		t.Errorf("column option on a kind field: %v", err)
+	}
 	ix := Index{Name: "i", Kind: value.ID{1}, Text: true, Keys: []IndexKey{{Field: "a"}, {Field: "b"}}}
 	if err := ix.Validate(); err == nil {
 		t.Error("two-field text index accepted")

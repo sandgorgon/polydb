@@ -381,7 +381,14 @@ func buildDerived(t table[model.Format]) map[string]*value.DerivedFormat {
 		if !ok {
 			continue // its base was unregistered from the Go program
 		}
-		if d, err := value.NewDerivedFormat(f.Name, base, f.Shape()); err == nil {
+		var d *value.DerivedFormat
+		var err error
+		if f.IsTable() {
+			d, err = value.NewTableFormat(f.Name, base, f.Table())
+		} else {
+			d, err = value.NewDerivedFormat(f.Name, base, f.Shape())
+		}
+		if err == nil {
 			out[f.Name] = d
 		}
 	}
