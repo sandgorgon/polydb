@@ -92,7 +92,11 @@ Client                                         Server
 | `PEER` | Unix sockets only. The server reads the connecting process's OS user (`SO_PEERCRED` on Linux, `LOCAL_PEERCRED` on macOS, via `golang.org/x/sys/unix`) and maps it to a PolyDB user using the server config. No password needed |
 | `KEY` | over TLS only. The client presented its 9auth identity certificate during the TLS handshake, which proves it holds the private key. The first AUTH message names the PolyDB user. Login succeeds if that certificate's fingerprint is registered to that user (§3.4). No password, no extra round trip |
 
-HELLO_OK lists the mechanisms the server allows on this connection. The client picks one in its first AUTH message. The Go client and CLI try `KEY` first when they have a 9auth identity and the server offers it, and otherwise fall back to SCRAM.
+HELLO_OK lists the mechanisms the server allows on this connection. The client picks one in its first AUTH message.
+- **Over TLS** the server offers `KEY` (only when the client presented a certificate) and `SCRAM-SHA-256-PLUS`. Plain `SCRAM-SHA-256` isn't offered there, so an attacker can't strip the channel binding. A client that supports channel binding but believes the server doesn't sends the `y` GS2 flag; a server that offered `-PLUS` refuses it as a downgrade.
+- **On Unix sockets** the server offers `PEER` (only when the peer's OS user maps to a PolyDB user) and `SCRAM-SHA-256`.
+- For a user that doesn't exist or has no password, the server answers with stable fake SCRAM parameters, so the exchange looks the same until the final check fails with the generic `auth_failed`.
+- Clients refuse SCRAM iteration counts below 4,096. The Go client and CLI try `KEY` first when they have a 9auth identity and the server offers it, and otherwise fall back to SCRAM.
 
 ### 3.2 SCRAM
 - Follows RFC 5802 and RFC 7677 exactly. The client-first, server-first, client-final and server-final messages travel in AUTH, AUTH_CONTINUE, AUTH and AUTH_OK respectively.
