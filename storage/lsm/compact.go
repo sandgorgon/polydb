@@ -163,8 +163,10 @@ func (o *outputs) open() error {
 
 // flush writes the oldest immutable memtable to a level-0 table.
 func (s *Store) flush(imm *memtable) error {
-	// Its batches must be durable in the log first: a table could
-	// otherwise hold a batch the log lost, ahead of a gap.
+	// Rotating the log when the memtable was handed over already synced
+	// its batches. Waiting until they are published as well means that a
+	// batch whose commit failed (the store has then failed) never reaches
+	// a table.
 	if err := s.waitPublished(imm.maxSeq); err != nil {
 		return err
 	}

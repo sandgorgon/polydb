@@ -556,3 +556,22 @@ func FuzzDecodeEdit(f *testing.F) {
 		}
 	})
 }
+
+func TestReopenConformance(t *testing.T) {
+	for _, name := range []string{"default", "tiny", "os"} {
+		t.Run(name, func(t *testing.T) {
+			storagetest.RunReopen(t, func(t *testing.T) func() storage.Store {
+				fs := vfs.NewMem()
+				o := Options{FS: fs, Dir: "/db"}
+				switch name {
+				case "tiny":
+					o = tiny(fs)
+				case "os":
+					o = tiny(vfs.OS)
+					o.Dir = t.TempDir()
+				}
+				return func() storage.Store { return openOpts(t, o) }
+			})
+		})
+	}
+}
