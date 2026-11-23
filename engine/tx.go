@@ -107,6 +107,10 @@ func (tx *Tx) fail(err error) error {
 
 func (tx *Tx) newID() value.ID { return tx.db.eng.ids.New() }
 
+// Now returns the transaction's time: when it began, from the engine's
+// clock. Every statement in the transaction sees the same time.
+func (tx *Tx) Now() time.Time { return tx.timeNow().Go() }
+
 func (tx *Tx) timeNow() value.Time {
 	t, err := value.NewTime(tx.now)
 	if err != nil {

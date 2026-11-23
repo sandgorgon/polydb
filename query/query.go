@@ -42,6 +42,12 @@ type Context struct {
 	// Wait, if set, runs pop … wait outside the transaction. Without it,
 	// a waiting pop is an error.
 	Wait func(id value.ID, field string, wait time.Duration) (value.Value, error)
+	// Interrupt, if set, is called regularly during long work. An error
+	// stops the statement: a timeout or a cancellation.
+	Interrupt func() error
+	// Trace, if set, receives the rows each pipeline step produced and
+	// the time it took, for explain analyze. The source has a nil step.
+	Trace func(step lang.Step, rows int, d time.Duration)
 }
 
 // Column is a result column.
@@ -104,7 +110,7 @@ func Exec(ctx *Context, s lang.Stmt) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: time.Now().UTC()}
+	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
 	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}}
 	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, Handles: x.handleValues(), Now: x.now}
 	res, err := x.stmt(s)
@@ -123,6 +129,16 @@ type executor struct {
 	graph *graph
 	ev    *lang.Evaluator
 	now   time.Time
+	ticks int
+}
+
+// tick calls the Interrupt hook every so often.
+func (x *executor) tick(n lang.Node) error {
+	x.ticks++
+	if x.ctx.Interrupt == nil || x.ticks%256 != 0 {
+		return nil
+	}
+	return fail(n, x.ctx.Interrupt())
 }
 
 // env builds the checker's view of the session.

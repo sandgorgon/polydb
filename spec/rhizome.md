@@ -965,3 +965,11 @@ None.
    - `typeof(x)` gives the type family (`"int"`, `"list"`), or `"doc<F>"` for documents.
    - A path value is a list alternating node refs and relation IDs. `len(path)` counts relations, `nodes(path)` and `rels(path)` pick them out.
 11. Table formats (2026-11-22): csv and tsv derived formats take a `header` option and declare their columns, with `at n` for a position and `default` for empty or missing cells. Undeclared columns are ignored (§5.3).
+12. Sessions (Phase 2, 2026-11-22):
+   - **Any error inside a transaction aborts it.** Later statements fail until `rollback`, and `commit` rolls back and reports `conflict`. This stops the rest of a script from running as if the failed statement had worked.
+   - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.
+   - `create database`, `drop database` and `use` aren't allowed inside a transaction.
+   - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
+   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns.
+   - `explain` on a query lists its steps with the size of each scan and any warnings; until the planner arrives (Phase 5), steps run as written. `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` runs the statement and reports each step's rows and time.
+   - Introspection results are tables with a `section` column where they mix kinds of rows: `describe kind` lists the kind, its fields and its indexes; `describe @x` lists metadata, fields and relations in and out.

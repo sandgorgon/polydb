@@ -4,6 +4,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/lang"
@@ -67,12 +68,17 @@ func (x *executor) pipeline(pl *lang.Pipeline) ([]prow, []string, int, bool, err
 	if pl.AsOf != nil {
 		return nil, nil, 0, false, errAt(pl.AsOf, "unsupported", "as of queries need history, which arrives in a later phase")
 	}
+	began := time.Now()
 	rows, names, err := x.source(pl)
 	if err != nil {
 		return nil, nil, 0, false, err
 	}
+	if x.ctx.Trace != nil {
+		x.ctx.Trace(nil, len(rows), time.Since(began))
+	}
 	affected, dataOnly := 0, false
 	for _, st := range pl.Steps {
+		began = time.Now()
 		if x.info.Grouped[st] {
 			rows = []prow{collapse(rows)}
 			names = nil
@@ -143,6 +149,9 @@ func (x *executor) pipeline(pl *lang.Pipeline) ([]prow, []string, int, bool, err
 		if err != nil {
 			return nil, nil, 0, false, err
 		}
+		if x.ctx.Trace != nil {
+			x.ctx.Trace(st, len(rows), time.Since(began))
+		}
 	}
 	return rows, names, affected, dataOnly, nil
 }
@@ -200,10 +209,15 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
 				return nil, nil, err
 			}
 		} else {
+			var stop error
 			err := x.tx.Entities(kv.Kind, func(id value.ID) bool {
 				cands = append(cands, value.Ref{Target: id})
-				return true
+				stop = x.tick(pl)
+				return stop == nil
 			})
+			if stop != nil {
+				return nil, nil, stop
+			}
 			if err != nil {
 				return nil, nil, fail(pl, err)
 			}
@@ -276,6 +290,9 @@ func (x *executor) inList(e lang.Expr, kind string) ([]value.Value, error) {
 func (x *executor) filter(rows []prow, cond lang.Expr) ([]prow, error) {
 	var out []prow
 	for _, r := range rows {
+		if err := x.tick(cond); err != nil {
+			return nil, err
+		}
 		ok, err := x.ev.Cond(cond, r.frame())
 		if err != nil {
 			return nil, fail(cond, err)
@@ -701,6 +718,9 @@ func (x *executor) hops(e *lang.Edge, cur value.ID, props map[string]value.Value
 			return err
 		}
 		for _, rel := range rels {
+			if err := x.tick(e); err != nil {
+				return err
+			}
 			if !propsMatch(rel, props) {
 				continue
 			}

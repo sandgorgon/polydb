@@ -136,7 +136,7 @@ func TestSuggest(t *testing.T) {
 			t.Errorf("Suggest(%q) = %q, want %q", in, got, want)
 		}
 	}
-	if err := UnknownField("emial", names); !strings.Contains(err.Error(), `did you mean "email"`) {
+	if err := UnknownField("emial", names); !strings.Contains(err.Error(), "did you mean email?") {
 		t.Errorf("got %v", err)
 	}
 }

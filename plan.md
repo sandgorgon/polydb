@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) complete and merged into `master`. Phase 2 (Rhizome language) in progress on branch `phase-2`: lexer, parser, checker, evaluator and executor done; `default` and `check` expressions now work. Non-unique indexes are recorded but not built yet.
+Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) complete and merged into `master`. Phase 2 (Rhizome language: lexer, parser, checker, evaluator, executor, sessions and introspection, `.rhz` script tests) complete on branch `phase-2`. Next: Phase 3 (server, client, wire protocol, CLI, security). Non-unique indexes are recorded but not built yet (Phase 5).
 Source requirements: [req.md](req.md)
 
 ---
@@ -172,7 +172,7 @@ Both modes implement the same Go interface, so application code can switch betwe
 **To v1.0:**
 0. **Specification:** type system, language and wire protocol specs written down and agreed. This is the most important step.
 1. Value types (with normalization) + data model + in-memory storage + engine Go API
-2. Language v1: parser and executor running on in-memory storage
+2. Language v1: parser and executor running on in-memory storage. Packages `lang` (front end and evaluator), `query` (executor) and `session` (session statements, introspection); scripts in `session/testdata/*.rhz` are run by `go test` and double as examples
 3. **Server + client + binary wire protocol + CLI REPL connected to the server**, plus users, roles and permissions (still on in-memory storage)
 4. Persistence: WAL + LSM, MVCC, crash recovery
 5. Indexes, full-text search, planner, `explain`

@@ -23,6 +23,13 @@ func FormatExpr(e Expr) string {
 	return f.b.String()
 }
 
+// FormatStep returns one pipeline step as Rhizome text, without the "|".
+func FormatStep(st Step) string {
+	var f formatter
+	f.step(st)
+	return f.b.String()
+}
+
 type formatter struct{ b strings.Builder }
 
 func (f *formatter) w(ss ...string) {

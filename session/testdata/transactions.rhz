@@ -1,0 +1,116 @@
+// Transactions (spec/rhizome.md §9) and session statements (§4).
+
+define kind Account { owner: text, balance: decimal(12,2) check balance >= 0 };
+create Account @a { owner: "Ann", balance: 500.00d };
+create Account @b { owner: "Bob", balance: 100.00d };
+
+begin;
+  update @a set balance -= 100.00d;
+  update @b set balance += 100.00d;
+commit;
+find Account x | sort x.owner | show x.owner, x.balance;
+// => "Ann" | 400.00d
+// => "Bob" | 200.00d
+
+// Rollback discards changes, and the handles bound inside.
+begin;
+  update @a set balance = 0.00d;
+  create Account @c { owner: "Cy", balance: 1.00d };
+rollback;
+find Account x | sort x.owner | show x.owner, x.balance;
+// => "Ann" | 400.00d
+// => "Bob" | 200.00d
+find @c as x;
+// error not_found: no handle @c
+
+// A failed statement aborts the transaction until rollback.
+begin;
+  update @a set balance -= 1000.00d;
+  // error constraint: check failed for balance
+  update @b set balance = 1.00d;
+  // error constraint: the transaction failed earlier
+commit;
+// error conflict: rolled back because a statement failed
+find @b as x | show x.balance;
+// => 200.00d
+
+begin;
+begin;
+// error constraint: already open
+rollback;
+commit;
+// error constraint: no transaction is open
+rollback;
+// error constraint: no transaction is open
+
+// Read-only transactions.
+begin read only;
+find Account x | show count();
+// => 2
+update @a set balance = 1.00d;
+// error constraint: read-only
+rollback;
+
+// Definitions are transactional too.
+begin;
+define kind Temp { x: int };
+create Temp { x: 1 };
+find Temp t | show t.x;
+// => 1
+rollback;
+find Temp t;
+// error not_found: no kind Temp
+
+// Session statements.
+create database other;
+show databases;
+// => "other"
+// => "test"
+begin;
+use other;
+// error constraint: isn't allowed inside a transaction
+rollback;
+use other;
+find Account x;
+// error not_found: no kind Account
+find @a as x;
+// error not_found: no handle @a
+use nope;
+// error not_found: nope
+use test;
+drop database other;
+show databases;
+// => "test"
+
+set max_rows = 1;
+find Account x;
+// error limit: more than 1 rows
+set max_rows = 0;
+set max_depth = 0;
+// error constraint: max_depth must be positive
+set timeout = 30s;
+set timout = 30s;
+// error not_found: no setting timout (did you mean timeout?)
+set max_rows = "x";
+// error type: can't be stored as int
+
+// pop … wait needs to run outside a transaction.
+define kind Worker { jobs: queue.fifo<text> };
+create Worker @w { };
+push @w.jobs "job1";
+pop @w.jobs wait 1s;
+// => "job1"
+begin;
+pop @w.jobs wait 1s;
+// error constraint: isn't allowed inside a transaction
+rollback;
+pop @w.jobs wait 10ms;
+// => null
+
+// Things later phases add.
+create user ramon password "secret";
+// error unsupported: security
+history @a.balance;
+// error unsupported: history
+show users;
+// error unsupported: security

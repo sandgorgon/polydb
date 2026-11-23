@@ -607,3 +607,27 @@ func (tx *Tx) Entities(kind string, fn func(value.ID) bool) error {
 	}
 	return err
 }
+
+// CountEntities counts the entities of a kind, or every entity for "".
+func (tx *Tx) CountEntities(kind string) (int, error) {
+	if kind == "" {
+		return tx.count(keys.Prefix(keys.PrefixEntity))
+	}
+	k, ok := tx.Catalog().Kind(kind)
+	if !ok {
+		return 0, tx.unknownKind(kind)
+	}
+	return tx.count(keys.Members(k.ID))
+}
+
+// CountRelations counts the relations of a type, or every relation for "".
+func (tx *Tx) CountRelations(typ string) (int, error) {
+	if typ == "" {
+		return tx.count(keys.Prefix(keys.PrefixRelation))
+	}
+	rt, ok := tx.Catalog().RelationType(typ)
+	if !ok {
+		return 0, nil
+	}
+	return tx.count(keys.OfType(rt.ID))
+}

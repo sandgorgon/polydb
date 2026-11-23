@@ -31,23 +31,23 @@ func ValidateFieldDef(fd *FieldDef, ctx FieldContext) error {
 		return err
 	}
 	if fd.Type == nil {
-		return fmt.Errorf("field %q has no type", fd.Name)
+		return fmt.Errorf("field %s has no type", fd.Name)
 	}
 	if err := fd.Type.Validate(); err != nil {
-		return fmt.Errorf("field %q: %w", fd.Name, err)
+		return fmt.Errorf("field %s: %w", fd.Name, err)
 	}
 	if len(fd.Doc) > MaxDocLen {
-		return fmt.Errorf("field %q: doc longer than %d bytes", fd.Name, MaxDocLen)
+		return fmt.Errorf("field %s: doc longer than %d bytes", fd.Name, MaxDocLen)
 	}
 	what := func(opt string) error {
-		return fmt.Errorf("field %q: %s isn't allowed on a %s", fd.Name, opt, ctx)
+		return fmt.Errorf("field %s: %s isn't allowed on a %s", fd.Name, opt, ctx)
 	}
 	if fd.Unique {
 		if ctx != KindField {
 			return what("unique")
 		}
 		if !fd.Type.Keyable() {
-			return fmt.Errorf("field %q: unique needs a keyable type, not %s", fd.Name, fd.Type)
+			return fmt.Errorf("field %s: unique needs a keyable type, not %s", fd.Name, fd.Type)
 		}
 	}
 	if fd.Default != "" && ctx != KindField && ctx != FormatField {
@@ -62,10 +62,10 @@ func ValidateFieldDef(fd *FieldDef, ctx FieldContext) error {
 	// Refs inside collections and any fields always dangle (spec/types.md
 	// §4.12), so restrict needs the field itself to be a ref.
 	if fd.OnDelete == RefRestrict && fd.Type.Code != value.CodeRef {
-		return fmt.Errorf("field %q: on delete restrict only applies to ref fields, not %s", fd.Name, fd.Type)
+		return fmt.Errorf("field %s: on delete restrict only applies to ref fields, not %s", fd.Name, fd.Type)
 	}
 	if fd.History.Keep < 0 || (fd.History.Keep > 0 && !fd.History.On) {
-		return fmt.Errorf("field %q: invalid history setting", fd.Name)
+		return fmt.Errorf("field %s: invalid history setting", fd.Name)
 	}
 	return nil
 }
@@ -78,7 +78,7 @@ func validateFields(owner string, fields []FieldDef, ctx FieldContext) error {
 			return fmt.Errorf("%s: %w", owner, err)
 		}
 		if seen[fd.Name] {
-			return fmt.Errorf("%s: duplicate field %q", owner, fd.Name)
+			return fmt.Errorf("%s: duplicate field %s", owner, fd.Name)
 		}
 		seen[fd.Name] = true
 	}
@@ -213,11 +213,11 @@ func CheckAddField(k *Kind, has func(name string) bool, fd *FieldDef) error {
 	}
 	if k != nil {
 		if _, ok := k.Field(fd.Name); ok {
-			return fmt.Errorf("field %q is declared by kind %s; use set", fd.Name, k.Name)
+			return fmt.Errorf("field %s is declared by kind %s; use set", fd.Name, k.Name)
 		}
 	}
 	if has(fd.Name) {
-		return fmt.Errorf("field %q already exists; use set", fd.Name)
+		return fmt.Errorf("field %s already exists; use set", fd.Name)
 	}
 	return nil
 }
@@ -226,7 +226,7 @@ func CheckAddField(k *Kind, has func(name string) bool, fd *FieldDef) error {
 // exist, suggesting the closest existing name.
 func UnknownField(name string, existing []string) error {
 	if s := Suggest(name, existing); s != "" {
-		return fmt.Errorf("no field %q (did you mean %q?)", name, s)
+		return fmt.Errorf("no field %s (did you mean %s?)", name, s)
 	}
-	return fmt.Errorf("no field %q", name)
+	return fmt.Errorf("no field %s", name)
 }

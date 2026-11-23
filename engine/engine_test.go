@@ -126,7 +126,7 @@ func TestCreateAndUpdate(t *testing.T) {
 		t.Error("hobby not dropped")
 	}
 
-	wantCode(t, db, CodeUnknownField, `did you mean "email"`, func(tx *Tx) error {
+	wantCode(t, db, CodeUnknownField, "did you mean email?", func(tx *Tx) error {
 		_, err := tx.Create("Person", Fields{"name": txt("B"), "emial": txt("b@x.io")})
 		return err
 	})
@@ -294,7 +294,7 @@ func TestKindlessAndClosed(t *testing.T) {
 	if e.Kind != nil || len(e.Fields) != 2 || e.Def(e.Fields[0]).Type.Code != value.CodeAny {
 		t.Errorf("kindless: %+v", e)
 	}
-	wantCode(t, db, CodeUnknownField, `did you mean "title"`, func(tx *Tx) error { return tx.Set(note, Fields{"titel": txt("x")}) })
+	wantCode(t, db, CodeUnknownField, "did you mean title?", func(tx *Tx) error { return tx.Set(note, Fields{"titel": txt("x")}) })
 	wantCode(t, db, CodeConstraint, "already exists", func(tx *Tx) error {
 		return tx.AddField(note, Add{Def: model.FieldDef{Name: "title"}, Value: txt("x")})
 	})

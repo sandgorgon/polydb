@@ -1,0 +1,64 @@
+// Documents and paths inside them (spec/rhizome.md §8.6, types.md §6).
+
+define format invoice : json "Customer invoice" {
+  number : text
+  total  : decimal(12,2)
+  lines  : list<record{ sku: text, qty: int }>
+};
+define format staff : csv header {
+  name   : text
+  email  : text at 4
+  age    : int?
+  status : text default "active"
+};
+define kind Server {
+  name   : text
+  config : doc<json>?
+  page   : doc<xml>?
+  inv    : doc<invoice>?
+  team   : doc<staff>?
+  raw    : doc<csv>?
+};
+
+create Server @s {
+  name: "web",
+  config: "{\"server\": {\"port\": 8080, \"hosts\": [\"a\", \"b\"]}, \"key with space\": true}",
+  page: "<config><server port=\"80\">hello <b>world</b></server></config>",
+  inv: "{\"number\": \"A-1\", \"total\": 12.50, \"lines\": [{\"sku\": \"x\", \"qty\": 2}]}",
+  team: "name,age,status,dept,mail\nAnn,34,,eng,ann@x.io\nBob,,away,ops,bob@x.io\n",
+  raw: "1,2\n3,4\n"
+};
+
+find @s as x | show x.config->server->port, x.config->server->hosts->[1], x.config->"key with space";
+// => 8080 | "b" | true
+find @s as x | show x.config->nope, exists(x.config->server), exists(x.config->nope);
+// => null | true | false
+find @s as x | show x.page->server->@port, inner_text(x.page->server), x.page->server->b->[0];
+// => "80" | "hello world" | "world"
+find @s as x | show x.inv->total, x.inv->lines->[0]->qty * 2, parse(x.inv).number;
+// => 12.50d | 4 | "A-1"
+find @s as x | show x.team->[0]->name, x.team->[0]->age, x.team->[0]->status, x.team->[1]->status, x.team->[1]->email;
+// => "Ann" | 34 | "active" | "away" | "bob@x.io"
+find @s as x | show x.raw->[1]->[0], len(parse(x.team));
+// => "3" | 2
+
+// Typed paths are checked before the query runs.
+find @s as x | show x.inv->totl;
+// error unknown_field: format invoice has no field totl here (did you mean total?)
+find @s as x | where x.inv->total = "x";
+// error type: can't compare
+find @s as x | show x.raw->[0]->email;
+// error type: needs a header
+find @s as x | show x.config->@port;
+// error type: XML attribute step
+
+// Documents are validated on write.
+update @s set inv = "{\"number\": \"A-2\"}";
+// error type: invalid
+update @s set team = "name,age,x,y,mail\nAnn,old,,,a@x.io\n";
+// error type: "old" isn't a int
+update @s set config = "{not json";
+// error type: isn't a valid doc<json>
+update @s set inv = "{\"number\": \"A-2\", \"total\": 0.10, \"lines\": []}";
+find @s as x | show x.inv->total;
+// => 0.10d
