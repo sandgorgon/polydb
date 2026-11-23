@@ -17,15 +17,18 @@ import (
 
 // DefineKind defines a kind and returns its ID (spec/rhizome.md §5.1).
 func (tx *Tx) DefineKind(k model.Kind) (value.ID, error) {
-	if err := noExprs(k.Fields); err != nil {
-		return value.ID{}, err
-	}
 	e, err := tx.editing()
 	if err != nil {
 		return value.ID{}, err
 	}
 	id, err := e.DefineKind(k)
-	return id, wrap(CodeConstraint, err)
+	if err != nil {
+		return id, wrap(CodeConstraint, err)
+	}
+	if err := tx.validateExprs(k.Fields, fieldTypes(k.Fields)); err != nil {
+		return id, tx.fail(err)
+	}
+	return id, nil
 }
 
 // AlterKind changes a kind: fn receives a copy of the definition to
@@ -45,9 +48,6 @@ func (tx *Tx) AlterKind(name string, fn func(k *model.Kind) error) error {
 		return err
 	}
 	nk.ID = old.ID
-	if err := noExprs(nk.Fields); err != nil {
-		return err
-	}
 	e, err := tx.editing()
 	if err != nil {
 		return err
@@ -56,6 +56,9 @@ func (tx *Tx) AlterKind(name string, fn func(k *model.Kind) error) error {
 		return wrap(CodeConstraint, err)
 	}
 	newK, _ := tx.Catalog().KindByID(old.ID)
+	if err := tx.validateExprs(newK.Fields, fieldTypes(newK.Fields)); err != nil {
+		return tx.fail(err)
+	}
 	if sameData(old, newK) {
 		return nil
 	}
@@ -93,7 +96,7 @@ func sameData(a, b *model.Kind) bool {
 	}
 	for i := range a.Fields {
 		x, y := a.Fields[i], b.Fields[i]
-		if x.Name != y.Name || !x.Type.Equal(y.Type) || x.Unique != y.Unique || x.OnDelete != y.OnDelete {
+		if x.Name != y.Name || !x.Type.Equal(y.Type) || x.Unique != y.Unique || x.OnDelete != y.OnDelete || x.Check != y.Check {
 			return false
 		}
 	}
@@ -144,6 +147,17 @@ func (tx *Tx) migrate(id value.ID, old, newK *model.Kind) error {
 			cp.Value = c
 			st.fields[name] = &cp
 		}
+	}
+	for i := range newK.Fields {
+		fd := &newK.Fields[i]
+		if _, has := st.fields[fd.Name]; has || fd.Default == "" {
+			continue
+		}
+		v, err := tx.evalDefault(fd)
+		if err != nil {
+			return err
+		}
+		st.fields[fd.Name] = &model.Field{ID: tx.newID(), Entity: id, Name: fd.Name, Value: v, Declared: true}
 	}
 	if newK.Closed {
 		for _, f := range st.fields {
@@ -199,7 +213,7 @@ type RelationDef struct {
 }
 
 func (tx *Tx) relationType(d RelationDef) (model.RelationType, error) {
-	if err := noExprs(d.Props); err != nil {
+	if err := tx.validateExprs(d.Props, fieldTypes(d.Props)); err != nil {
 		return model.RelationType{}, err
 	}
 	rt := model.RelationType{Name: d.Name, Defined: true, Doc: d.Doc, MaxOut: d.MaxOut, MaxIn: d.MaxIn,
@@ -337,6 +351,9 @@ func (tx *Tx) DropRelation(name string) error {
 func (tx *Tx) DefineFormat(f model.Format) (value.ID, error) {
 	e, err := tx.editing()
 	if err != nil {
+		return value.ID{}, err
+	}
+	if err := tx.tableDefaults(&f); err != nil {
 		return value.ID{}, err
 	}
 	id, err := e.DefineFormat(f)

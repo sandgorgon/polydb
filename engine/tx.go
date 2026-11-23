@@ -249,6 +249,9 @@ func (tx *Tx) save(st *entState) error {
 		if err := checkRequired(st); err != nil {
 			return err
 		}
+		if err := tx.checkEntity(st); err != nil {
+			return err
+		}
 	}
 
 	// Side keys: compute before and after, then write the difference.

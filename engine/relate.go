@@ -153,6 +153,14 @@ func (tx *Tx) relationProps(rt *model.RelationType, props Fields) (value.Map, er
 			return value.Map{}, errorf(CodeConstraint, "relation %s needs property %s", rt.Name, p.Name)
 		}
 	}
+	types := fieldTypes(rt.Props)
+	for i := range rt.Props {
+		if p := &rt.Props[i]; p.Check != "" {
+			if err := tx.runCheck("relation "+rt.Name, p, types, vals); err != nil {
+				return value.Map{}, err
+			}
+		}
+	}
 	m, err := value.MapOfText(vals)
 	return m, wrap(CodeType, err)
 }

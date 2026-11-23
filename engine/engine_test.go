@@ -146,10 +146,137 @@ func TestCreateAndUpdate(t *testing.T) {
 		return err
 	})
 	wantCode(t, db, CodeConstraint, "declared by kind", func(tx *Tx) error { return tx.DropField(ann, "name") })
-	wantCode(t, db, CodeUnsupported, "default and check", func(tx *Tx) error {
-		_, err := tx.Create("", nil, Add{Def: model.FieldDef{Name: "x", Check: "x > 0"}, Value: value.Int(1)})
+	wantCode(t, db, CodeConstraint, "check failed for x: x > 0", func(tx *Tx) error {
+		_, err := tx.Create("", nil, Add{Def: model.FieldDef{Name: "x", Check: "x > 0"}, Value: value.Int(-1)})
 		return err
 	})
+}
+
+func TestDefaultsAndChecks(t *testing.T) {
+	db := newDB(t)
+	field := func(name, typ, def, check string) model.FieldDef {
+		f := fd(name, typ)
+		f.Default, f.Check = def, check
+		return f
+	}
+	update(t, db, func(tx *Tx) error {
+		_, err := tx.DefineKind(model.Kind{Name: "Task", Fields: []model.FieldDef{
+			fd("title", "text"),
+			field("done", "bool", "false", ""),
+			field("created", "date", "today()", ""),
+			field("tags", "set<text>", "{}", ""),
+			field("cfg", "doc<json>", `"{}"`, ""),
+			field("lo", "int", "0", "lo >= 0"),
+			field("hi", "int?", "", "hi is null or hi > lo"),
+		}})
+		return err
+	})
+	var id value.ID
+	update(t, db, func(tx *Tx) error {
+		var err error
+		id, err = tx.Create("Task", Fields{"title": txt("a"), "hi": value.Int(5)})
+		return err
+	})
+	db.View(func(tx *Tx) error {
+		e, err := tx.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, n := range []string{"done", "created", "tags", "cfg", "lo", "hi"} {
+			got = append(got, n+"="+e.Value(n).String())
+		}
+		if want := `done=false created=d"2026-11-22" tags={} cfg=cast("{}" as doc<json>) lo=0 hi=5`; strings.Join(got, " ") != want {
+			t.Errorf("got  %s\nwant %s", strings.Join(got, " "), want)
+		}
+		return nil
+	})
+	wantCode(t, db, CodeConstraint, "check failed for hi: hi is null or hi > lo", func(tx *Tx) error {
+		return tx.Set(id, Fields{"lo": value.Int(9)})
+	})
+	wantCode(t, db, CodeConstraint, "check failed for lo", func(tx *Tx) error {
+		_, err := tx.Create("Task", Fields{"title": txt("b"), "lo": value.Int(-1)})
+		return err
+	})
+	update(t, db, func(tx *Tx) error { return tx.Unset(id, "hi") }) // null passes the check
+
+	// Mistakes are reported when the definition is made.
+	for _, c := range []struct {
+		f    model.FieldDef
+		code Code
+		msg  string
+	}{
+		{field("a", "int", `"x"`, ""), CodeType, `default "x"`},
+		{field("a", "int", "b", ""), CodeType, "a default needs a constant value"},
+		{field("a", "int", "", "b > 1"), CodeUnknownField, "no field b"},
+		{field("a", "int", "", "a + 1"), CodeType, "check needs a condition"},
+		{field("a", "int", "1 +", ""), CodeType, "syntax"},
+	} {
+		wantCode(t, db, c.code, c.msg, func(tx *Tx) error {
+			_, err := tx.DefineKind(model.Kind{Name: "Bad", Fields: []model.FieldDef{c.f}})
+			return err
+		})
+	}
+
+	// alter kind: a new field's default fills existing entities, and a new
+	// check is tested against them.
+	update(t, db, func(tx *Tx) error {
+		return tx.AlterKind("Task", func(k *model.Kind) error {
+			k.Fields = append(k.Fields, field("prio", "int", "3", ""))
+			return nil
+		})
+	})
+	db.View(func(tx *Tx) error {
+		e, _ := tx.Get(id)
+		if v := e.Value("prio"); v.String() != "3" {
+			t.Errorf("prio = %v", v)
+		}
+		return nil
+	})
+	wantCode(t, db, CodeConstraint, "1 of 1 Task entities don't fit", func(tx *Tx) error {
+		return tx.AlterKind("Task", func(k *model.Kind) error {
+			for i := range k.Fields {
+				if k.Fields[i].Name == "prio" {
+					k.Fields[i].Check = "prio > 5"
+				}
+			}
+			return nil
+		})
+	})
+
+	// Relation property checks, including against existing relations.
+	since := fd("since", "int?")
+	since.Check = "since is null or since > 1900"
+	update(t, db, func(tx *Tx) error {
+		_, err := tx.DefineRelation(RelationDef{Name: "knows", Props: []model.FieldDef{since}})
+		return err
+	})
+	wantCode(t, db, CodeConstraint, "relation knows: check failed for since", func(tx *Tx) error {
+		_, err := tx.Relate(id, "knows", id, Fields{"since": value.Int(1800)})
+		return err
+	})
+	update(t, db, func(tx *Tx) error {
+		_, err := tx.Relate(id, "knows", id, Fields{"since": value.Int(1990)})
+		return err
+	})
+	tight := fd("since", "int?")
+	tight.Check = "since > 2000"
+	wantCode(t, db, CodeConstraint, "existing knows relations don't fit", func(tx *Tx) error {
+		return tx.AlterRelation("knows", RelationDef{Name: "knows", Props: []model.FieldDef{tight}})
+	})
+
+	// Table format column defaults given as text are evaluated.
+	status := fd("status", "text")
+	status.Default = `"active"`
+	update(t, db, func(tx *Tx) error {
+		_, err := tx.DefineFormat(model.Format{Name: "staff", Base: "csv", Header: true,
+			Fields: []model.FieldDef{fd("name", "text"), status}})
+		return err
+	})
+	f, _ := db.Catalog().Format("staff")
+	if v, err := f.Parse("name,status\nAnn,\n"); err != nil || v.String() != `[{name: "Ann", status: "active"}]` {
+		t.Errorf("staff: %v, %v", v, err)
+	}
 }
 
 func fieldNames(e *Entity) string {

@@ -17,6 +17,8 @@ type DB struct {
 
 	wmu     sync.Mutex
 	waiters map[string]*waitList // PopWait waiters by field key
+
+	exprs sync.Map // exprKey → *lang.Compiled, for the current catalog
 }
 
 // Name returns the database's name.
@@ -79,7 +81,11 @@ func (db *DB) Retry(attempts int, fn func(*Tx) error) error {
 func (db *DB) setCatalog(c *catalog.Catalog) {
 	for {
 		cur := db.cat.Load()
-		if c.Version() <= cur.Version() || db.cat.CompareAndSwap(cur, c) {
+		if c.Version() <= cur.Version() {
+			return
+		}
+		if db.cat.CompareAndSwap(cur, c) {
+			db.exprs.Clear()
 			return
 		}
 	}

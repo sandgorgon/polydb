@@ -166,7 +166,7 @@ define kind Person "A human being" {
   | `"doc string"` | documentation |
   | `unique` | no two entities of this kind may have equal values (creates an index automatically) |
   | `default <expr>` | value used when not given on create |
-  | `check <expr>` | must be true on every write; the field's own name refers to the new value |
+  | `check <expr>` | must be true on every write; the field's own name refers to the new value. It only applies while the field holds a value, so an absent or null optional field passes |
   | `on delete dangle\|restrict` | for refs (types.md §4.12) |
   | `history [keep <duration>]` | keep old versions of this field (opt-in history) |
 
@@ -950,6 +950,7 @@ None.
    - `find Person` with no variable, or a pattern node named after a kind (`~works_at~> Company`), is an error that suggests adding a variable.
    - In `update`, a bare name that is both a pipeline variable and a field of the target is an error; write `p.name` for the field.
    - `limit`, `skip`, `default`, `history keep` and `set` values must be constants: no variables or fields, though parameters are fine.
+   - A field's `check` runs only while that field holds a value: `age : int? check age >= 0` accepts an entity without an age. Checks may read the entity's other fields by name, and a check that evaluates to null passes.
 10. Evaluation clarifications (Phase 2, 2026-11-22):
    - `int` overflow is a `limit` error (use `bigint` or `decimal`). Division by zero is a `type` error, except for floats, which give `inf` or `nan`.
    - Decimal division is exact when the result terminates. Otherwise it keeps 16 digits after the point (or more, if an operand has more), rounded half to even. Trailing zeros beyond the operands' own digits are dropped, so `10.00d / 4` is `2.50d` and `1d / 3` is `0.3333333333333333d`.

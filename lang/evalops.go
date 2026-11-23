@@ -12,7 +12,7 @@ import (
 
 // Operators (spec/rhizome.md §8.1–8.3).
 
-func not(e Expr, x value.Value) (value.Value, error) {
+func not(e Node, x value.Value) (value.Value, error) {
 	switch x := x.(type) {
 	case value.Bool:
 		return !x, nil
@@ -23,7 +23,7 @@ func not(e Expr, x value.Value) (value.Value, error) {
 	return nil, runErr(e, "type", "not needs true or false, not %s", typeName(x))
 }
 
-func neg(e Expr, x value.Value) (value.Value, error) {
+func neg(e Node, x value.Value) (value.Value, error) {
 	switch x := x.(type) {
 	case value.Int:
 		if x == math.MinInt64 {
@@ -48,7 +48,7 @@ func neg(e Expr, x value.Value) (value.Value, error) {
 	return nil, runErr(e, "type", "- needs a number or duration, not %s", typeName(x))
 }
 
-func overflow(e Expr, what string) *Error {
+func overflow(e Node, what string) *Error {
 	return runErr(e, "limit", "%s overflow: use bigint or decimal for larger numbers", what)
 }
 
@@ -117,7 +117,7 @@ func (ev *Evaluator) binary(e *Binary, f *Frame) (value.Value, error) {
 	return nil, runErr(e, "internal", "evaluator: unknown operator %s", e.Op)
 }
 
-func textNull(e Expr, y value.Value) (value.Value, error) {
+func textNull(e Node, y value.Value) (value.Value, error) {
 	if value.IsNull(y) {
 		return value.Null, nil
 	}
@@ -171,7 +171,7 @@ func (ev *Evaluator) logic(e *Binary, f *Frame) (value.Value, error) {
 	return !stop, nil
 }
 
-func boolOrNull(e Expr, v value.Value, op string) (value.Value, error) {
+func boolOrNull(e Node, v value.Value, op string) (value.Value, error) {
 	if b, ok := v.(value.Bool); ok {
 		return b, nil
 	}
@@ -203,7 +203,7 @@ func equal(x, y value.Value) bool {
 
 // compare evaluates a comparison. Ordering with a null side is false;
 // ordering values of different type groups is a type error.
-func compare(e Expr, op string, x, y value.Value) (bool, error) {
+func compare(e Node, op string, x, y value.Value) (bool, error) {
 	x, y = sameKey(x, y)
 	switch op {
 	case "=":
@@ -247,7 +247,7 @@ func (ev *Evaluator) between(e *Between, f *Frame) (value.Value, error) {
 
 // contains tests whether coll holds elem: an element of a list, array,
 // set or queue, or a key of a map.
-func contains(e Expr, coll, elem value.Value) (value.Value, error) {
+func contains(e Node, coll, elem value.Value) (value.Value, error) {
 	switch c := coll.(type) {
 	case value.Map:
 		_, ok := c.Get(elem)
@@ -279,7 +279,7 @@ func contains(e Expr, coll, elem value.Value) (value.Value, error) {
 
 // arithValues evaluates x op y for + - * / % (spec/types.md §10.3 and
 // the time rules of spec/rhizome.md §8.2).
-func arithValues(e Expr, op string, x, y value.Value) (value.Value, error) {
+func arithValues(e Node, op string, x, y value.Value) (value.Value, error) {
 	if value.IsNull(x) || value.IsNull(y) {
 		return value.Null, nil
 	}
@@ -359,11 +359,11 @@ func floatOp(op string, a, b float64) value.Value {
 	return value.NewFloat(math.Mod(a, b))
 }
 
-func divZero(e Expr) *Error { return runErr(e, "type", "division by zero") }
+func divZero(e Node) *Error { return runErr(e, "type", "division by zero") }
 
 // intOp does int arithmetic, failing on overflow. Division rounds toward
 // zero, and % takes the sign of the dividend.
-func intOp(e Expr, op string, a, b int64) (value.Value, error) {
+func intOp(e Node, op string, a, b int64) (value.Value, error) {
 	var r int64
 	switch op {
 	case "+":
@@ -425,7 +425,7 @@ func toDecimal(v value.Value) value.Decimal {
 	return value.Decimal{}
 }
 
-func bigOp(e Expr, op string, a, b *big.Int) (value.Value, error) {
+func bigOp(e Node, op string, a, b *big.Int) (value.Value, error) {
 	r := new(big.Int)
 	switch op {
 	case "+":
@@ -451,7 +451,7 @@ func bigOp(e Expr, op string, a, b *big.Int) (value.Value, error) {
 	return v, nil
 }
 
-func decimalOp(e Expr, op string, a, b value.Decimal) (value.Value, error) {
+func decimalOp(e Node, op string, a, b value.Decimal) (value.Value, error) {
 	var r value.Decimal
 	var err error
 	switch op {
@@ -477,7 +477,7 @@ func decimalOp(e Expr, op string, a, b value.Decimal) (value.Value, error) {
 
 // ===== Joining and removing =====
 
-func joinValues(e Expr, op string, x, y value.Value) (value.Value, error) {
+func joinValues(e Node, op string, x, y value.Value) (value.Value, error) {
 	if value.IsNull(x) || value.IsNull(y) {
 		return value.Null, nil
 	}
@@ -562,7 +562,7 @@ func isSeqValue(v value.Value) bool {
 }
 
 // mergeMaps returns a with b's entries added; b wins on equal keys.
-func mergeMaps(e Expr, a, b value.Map) (value.Value, error) {
+func mergeMaps(e Node, a, b value.Map) (value.Value, error) {
 	var ks, vs []value.Value
 	for k, v := range a.All() {
 		if _, ok := b.Get(k); !ok {

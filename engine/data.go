@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"maps"
 	"slices"
 
 	"github.com/sandgorgon/polydb/keys"
@@ -148,17 +149,6 @@ func joinOr(names []string) string {
 	return s
 }
 
-// noExprs rejects default and check expressions, which need the Rhizome
-// evaluator (Phase 2).
-func noExprs(fields []model.FieldDef) error {
-	for _, fd := range fields {
-		if fd.Default != "" || fd.Check != "" {
-			return errorf(CodeUnsupported, "field %s: default and check expressions need the Rhizome evaluator, which isn't available yet", fd.Name)
-		}
-	}
-	return nil
-}
-
 func addedDef(def model.FieldDef) model.FieldDef {
 	if def.Type == nil {
 		def.Type = value.TypeAny
@@ -206,6 +196,19 @@ func (tx *Tx) Create(kind string, vals Fields, adds ...Add) (value.ID, error) {
 		}
 		st.fields[name] = &model.Field{ID: tx.newID(), Entity: st.e.ID, Name: name, Value: c, Declared: true}
 	}
+	if st.kind != nil {
+		for i := range st.kind.Fields {
+			fd := &st.kind.Fields[i]
+			if _, given := st.fields[fd.Name]; given || fd.Default == "" {
+				continue
+			}
+			v, err := tx.evalDefault(fd)
+			if err != nil {
+				return value.ID{}, err
+			}
+			st.fields[fd.Name] = &model.Field{ID: tx.newID(), Entity: st.e.ID, Name: fd.Name, Value: v, Declared: true}
+		}
+	}
 	for _, a := range adds {
 		if err := tx.addField(st, a); err != nil {
 			return value.ID{}, err
@@ -240,12 +243,23 @@ func (tx *Tx) unknownKind(name string) error {
 
 func (tx *Tx) addField(st *entState, a Add) error {
 	def := addedDef(a.Def)
-	if err := noExprs([]model.FieldDef{def}); err != nil {
-		return err
-	}
 	has := func(n string) bool { _, ok := st.fields[n]; return ok }
 	if err := model.CheckAddField(st.kind, has, &def); err != nil {
 		return wrap(CodeConstraint, err)
+	}
+	if def.Check != "" {
+		types := map[string]*value.Type{def.Name: def.Type}
+		if st.kind != nil {
+			maps.Copy(types, fieldTypes(st.kind.Fields))
+		}
+		for n, f := range st.fields {
+			if d := fieldDef(st.kind, f); d != nil {
+				types[n] = d.Type
+			}
+		}
+		if _, err := tx.checkExpr(&def, types); err != nil {
+			return err
+		}
 	}
 	if err := tx.checkTypeNames(def.Type); err != nil {
 		return err

@@ -63,7 +63,7 @@ type Evaluator struct {
 type docKey struct{ format, text string }
 
 // runErr is an error found while evaluating, at an expression's position.
-func runErr(e Expr, code, format string, args ...any) *Error {
+func runErr(e Node, code, format string, args ...any) *Error {
 	return &Error{Pos: e.Position(), Code: code, Msg: fmt.Sprintf(format, args...)}
 }
 
@@ -430,4 +430,19 @@ func typeName(v value.Value) string {
 		return "doc<" + d.Format() + ">"
 	}
 	return v.Code().String()
+}
+
+// Assign computes the new value of an assignment (spec/rhizome.md §6.2)
+// from the current value and the evaluated right side: = replaces, +=
+// and friends do arithmetic, ++= joins and --= removes.
+func (ev *Evaluator) Assign(as *Assign, cur, v value.Value) (value.Value, error) {
+	switch as.Op {
+	case "=":
+		return v, nil
+	case "+=", "-=", "*=", "/=":
+		return arithValues(as, as.Op[:1], orNull(cur), v)
+	case "++=", "--=":
+		return joinValues(as, as.Op[:2], orNull(cur), v)
+	}
+	return nil, runErr(as, "syntax", "unknown assignment %s", as.Op)
 }

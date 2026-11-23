@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) complete on branch `phase-1`. Next: Phase 2 (Rhizome language). Until then, `default` and `check` expressions are rejected, and non-unique indexes are recorded but not built.
+Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) complete and merged into `master`. Phase 2 (Rhizome language) in progress on branch `phase-2`: lexer, parser, checker, evaluator and executor done; `default` and `check` expressions now work. Non-unique indexes are recorded but not built yet.
 Source requirements: [req.md](req.md)
 
 ---

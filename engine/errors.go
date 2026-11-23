@@ -19,7 +19,7 @@ const (
 	CodeLimit        Code = "limit"
 	CodeInternal     Code = "internal"
 	// CodeUnsupported marks features that need a later phase, such as
-	// default and check expressions before the Rhizome evaluator exists.
+	// full-text search.
 	CodeUnsupported Code = "unsupported"
 )
 
