@@ -5,6 +5,7 @@ import (
 	"container/heap"
 
 	"github.com/sandgorgon/polydb/storage"
+	"github.com/sandgorgon/polydb/storage/sstable"
 )
 
 // internalIter walks entries in internal key order: user key ascending,
@@ -24,6 +25,8 @@ type internalIter interface {
 	Err() error
 	Close() error
 }
+
+var _ internalIter = (*sstable.Iter)(nil)
 
 // mergeIter merges several internal iterators in one direction.
 type mergeIter struct {

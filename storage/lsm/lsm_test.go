@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sandgorgon/polydb/storage"
+	"github.com/sandgorgon/polydb/storage/sstable"
 	"github.com/sandgorgon/polydb/storage/storagetest"
 	"github.com/sandgorgon/polydb/storage/vfs"
 	"github.com/sandgorgon/polydb/txn"
@@ -341,4 +342,50 @@ func FuzzDecodeRecord(f *testing.F) {
 			t.Fatalf("re-encoded record decodes differently: %v", err)
 		}
 	})
+}
+
+// TestMergeWithTable checks that table iterators merge with a memtable:
+// newer memtable versions and tombstones hide the table's, and older
+// snapshots still see the table's versions.
+func TestMergeWithTable(t *testing.T) {
+	fs := vfs.NewMem()
+	fs.MkdirAll("/t")
+	f, _ := fs.Create("/t/1.sst")
+	w := sstable.NewWriter(f, sstable.WriterOptions{BlockSize: 64})
+	for i := range 20 {
+		w.Add(fmt.Appendf(nil, "k%02d", i), 2, kindSet, []byte("table"))
+		w.Add(fmt.Appendf(nil, "k%02d", i), 1, kindSet, []byte("older"))
+	}
+	if _, err := w.Finish(); err != nil {
+		t.Fatal(err)
+	}
+	rf, _ := fs.Open("/t/1.sst")
+	r, err := sstable.Open(rf, sstable.ReaderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	mem := newMemtable()
+	mem.add(3, []point{{key: []byte("k05"), kind: kindSet, value: []byte("mem")}, {key: []byte("k06"), kind: kindDelete}, {key: []byte("k99"), kind: kindSet, value: []byte("new")}}, nil)
+	mem.add(4, nil, []tombstone{{start: []byte("k10"), end: []byte("k15")}})
+	for _, tc := range []struct {
+		snap    uint64
+		reverse bool
+		want    string
+	}{
+		{4, false, "k00=table k01=table k02=table k03=table k04=table k05=mem k07=table k08=table k09=table k15=table k16=table k17=table k18=table k19=table k99=new"},
+		{4, true, "k99=new k19=table k18=table k17=table k16=table k15=table k09=table k08=table k07=table k05=mem k04=table k03=table k02=table k01=table k00=table"},
+		{1, false, "k00=older k01=older k02=older k03=older k04=older k05=older k06=older k07=older k08=older k09=older k10=older k11=older k12=older k13=older k14=older k15=older k16=older k17=older k18=older k19=older"},
+	} {
+		it := &userIter{m: newMergeIter([]internalIter{mem.iter(), r.NewIter()}, tc.reverse), snap: tc.snap,
+			reverse: tc.reverse, tombstones: mem.rangeDels()}
+		var out []string
+		for it.Next() {
+			out = append(out, string(it.Key())+"="+string(it.Value()))
+		}
+		it.Close()
+		if got := strings.Join(out, " "); got != tc.want {
+			t.Errorf("snap %d reverse %v:\n got %s\nwant %s", tc.snap, tc.reverse, got, tc.want)
+		}
+	}
 }

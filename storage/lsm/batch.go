@@ -16,12 +16,13 @@ import (
 	"slices"
 
 	"github.com/sandgorgon/polydb/storage"
+	"github.com/sandgorgon/polydb/storage/sstable"
 )
 
-// Entry kinds.
+// Entry kinds, shared with table files.
 const (
-	kindSet    = 1
-	kindDelete = 2
+	kindSet    = sstable.KindSet
+	kindDelete = sstable.KindDelete
 )
 
 // maxSeq is larger than any real sequence number; (key, maxSeq) sorts

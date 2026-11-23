@@ -143,3 +143,11 @@ func (osFS) Lock(name string) (io.Closer, error) {
 // Join joins path elements (filepath.Join; here so callers need only
 // this package).
 func Join(elem ...string) string { return filepath.Join(elem...) }
+
+// Mapper is implemented by files that can be memory-mapped read-only.
+// Table files use it: they never change once written, so reads become
+// slices of the mapping and the operating system's page cache does the
+// caching. The mapping must not be used after unmap.
+type Mapper interface {
+	Map() (data []byte, unmap func() error, err error)
+}
