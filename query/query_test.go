@@ -327,7 +327,12 @@ func TestDefinitionsAndErrors(t *testing.T) {
 	// Things later phases add.
 	s.wantErr(`find Person p as of t"2026-01-01T00:00:00Z"`, "unsupported", "shows fields")
 	s.wantErr(`create user ramon password "x"`, "unsupported", "security")
-	s.wantErr(`find Person p | show search(p.name, "x")`, "unsupported", "full-text")
+
+	// search(): a constant query is checked before running; others when
+	// they are used.
+	s.want(`find Person p | where search(p.name, "ANN OR bo*") | sort p.name | show p.name`, `"Ann"; "Bob"`)
+	s.wantErr(`find Person p | show search(p.name, "\"open")`, "syntax", "phrase is missing")
+	s.wantErr(`find Person p | let q = "-x" | show search(p.name, q)`, "syntax", "no words to find")
 }
 
 func TestErrorPositions(t *testing.T) {

@@ -254,7 +254,8 @@ func TestCheckErrors(t *testing.T) {
 		{`find Person p | show lower(p.age)`, "type", "lower needs text as argument 1, not int?"},
 		{`find Person p | show substr(p.name)`, "type", "substr takes 2 to 3 arguments, not 1"},
 		{`find Person p | show degree(p, "knows", "sideways")`, "type", "degree's direction"},
-		{`find Person p | show search(p.name, "x")`, "unsupported", "search()"},
+		{`find Person p | show search(p.name, "-x")`, "syntax", "no words to find"},
+		{`find Person p | show search(p.age, "x")`, "type", "search needs text"},
 		{`find Person p | show nodes(p)`, "type", "nodes needs a path"},
 		{`find Person p | show valid("x", "yaml")`, "not_found", "no format yaml"},
 		// docs

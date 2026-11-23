@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sandgorgon/polydb/engine"
+	"github.com/sandgorgon/polydb/fulltext"
 	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/storage/vfs"
 	"github.com/sandgorgon/polydb/value"
@@ -228,5 +230,171 @@ func TestDropIndexDuringBuild(t *testing.T) {
 	verify(t, eng, "after dropping during a build") // no entries of p_age left
 	if n := entries(t, eng, "p_name"); n != 2500 {
 		t.Errorf("p_name has %d entries", n)
+	}
+}
+
+var textWords = strings.Fields("alpha beta gamma delta Café cafe CAFE résumé resume run running runner 東京 京都 e-mail mail don't 2026")
+
+func randomText(rng *rand.Rand) string {
+	var ws []string
+	for range 2 + rng.IntN(10) {
+		ws = append(ws, textWords[rng.IntN(len(textWords))])
+	}
+	return strings.Join(ws, []string{" ", ", ", ". ", " - "}[rng.IntN(4)])
+}
+
+func randomQuery(rng *rand.Rand) string {
+	word := func() string {
+		w := textWords[rng.IntN(len(textWords))]
+		switch rng.IntN(6) {
+		case 0:
+			if r := []rune(w); len(r) > 2 && !strings.ContainsAny(w, "-'") {
+				return string(r[:1+rng.IntN(len(r)-1)]) + "*"
+			}
+		case 1:
+			return `"` + w + " " + textWords[rng.IntN(len(textWords))] + `"`
+		}
+		return w
+	}
+	var cs []string
+	for i := range 1 + rng.IntN(3) {
+		c := word()
+		if rng.IntN(3) == 0 {
+			c += " OR " + word()
+		} else if i > 0 && rng.IntN(4) == 0 {
+			c = "-" + c
+		}
+		cs = append(cs, c)
+	}
+	return strings.Join(cs, " ")
+}
+
+// TestTextIndexMatchesScan checks, on random documents and queries, that
+// answering from a text index gives what matching every document gives,
+// through updates, unsets and deletes, and for an index built in the
+// background.
+func TestTextIndexMatchesScan(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		disk  bool
+		n     int
+		after bool // define the index after the data: a background build
+	}{{"memory", false, 300, false}, {"disk", true, 300, false}, {"background", true, 1500, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			rng := rand.New(rand.NewPCG(4, 4))
+			s := newScriptSession(t, tc.disk)
+			eng := s.eng
+			mustExec(t, eng, "test", `define kind Doc { title: text, body: text? }`)
+			if !tc.after {
+				mustExec(t, eng, "test", `define text index doc_title on Doc(title); define text index doc_body on Doc(body)`)
+			}
+			db, _ := eng.Database("test")
+			var ids []value.ID
+			err := db.Update(func(tx *engine.Tx) error {
+				for range tc.n {
+					f := engine.Fields{"title": value.MustText(randomText(rng))}
+					if rng.IntN(5) > 0 {
+						f["body"] = value.MustText(randomText(rng))
+					}
+					id, err := tx.Create("Doc", f)
+					if err != nil {
+						return err
+					}
+					ids = append(ids, id)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = db.Update(func(tx *engine.Tx) error {
+				for i, id := range ids {
+					switch {
+					case i%7 == 0:
+						if err := tx.Set(id, engine.Fields{"body": value.MustText(randomText(rng))}); err != nil {
+							return err
+						}
+					case i%11 == 0:
+						if err := tx.Unset(id, "body"); err != nil {
+							return err
+						}
+					case i%13 == 0:
+						if err := tx.Delete(id); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.after {
+				mustExec(t, eng, "test", `define text index doc_title on Doc(title); define text index doc_body on Doc(body)`)
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := db.WaitIndexes(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			verify(t, eng, "text index")
+
+			matches := 0
+			err = db.View(func(tx *engine.Tx) error {
+				texts := map[string]map[value.ID]string{"title": {}, "body": {}}
+				tx.Entities("Doc", func(id value.ID) bool {
+					e, _ := tx.Get(id)
+					for f := range texts {
+						if v, ok := e.Value(f).(value.Text); ok {
+							texts[f][id] = v.Go()
+						}
+					}
+					return true
+				})
+				for range 400 {
+					src := randomQuery(rng)
+					q, err := fulltext.Parse(src)
+					if err != nil {
+						continue // e.g. only exclusions
+					}
+					for field, byID := range texts {
+						ix, _ := tx.Catalog().Index("doc_" + field)
+						got, err := tx.TextSearch(ix, field, q)
+						if err != nil {
+							return err
+						}
+						var want []value.ID
+						for id, text := range byID {
+							if q.Match(text) {
+								want = append(want, id)
+							}
+						}
+						slices.SortFunc(want, func(a, b value.ID) int { return value.Compare(a, b) })
+						if !slices.Equal(got, want) {
+							return fmt.Errorf("%s in %s: index found %d, matching finds %d", src, field, len(got), len(want))
+						}
+						matches += len(got)
+					}
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("%d matches over 800 searches", matches)
+			// And through Rhizome.
+			want := rows(t, eng, security.AdminUser, "test", `find Doc d | where search(d.title, "cafe -mail") | show count()`)
+			n := 0
+			db.View(func(tx *engine.Tx) error {
+				ix, _ := tx.Catalog().Index("doc_title")
+				q, _ := fulltext.Parse("cafe -mail")
+				got, err := tx.TextSearch(ix, "title", q)
+				n = len(got)
+				return err
+			})
+			if want != fmt.Sprint(n) {
+				t.Errorf("search() counts %s, the index %d", want, n)
+			}
+		})
 	}
 }

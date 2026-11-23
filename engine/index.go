@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/sandgorgon/polydb/fulltext"
 	"github.com/sandgorgon/polydb/keys"
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/model"
@@ -31,39 +32,61 @@ const (
 	minBuildBatch = 8
 )
 
-// indexEntryKey returns an entity's entry in a non-unique value index, or
-// false when the entity has no entry: a key is absent or null, a path
-// finds nothing, or a value can't be a key.
-func (tx *Tx) indexEntryKey(ix *model.Index, id value.ID, fields map[string]*model.Field) ([]byte, bool) {
-	if ix.Unique || ix.Text {
-		return nil, false
+// indexEntries returns an entity's entries in a non-unique index, with
+// their values: for a value index at most one, none when a key is absent
+// or null, a path finds nothing, or a value can't be a key; for a text
+// index one per word per field, holding the word's positions.
+func (tx *Tx) indexEntries(ix *model.Index, id value.ID, fields map[string]*model.Field) map[string][]byte {
+	if ix.Unique {
+		return nil
+	}
+	if ix.Text {
+		out := map[string][]byte{}
+		for i, k := range ix.Keys {
+			f, ok := fields[k.Field]
+			if !ok || f.Value == nil {
+				continue
+			}
+			t, ok := f.Value.(value.Text)
+			if !ok {
+				continue
+			}
+			pos := map[string][]int{}
+			for _, tok := range fulltext.Tokenize(t.Go()) {
+				pos[tok.Word] = append(pos[tok.Word], tok.Pos)
+			}
+			for w, ps := range pos {
+				out[string(keys.TextEntry(ix.ID, w, id, i))] = keys.EncodePositions(ps)
+			}
+		}
+		return out
 	}
 	var vals []byte
 	for _, k := range ix.Keys {
 		f, ok := fields[k.Field]
 		if !ok || f.Value == nil || value.IsNull(f.Value) {
-			return nil, false
+			return nil
 		}
 		v := f.Value
 		if len(k.Path) > 0 {
 			d, ok := v.(value.Doc)
 			if !ok {
-				return nil, false
+				return nil
 			}
 			format, ok := tx.Catalog().Format(d.Format())
 			if !ok {
-				return nil, false
+				return nil
 			}
 			if v, ok = lang.IndexValue(format, d, k.Path); !ok {
-				return nil, false
+				return nil
 			}
 		}
 		var err error
 		if vals, err = value.AppendKey(vals, v); err != nil {
-			return nil, false
+			return nil
 		}
 	}
-	return keys.IndexEntry(ix.ID, vals, id), true
+	return map[string][]byte{string(keys.IndexEntry(ix.ID, vals, id)): nil}
 }
 
 // buildIndex indexes a new non-unique index's existing entities: at once
@@ -100,8 +123,8 @@ func (tx *Tx) indexEntity(ix *model.Index, id value.ID) error {
 	if err != nil {
 		return err
 	}
-	if k, ok := tx.indexEntryKey(ix, id, st.fields); ok {
-		tx.t.Set(k, nil)
+	for k, v := range tx.indexEntries(ix, id, st.fields) {
+		tx.t.Set([]byte(k), v)
 	}
 	return nil
 }
@@ -321,13 +344,13 @@ func (tx *Tx) ScanIndex(ix *model.Index, lower, upper []byte, fn func(id value.I
 func (db *DB) VerifyIndexes() error {
 	return db.View(func(tx *Tx) error {
 		cat := tx.Catalog()
-		have := map[value.ID]map[string]bool{}
-		err := tx.scan(keys.Prefix(keys.PrefixIndex), false, func(k, _ []byte) error {
+		have := map[value.ID]map[string]string{}
+		err := tx.scan(keys.Prefix(keys.PrefixIndex), false, func(k, v []byte) error {
 			ixID := value.ID(k[1:17])
 			if have[ixID] == nil {
-				have[ixID] = map[string]bool{}
+				have[ixID] = map[string]string{}
 			}
-			have[ixID][string(k)] = true
+			have[ixID][string(k)] = string(v)
 			return nil
 		})
 		if err != nil {
@@ -339,7 +362,7 @@ func (db *DB) VerifyIndexes() error {
 			}
 		}
 		for _, ix := range cat.Indexes() {
-			if ix.Unique || ix.Text {
+			if ix.Unique {
 				continue
 			}
 			st, err := tx.IndexState(ix)
@@ -349,31 +372,29 @@ func (db *DB) VerifyIndexes() error {
 			if !st.Ready {
 				continue
 			}
-			want := map[string]bool{}
+			want := map[string]string{}
 			err = tx.scan(keys.Members(ix.Kind), false, func(k, _ []byte) error {
 				id := value.ID(k[len(k)-16:])
 				e, err := tx.loadEntity(id)
 				if err != nil {
 					return err
 				}
-				if key, ok := tx.indexEntryKey(ix, id, e.fields); ok {
-					want[string(key)] = true
+				for key, v := range tx.indexEntries(ix, id, e.fields) {
+					want[key] = string(v)
 				}
 				return nil
 			})
 			if err != nil {
 				return err
 			}
-			for k := range want {
-				if !have[ix.ID][k] {
-					_, id, _ := keys.ParseIndexEntry([]byte(k))
-					return errorf(CodeInternal, "index %s: entity %s has no entry", ix.Name, id)
+			for k, v := range want {
+				if got, ok := have[ix.ID][k]; !ok || got != v {
+					return errorf(CodeInternal, "index %s: entry %x is missing or wrong", ix.Name, k)
 				}
 			}
 			for k := range have[ix.ID] {
-				if !want[k] {
-					_, id, _ := keys.ParseIndexEntry([]byte(k))
-					return errorf(CodeInternal, "index %s: stale entry for entity %s", ix.Name, id)
+				if _, ok := want[k]; !ok {
+					return errorf(CodeInternal, "index %s: stale entry %x", ix.Name, k)
 				}
 			}
 		}

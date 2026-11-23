@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/sandgorgon/polydb/fulltext"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -57,6 +58,7 @@ type Evaluator struct {
 	Now     time.Time
 
 	regexps map[string]*regexp.Regexp
+	queries map[string]*fulltext.Query // search() queries
 	docs    map[docKey]value.Value
 }
 

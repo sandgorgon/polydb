@@ -411,8 +411,8 @@ func (tx *Tx) sideKeys(kind *model.Kind, e *model.Entity, fields map[string]*mod
 			if k, ok := uniqueIndexKey(ix, fields); ok {
 				out[string(k)] = e.ID[:]
 			}
-			if k, ok := tx.indexEntryKey(ix, e.ID, fields); ok {
-				out[string(k)] = nil
+			for k, v := range tx.indexEntries(ix, e.ID, fields) {
+				out[k] = v
 			}
 		}
 	}

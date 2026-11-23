@@ -233,9 +233,6 @@ func indexKeys(ix *model.Index) string {
 // indexStatus says whether an index is ready, or how far its background
 // build has got.
 func indexStatus(tx *engine.Tx, ix *model.Index) string {
-	if ix.Text {
-		return "recorded, not built yet"
-	}
 	st, err := tx.IndexState(ix)
 	switch {
 	case err != nil:

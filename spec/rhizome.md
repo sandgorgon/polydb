@@ -528,6 +528,25 @@ find Person p
   - For a **derived format based on json**, and for a **table format**, the result has the type declared in the format's shape. For `doc<invoice>`, `->total` is `decimal(12,2)` and `->lines->[0]->qty` is `int`, so type errors are reported before the query runs, and a step the shape doesn't declare is an error. Derived formats on other bases give `any`, because their steps (child elements, rows) don't follow the shape's fields.
 - Paths in `define index` (`config->server->port`) use the same rules.
 
+### 8.7 Full-text search
+
+`search(field, "query")` is true when the field's text matches the query. A `define text index` on the field makes it fast; without one the text is matched directly, with exactly the same rules.
+
+- **Words** are runs of letters, digits and combining marks. They are compared with case ignored and, for Latin, Greek and Cyrillic letters, accents ignored, so `"Résumé"` matches `resume` (marks in other scripts are part of the word). Chinese, Japanese and Korean characters are each a word of their own. There is no stemming: `run` doesn't match `running` (use `run*`).
+- **Queries:**
+
+  | Query | Matches text that has |
+  |---|---|
+  | `ann smith` | both words, anywhere |
+  | `"ann smith"` | the phrase: the words next to each other, in order |
+  | `-smith` | not the word (a query needs at least one word to find) |
+  | `smi*` | a word starting with `smi` |
+  | `ann OR anna` | either; OR binds tighter than the implicit AND, so `smith ann OR anna` is smith and (ann or anna) |
+
+  A query word that splits into several words (`e-mail`, `東京`) is a phrase. A malformed query is a `syntax` error: when the query is a constant, before the statement runs.
+- `search()` of an absent or null field is null, like other functions.
+- A text index covers one text field. Relevance ranking may come later; text indexes already store word positions and counts.
+
 ---
 
 ## 9. Transactions

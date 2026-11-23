@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/sandgorgon/polydb/fulltext"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -184,7 +185,22 @@ func init() {
 			return dynamic(e) || e.Code == value.CodeText
 		}, textT),
 		"search": {2, 2, func(c *checker, call *Call, args []Static) (Static, error) {
-			return Static{}, errAt(call.P, "unsupported", "search() needs full-text indexes, which aren't available yet")
+			a := argList{c, call, args}
+			for i := range 2 {
+				if _, err := a.need(i, "text", textT); err != nil {
+					return Static{}, err
+				}
+			}
+			// A constant query is checked now, so its mistakes show
+			// before anything runs.
+			if lit, ok := call.Args[1].(*Lit); ok {
+				if q, ok := lit.Val.(value.Text); ok {
+					if _, err := fulltext.Parse(q.Go()); err != nil {
+						return Static{}, errAt(lit.P, "syntax", "%v", err)
+					}
+				}
+			}
+			return a.opt(value.TypeBool), nil
 		}},
 		// Numbers
 		"abs":   sameNum(),

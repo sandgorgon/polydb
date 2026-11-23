@@ -431,9 +431,6 @@ func (tx *Tx) DefineIndex(name, kind string, unique, text bool, ks ...model.Inde
 	}
 	ix, _ := tx.Catalog().IndexByID(id)
 	if !unique {
-		if text {
-			return id, nil // full-text indexes are built in a later step
-		}
 		if err := tx.buildIndex(ix); err != nil {
 			return value.ID{}, tx.fail(err)
 		}

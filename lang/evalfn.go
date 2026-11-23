@@ -404,7 +404,19 @@ func (ev *Evaluator) builtin(e *Call, args []value.Value) (value.Value, error) {
 	case "inner_text":
 		return text(innerText(a0))
 	case "search":
-		return nil, runErr(e, "unsupported", "search() needs full-text indexes, which aren't available yet")
+		t, ok := a0.(value.Text)
+		if !ok {
+			return nil, argErr(e, 0, "text", a0)
+		}
+		qt, ok := args[1].(value.Text)
+		if !ok {
+			return nil, argErr(e, 1, "text", args[1])
+		}
+		q, err := ev.searchQuery(qt.Go())
+		if err != nil {
+			return nil, runErr(e.Args[1], "syntax", "%v", err)
+		}
+		return value.Bool(q.Match(t.Go())), nil
 	}
 	return nil, runErr(e, "not_found", "no function %s", e.Name)
 }
