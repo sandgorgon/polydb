@@ -231,3 +231,4 @@ None. All planning questions are settled; next step is Phase 0 (specifications).
 | 2026-11-22 | Catalog lives in the database's store | Written in the same atomic batch as the data it goes with; transactions read an immutable cached snapshot |
 | 2026-11-22 | Field IDs assigned when a field is first written | `::id` always works and any field can be related at any time |
 | 2026-11-22 | Guarded reads for constraint checks | Snapshot isolation plus read guards on the keys and ranges a check depends on, so `unique`, `max out/in` and `restrict` hold under concurrency. Definition changes write a catalog-version key that every data writer guards |
+| 2026-11-22 | Phase 4 storage choices | Durable commits by default with group commit (a `relaxed` setting for bulk loads); no block compression yet, with a per-block compression type in the format; leveled compaction; opt-in field history and `as of` built in Phase 4 |
