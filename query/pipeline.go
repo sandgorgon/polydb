@@ -380,18 +380,24 @@ func (x *executor) filter(rows []prow, cond lang.Expr) ([]prow, error) {
 }
 
 // rowKey encodes values for grouping and distinct: equal values give
-// equal keys, including numbers of different types (1 and 1.0).
-func rowKey(vs []value.Value) string {
+// equal keys, including numbers of different types (1 and 1.0). Large
+// text and bytes key by their start and hash, so they aren't loaded.
+func rowKey(n lang.Node, vs []value.Value) (string, error) {
 	var b strings.Builder
 	for _, v := range vs {
-		k, err := value.Key(v)
-		if err != nil {
+		var k []byte
+		if value.IsKeyable(v) {
+			var err error
+			if k, err = value.Key(v); err != nil {
+				return "", errAt(n, "internal", "reading a large value: %v", err)
+			}
+		} else {
 			k = value.Encode(v)
 		}
 		b.WriteString(string(k))
 		b.WriteByte(0xff)
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 func (x *executor) evalAll(es []lang.Expr, r prow) ([]value.Value, error) {
@@ -399,6 +405,18 @@ func (x *executor) evalAll(es []lang.Expr, r prow) ([]value.Value, error) {
 	for i, e := range es {
 		var err error
 		if out[i], err = x.eval(e, r.frame()); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// evalAllLazy is evalAll leaving large values unread.
+func (x *executor) evalAllLazy(es []lang.Expr, r prow) ([]value.Value, error) {
+	out := make([]value.Value, len(es))
+	for i, e := range es {
+		var err error
+		if out[i], err = x.evalLazy(e, r.frame()); err != nil {
 			return nil, err
 		}
 	}
@@ -413,11 +431,14 @@ func (x *executor) groupBy(st *lang.GroupBy, rows []prow) ([]prow, error) {
 	var out []prow
 	index := map[string]int{}
 	for _, r := range rows {
-		ks, err := x.evalAll(exprs, r)
+		ks, err := x.evalAllLazy(exprs, r)
 		if err != nil {
 			return nil, err
 		}
-		key := rowKey(ks)
+		key, err := rowKey(st, ks)
+		if err != nil {
+			return nil, err
+		}
 		i, ok := index[key]
 		if !ok {
 			vars := lang.Row{}
@@ -441,7 +462,7 @@ func (x *executor) sort(st *lang.Sort, rows []prow) error {
 	}
 	for i, r := range rows {
 		var err error
-		if keys[i], err = x.evalAll(exprs, r); err != nil {
+		if keys[i], err = x.evalAllLazy(exprs, r); err != nil {
 			return err
 		}
 	}
@@ -449,9 +470,14 @@ func (x *executor) sort(st *lang.Sort, rows []prow) error {
 	for i := range idx {
 		idx[i] = i
 	}
+	// Large keys are compared a piece at a time (lang.Evaluator.Order).
+	var failed error
 	slices.SortStableFunc(idx, func(a, b int) int {
 		for j, k := range st.Keys {
-			c := value.Compare(keys[a][j], keys[b][j])
+			c, err := x.ev.Order(st, keys[a][j], keys[b][j])
+			if err != nil && failed == nil {
+				failed = fail(st, err)
+			}
 			if k.Desc {
 				c = -c
 			}
@@ -461,6 +487,9 @@ func (x *executor) sort(st *lang.Sort, rows []prow) error {
 		}
 		return 0
 	})
+	if failed != nil {
+		return failed
+	}
 	sorted := make([]prow, len(rows))
 	for i, j := range idx {
 		sorted[i] = rows[j]
@@ -476,19 +505,19 @@ func (x *executor) distinct(st *lang.Distinct, rows []prow) ([]prow, error) {
 		var vs []value.Value
 		if len(st.Exprs) > 0 {
 			var err error
-			if vs, err = x.evalAll(st.Exprs, r); err != nil {
+			if vs, err = x.evalAllLazy(st.Exprs, r); err != nil {
 				return nil, err
 			}
 		} else {
 			for _, n := range slices.Sorted(maps.Keys(r.vars)) {
-				v, err := x.ev.Load(st, r.vars[n])
-				if err != nil {
-					return nil, fail(st, err)
-				}
-				vs = append(vs, value.MustText(n), v)
+				vs = append(vs, value.MustText(n), r.vars[n])
 			}
 		}
-		if k := rowKey(vs); !seen[k] {
+		k, err := rowKey(st, vs)
+		if err != nil {
+			return nil, err
+		}
+		if !seen[k] {
 			seen[k] = true
 			out = append(out, r)
 		}

@@ -65,6 +65,7 @@ type Evaluator struct {
 
 	loaded     map[value.BlobRef]value.Value // lazy values loaded so far
 	loadedSize int64
+	prefixes   map[value.BlobRef][]byte // starts of lazy values (Order)
 
 	regexps map[string]*regexp.Regexp
 	queries map[string]*fulltext.Query // search() queries

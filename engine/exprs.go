@@ -119,7 +119,7 @@ func (tx *Tx) evalDefault(fd *model.FieldDef) (value.Value, error) {
 	if err != nil {
 		return nil, err
 	}
-	v, err := c.Eval(tx.Catalog(), tx.timeNow().Go(), nil)
+	v, err := c.Eval(tx.Catalog(), tx.timeNow().Go(), nil, tx.maxLoad())
 	if err != nil {
 		return nil, exprErr(fd.Name, "default", fd.Default, err)
 	}
@@ -137,7 +137,7 @@ func (tx *Tx) runCheck(owner string, fd *model.FieldDef, types map[string]*value
 	if err != nil {
 		return err
 	}
-	ok, err := c.Passes(tx.Catalog(), tx.timeNow().Go(), vals)
+	ok, err := c.Passes(tx.Catalog(), tx.timeNow().Go(), vals, tx.maxLoad())
 	if err != nil {
 		return exprErr(fd.Name, "check", fd.Check, err)
 	}

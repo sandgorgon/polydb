@@ -29,6 +29,9 @@ type Settings struct {
 	MaxDepth int           // cap for open-ended multi-hop patterns (*, *2..)
 	MaxRows  int           // 0: no limit
 	Timeout  time.Duration // 0: no limit; enforced by the session
+	// MaxLoad is how many bytes of large values a statement may load
+	// (types.md §13.1); 0: no limit.
+	MaxLoad int64
 }
 
 // DefaultSettings are the settings of a new session.
@@ -62,9 +65,6 @@ type Context struct {
 	// NoPlanner runs pipelines as written, scanning every kind, without
 	// the planner (tests compare the two).
 	NoPlanner bool
-	// MaxLoad is how many bytes of large values the statement may load
-	// (engine.Options.MaxLoad); zero or negative means no limit.
-	MaxLoad int64
 	// LazyResults leaves large values in results as value.Lazy, for
 	// callers that send or read them a piece at a time. Otherwise they
 	// are loaded (within MaxLoad).
@@ -155,7 +155,8 @@ func newExecutor(ctx *Context, info *lang.Info) *executor {
 	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
 	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}, hidden: map[value.ID]bool{}, access: ctx.Access}
 	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, LookupHandle: x.handleValue, Now: x.now,
-		MaxLoad: ctx.MaxLoad}
+		MaxLoad: ctx.Settings.MaxLoad}
+	ctx.Tx.SetMaxLoad(ctx.Settings.MaxLoad) // for checks and defaults
 	return x
 }
 

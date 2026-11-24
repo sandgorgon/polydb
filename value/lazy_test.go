@@ -51,7 +51,45 @@ func TestLazy(t *testing.T) {
 	if Compare(l, l) != 0 || Compare(l, other) == 0 || Compare(l, MustText("x")) == 0 {
 		t.Error("compare")
 	}
-	if _, err := Key(l); err == nil {
-		t.Error("a lazy value keyed")
+	// A lazy value keys like its content, reading only its start.
+	lk, err := Key(l)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ek, _ := Key(MustText(text)); !bytes.Equal(lk, ek) || len(lk) > KeyPrefixLen+40 {
+		t.Errorf("lazy key %d bytes, eager %d", len(lk), len(ek))
+	}
+}
+
+func TestLongKeys(t *testing.T) {
+	p := strings.Repeat("p", KeyPrefixLen)
+	vals := []string{"", "a", p[:KeyPrefixLen-1], p, p + "a", p + "b", p + "\x00", "q", "q" + p}
+	for _, a := range vals {
+		for _, b := range vals {
+			ka, kb := must(Key(MustText(a))), must(Key(MustText(b)))
+			want := Compare(MustText(a), MustText(b))
+			got := bytes.Compare(ka, kb)
+			sameGroup := len(a) > KeyPrefixLen && len(b) > KeyPrefixLen && a[:KeyPrefixLen] == b[:KeyPrefixLen]
+			if (want == 0) != (got == 0) || !sameGroup && want != got {
+				t.Errorf("%.3q… vs %.3q… (len %d, %d): key order %d, value order %d", a, b, len(a), len(b), got, want)
+			}
+			g, err := SameKeyGroup(MustText(a), MustText(b))
+			if err != nil || g != (sameGroup || a == b) {
+				t.Errorf("SameKeyGroup(len %d, len %d) = %v", len(a), len(b), g)
+			}
+		}
+	}
+	// Long keys stay short, and are self-delimiting in composites.
+	long := MustText(strings.Repeat("x", 1<<20))
+	if k := must(Key(long)); len(k) != 1+KeyPrefixLen+2+32 {
+		t.Errorf("long key is %d bytes", len(k))
+	}
+	a1 := must(NewArray(long, Int(1)))
+	a2 := must(NewArray(long, Int(2)))
+	if bytes.Compare(must(Key(a1)), must(Key(a2))) >= 0 {
+		t.Error("composite keys with a long element")
+	}
+	if IsKeyable(BlobRef{Of: CodeText}) {
+		t.Error("a blob reference is keyable")
 	}
 }

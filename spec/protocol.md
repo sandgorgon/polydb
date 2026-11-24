@@ -264,7 +264,7 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 1 | text | text | one or more Rhizome statements |
 | 2 | params | `map<text, any>` | values for `$name` parameters |
 | 3 | txn | id? | run inside this transaction (see below) |
-| 4 | options | `map<text, any>` | per-request settings: `timeout`, `max_rows`, `explain` |
+| 4 | options | `map<text, any>` | per-request settings: `timeout`, `max_rows`, `max_load`, `explain` |
 | 5 | blob_params | `map<text, bytes>` | parameters whose values are blob references: name → lease token (from BLOB_STORED or a result); §7 |
 
 **PREPARE**: `text` (one statement). The reply is PREPARED: `statement_id` (int), `param_types` (`map<text, text>`, type expressions) and `columns` (as in RESULT_HEADER, if known in advance).

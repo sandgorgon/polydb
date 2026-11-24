@@ -133,6 +133,7 @@ show databases;
 
 set timeout = 30s;               // session settings
 set max_rows = 10000;
+set max_load = 1073741824;       // bytes of large values a statement may load
 ```
 
 Queries can't span databases in v1.
@@ -1027,7 +1028,7 @@ None.
    - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.
    - `create database`, `drop database` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
-   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns.
+   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns. `max_load` caps the bytes of large values a statement may load into memory (types.md §13.1; default 256 MiB, set by the server's `--max-load`; 0 means no limit).
    - `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` on one runs it and reports the rows it changed and the time.
    - `explain` on a query (Phase 5) shows the plan as a table with the columns `step`, `detail` and `estimate`:
      - a `find` row per variable, in the order they're bound. It says how the variable is found (`scan kind Person`, `lookup for p = @ann`, `index person_age for p.age > 30`, `text index …`, or `…, for each p` when it uses an earlier variable) and the estimated entities (`n per row` for those).

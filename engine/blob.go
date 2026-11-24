@@ -86,6 +86,18 @@ func openBlobs(e *Engine, dir string) (*blob.Store, error) {
 
 func (db *DB) blobThreshold() int { return db.eng.opts.BlobThreshold }
 
+// SetMaxLoad sets how many bytes of large values each check and default
+// expression the transaction evaluates may load: the running statement's
+// limit (0: none). It starts at the engine's Options.MaxLoad.
+func (tx *Tx) SetMaxLoad(n int64) { tx.loadLimit, tx.loadLimitSet = n, true }
+
+func (tx *Tx) maxLoad() int64 {
+	if tx.loadLimitSet {
+		return tx.loadLimit
+	}
+	return tx.db.eng.opts.MaxLoad
+}
+
 // storeValue returns what a stored record of entity's field holds for v:
 // v itself, or a reference after putting v's content in the blob store.
 // It records the entity's use of the blob. A lazy value's content is
@@ -577,9 +589,29 @@ func (db *DB) CollectBlobs(ctx context.Context) (BlobResult, error) {
 	if err := db.rewriteSegments(ctx, &res); err != nil {
 		return res, err
 	}
+	db.releaseDropped()
 	n, err := db.blobs.Remove(db.mgr.Oldest())
 	res.Segments += n
 	return res, wrap(CodeInternal, err)
+}
+
+// releaseDropped lets readers of large values that nothing uses any more
+// release their segments before the collector removes what it can.
+// Readers held by lazy values are released when they become garbage, so
+// when a removable segment is pinned the collector runs a garbage
+// collection and waits briefly for the releases, which run in the
+// background.
+func (db *DB) releaseDropped() {
+	if !db.blobs.PinnedRetired(db.mgr.Oldest()) {
+		return
+	}
+	runtime.GC()
+	for range 20 {
+		if !db.blobs.PinnedRetired(db.mgr.Oldest()) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // batches runs fn over the keys under prefix in transactions of up to

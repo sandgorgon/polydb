@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/rand/v2"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -373,25 +372,12 @@ func TestBlobReaderPins(t *testing.T) {
 	}
 }
 
-// collectUnpinned collects after letting the garbage collector release
-// the segments that lazy values read in earlier transactions pinned,
-// trying a few times since cleanups run in the background.
+// collectUnpinned collects, checking that the segments lazy values read
+// in earlier transactions pinned are released without help (see
+// DB.releaseDropped).
 func collectUnpinned(t *testing.T, db *DB) BlobResult {
 	t.Helper()
-	var total BlobResult
-	for range 20 {
-		runtime.GC()
-		time.Sleep(5 * time.Millisecond)
-		r := collect(t, db)
-		total.Uses += r.Uses
-		total.Blobs += r.Blobs
-		total.Chunks += r.Chunks
-		total.Moved += r.Moved
-		if total.Segments += r.Segments; r.Segments > 0 {
-			break
-		}
-	}
-	return total
+	return collect(t, db)
 }
 
 func TestBlobUpload(t *testing.T) {

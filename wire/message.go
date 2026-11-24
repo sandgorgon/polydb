@@ -237,18 +237,14 @@ func getBytes(b *body, n uint64, out *[]byte) error {
 	var v value.Bytes
 	ok, err := lookup(b, n, &v)
 	if ok {
-		*out = v.Go()
+		*out, _, _ = value.Large(v) // decoded for this message: no copy needed
 	}
 	return err
 }
 
-func bytesVal(p []byte) value.Value {
-	v, err := value.NewBytes(p, "")
-	if err != nil {
-		panic(err)
-	}
-	return v
-}
+// bytesVal wraps p for encoding, which copies it, so it isn't copied
+// here.
+func bytesVal(p []byte) value.Value { return value.BytesOf(p, "") }
 
 func textSet(ss []string) value.Value {
 	vs := make([]value.Value, len(ss))

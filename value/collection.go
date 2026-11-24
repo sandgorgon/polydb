@@ -49,7 +49,9 @@ func IsKeyable(v Value) bool {
 	case Array:
 		return allKeyable(x.elems)
 	case Lazy:
-		return false // keyed by content, which isn't loaded
+		return x.Ref.Of == CodeText || x.Ref.Of == CodeBytes // keyed by prefix and hash
+	case BlobRef:
+		return false
 	}
 	switch code(v) {
 	case CodeImage, CodeDoc, CodeList, CodeSet, CodeMap, CodeFifo, CodeLifo, CodeRing, CodePriority:

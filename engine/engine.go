@@ -70,9 +70,10 @@ type Options struct {
 	// (default blob.DefaultSegmentSize).
 	BlobSegmentSize int64
 	// MaxLoad is how many bytes of large values one statement may load
-	// into memory, for functions and operators that need their content
-	// (default DefaultMaxLoad, negative no limit). Passing large values
-	// along (showing, storing, len, =) loads nothing.
+	// into memory, for functions and operators that need their content:
+	// the default of sessions' max_load setting (default DefaultMaxLoad,
+	// negative no limit). Passing large values along (showing, storing,
+	// len, =) loads nothing.
 	MaxLoad int64
 	// PasswordIterations is the PBKDF2 iteration count for new passwords
 	// (default security.DefaultIterations, at least security.MinIterations).

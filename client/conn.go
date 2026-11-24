@@ -598,7 +598,7 @@ func (c *Conn) readBlob(ctx context.Context, ref *wire.BlobRef, off, n int64) ([
 		return nil, err
 	}
 	defer c.closeStream(s)
-	var data []byte
+	data := make([]byte, 0, n)
 	for {
 		in, err := s.recv(ctx)
 		if err != nil {

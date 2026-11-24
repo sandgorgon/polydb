@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"github.com/sandgorgon/polydb/blob"
 	"time"
 
 	"github.com/sandgorgon/polydb/fulltext"
@@ -35,43 +36,60 @@ const (
 // their values: for a value index at most one, none when a key is absent
 // or null, a path finds nothing, or a value can't be a key; for a text
 // index one per word per field, holding the word's positions.
-func (tx *Tx) indexEntries(ix *model.Index, id value.ID, fields map[string]*model.Field) map[string][]byte {
+func (tx *Tx) indexEntries(ix *model.Index, id value.ID, fields map[string]*model.Field) (map[string][]byte, error) {
 	if ix.Unique {
-		return nil
+		return nil, nil
 	}
 	if ix.Text {
 		out := map[string][]byte{}
 		for i, k := range ix.Keys {
 			f, ok := fields[k.Field]
-			if !ok || f.Value == nil {
-				continue
-			}
-			t, ok := f.Value.(value.Text)
-			if !ok {
+			if !ok || f.Value == nil || f.Value.Code() != value.CodeText {
 				continue
 			}
 			pos := map[string][]int{}
-			for _, tok := range fulltext.Tokenize(t.Go()) {
-				pos[tok.Word] = append(pos[tok.Word], tok.Pos)
+			tk := fulltext.NewTokenizer(func(tok fulltext.Token) { pos[tok.Word] = append(pos[tok.Word], tok.Pos) })
+			if err := writeText(tk, f.Value); err != nil {
+				return nil, err
 			}
+			tk.Close()
 			for w, ps := range pos {
 				out[string(keys.TextEntry(ix.ID, w, id, i))] = keys.EncodePositions(ps)
 			}
 		}
-		return out
+		return out, nil
 	}
 	var vals []byte
 	for _, k := range ix.Keys {
 		v, ok := tx.columnValue(k, fields)
 		if !ok || value.IsNull(v) {
-			return nil
+			return nil, nil
 		}
 		var err error
-		if vals, err = value.AppendKey(vals, v); err != nil {
-			return nil
+		if vals, ok, err = valueKey(vals, v); !ok || err != nil {
+			return nil, err
 		}
 	}
-	return map[string][]byte{string(keys.IndexEntry(ix.ID, vals, id)): nil}
+	return map[string][]byte{string(keys.IndexEntry(ix.ID, vals, id)): nil}, nil
+}
+
+// writeText writes a text value to tk, a lazy one a piece at a time.
+func writeText(tk *fulltext.Tokenizer, v value.Value) error {
+	switch t := v.(type) {
+	case value.Text:
+		tk.WriteString(t.Go())
+	case value.Lazy:
+		buf := make([]byte, blob.ChunkSize)
+		for off := int64(0); off < t.Len(); {
+			p := buf[:min(int64(len(buf)), t.Len()-off)]
+			if _, err := t.Src.ReadAt(p, off); err != nil {
+				return wrap(CodeInternal, err)
+			}
+			tk.Write(p)
+			off += int64(len(p))
+		}
+	}
+	return nil
 }
 
 // buildIndex indexes a new non-unique index's existing entities: at once
@@ -105,13 +123,14 @@ func (tx *Tx) buildIndex(ix *model.Index) error {
 // indexEntity writes one entity's entry in an index.
 func (tx *Tx) indexEntity(ix *model.Index, id value.ID) error {
 	st, err := tx.loadEntity(id)
-	if err == nil {
-		err = tx.loadKeyed(st, ix)
-	}
 	if err != nil {
 		return err
 	}
-	for k, v := range tx.indexEntries(ix, id, st.fields) {
+	entries, err := tx.indexEntries(ix, id, st.fields)
+	if err != nil {
+		return err
+	}
+	for k, v := range entries {
 		tx.t.Set([]byte(k), v)
 	}
 	return nil
@@ -364,13 +383,14 @@ func (db *DB) VerifyIndexes() error {
 			err = tx.scan(keys.Members(ix.Kind), false, func(k, _ []byte) error {
 				id := value.ID(k[len(k)-16:])
 				e, err := tx.loadEntity(id)
-				if err == nil {
-					err = tx.loadKeyed(e, ix)
-				}
 				if err != nil {
 					return err
 				}
-				for key, v := range tx.indexEntries(ix, id, e.fields) {
+				entries, err := tx.indexEntries(ix, id, e.fields)
+				if err != nil {
+					return err
+				}
+				for key, v := range entries {
 					want[key] = string(v)
 				}
 				return nil

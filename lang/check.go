@@ -289,6 +289,7 @@ var settings = map[string]*value.Type{
 	"timeout":   value.TypeDuration,
 	"max_rows":  value.TypeInt,
 	"max_depth": value.TypeInt,
+	"max_load":  value.TypeInt,
 }
 
 func (c *checker) setSetting(s *SetSetting) error {

@@ -65,9 +65,20 @@ func (ev *Evaluator) binary(e *Binary, f *Frame) (value.Value, error) {
 	if err != nil {
 		return nil, err
 	}
-	if e.Op == "=" || e.Op == "!=" {
-		if eq, ok := lazyEqual(x, y); ok {
-			return value.Bool(eq == (e.Op == "=")), nil
+	if isLazy(x, y) {
+		switch e.Op {
+		case "=", "!=":
+			if eq, ok := lazyEqual(x, y); ok {
+				return value.Bool(eq == (e.Op == "=")), nil
+			}
+			fallthrough
+		case "<", "<=", ">", ">=":
+			b, err := ev.compareLarge(e, e.Op, x, y)
+			return value.Bool(b), err
+		case "starts with", "ends with", "contains", "matches":
+			if v, ok, err := ev.textOpLarge(e, x, y); ok || err != nil {
+				return v, err
+			}
 		}
 	}
 	if x, err = ev.Load(e.X, x); err != nil {
@@ -258,15 +269,22 @@ func compare(e Node, op string, x, y value.Value) (bool, error) {
 }
 
 func (ev *Evaluator) between(e *Between, f *Frame) (value.Value, error) {
-	vs, err := ev.evalAll([]Expr{e.X, e.Lo, e.Hi}, f)
+	vs := make([]value.Value, 3)
+	for i, x := range []Expr{e.X, e.Lo, e.Hi} {
+		var err error
+		if vs[i], err = ev.EvalLazy(x, f); err != nil {
+			return nil, err
+		}
+	}
+	cmp := compare
+	if isLazy(vs...) {
+		cmp = ev.compareLarge
+	}
+	lo, err := cmp(e, ">=", vs[0], vs[1])
 	if err != nil {
 		return nil, err
 	}
-	lo, err := compare(e, ">=", vs[0], vs[1])
-	if err != nil {
-		return nil, err
-	}
-	hi, err := compare(e, "<=", vs[0], vs[2])
+	hi, err := cmp(e, "<=", vs[0], vs[2])
 	if err != nil {
 		return nil, err
 	}

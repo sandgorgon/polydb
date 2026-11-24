@@ -15,6 +15,7 @@ type Writer struct {
 	w        io.Writer
 	maxFrame int
 	compress bool
+	buf      []byte // the frame being written, reused
 }
 
 // NewWriter returns a writer with the default frame size and no
@@ -81,7 +82,11 @@ func (w *Writer) WriteBody(stream uint32, typ byte, body []byte, end bool, acqui
 			f.Flags |= FlagEndStream
 		}
 		w.mu.Lock()
-		_, err := w.w.Write(AppendFrame(nil, f))
+		w.buf = AppendFrame(w.buf[:0], f)
+		_, err := w.w.Write(w.buf)
+		if cap(w.buf) > 2*DefaultMaxFrameSize {
+			w.buf = nil // don't keep a buffer for rare huge frames
+		}
 		w.mu.Unlock()
 		if err != nil {
 			return err

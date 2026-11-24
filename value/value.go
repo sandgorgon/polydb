@@ -233,6 +233,15 @@ func NewBytes(b []byte, mediaType string) (Bytes, error) {
 	return Bytes{append([]byte(nil), b...), mediaType}, nil
 }
 
+// BytesOf is NewBytes without the copy, for callers that hand over b:
+// it must not change afterwards. It panics past MaxBytesLen.
+func BytesOf(b []byte, mediaType string) Bytes {
+	if len(b) > MaxBytesLen {
+		panic(fmt.Sprintf("value: bytes longer than %d", MaxBytesLen))
+	}
+	return Bytes{b, mediaType}
+}
+
 func (Bytes) Code() Code { return CodeBytes }
 
 // Go returns a copy of the bytes.

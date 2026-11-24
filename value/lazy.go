@@ -29,6 +29,16 @@ func (l Lazy) String() string {
 	return fmt.Sprintf("<%s of %s bytes>", l.Ref.Of, strconv.FormatInt(l.Ref.Len, 10))
 }
 
+// prefix reads the first KeyPrefixLen bytes of the content, or all of
+// it if shorter.
+func (l Lazy) prefix() ([]byte, error) {
+	p := make([]byte, min(l.Ref.Len, KeyPrefixLen))
+	if _, err := l.Src.ReadAt(p, 0); err != nil && len(p) > 0 {
+		return nil, fmt.Errorf("reading %s: %w", l, err)
+	}
+	return p, nil
+}
+
 // Len returns the content's length in bytes.
 func (l Lazy) Len() int64 { return l.Ref.Len }
 

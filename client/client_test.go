@@ -567,6 +567,16 @@ func TestLargeValuesShared(t *testing.T) {
 				t.Errorf("entity field is %T", e.Value("body"))
 			}
 			rows.Close()
+			// The reader gives the content to io.Copy (which uses its
+			// WriteTo) and to small reads alike.
+			var buf bytes.Buffer
+			if n, err := io.Copy(&buf, b.Reader()); err != nil || n != int64(len(big)) || buf.String() != big {
+				t.Fatalf("io.Copy: %d bytes, %v", n, err)
+			}
+			small, err := io.ReadAll(iotest.OneByteReader(b.Reader()))
+			if err != nil || string(small) != big {
+				t.Fatalf("one byte at a time: %d bytes, %v", len(small), err)
+			}
 			if _, err := db.Exec(ctx, `create `+kind+` { name: "b", body: $b }`, polydb.Params{"b": b}); err != nil {
 				t.Fatal(err)
 			}

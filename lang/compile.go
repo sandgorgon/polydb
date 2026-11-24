@@ -50,19 +50,20 @@ func CompileCheck(cat *catalog.Catalog, src string, fields map[string]*value.Typ
 }
 
 // Eval evaluates the expression. fields are the field values a check
-// reads; a missing or nil entry is an absent field.
-func (c *Compiled) Eval(cat *catalog.Catalog, now time.Time, fields map[string]value.Value) (value.Value, error) {
+// reads; a missing or nil entry is an absent field. It may load up to
+// maxLoad bytes of large values (Evaluator.MaxLoad).
+func (c *Compiled) Eval(cat *catalog.Catalog, now time.Time, fields map[string]value.Value, maxLoad int64) (value.Value, error) {
 	if fields == nil {
 		fields = map[string]value.Value{}
 	}
-	ev := &Evaluator{Info: c.Info, Graph: catalogGraph{cat}, Now: now}
+	ev := &Evaluator{Info: c.Info, Graph: catalogGraph{cat}, Now: now, MaxLoad: maxLoad}
 	return ev.Eval(c.Expr, &Frame{Fields: fields})
 }
 
 // Passes evaluates a check: it passes unless it is false, so a check on
 // an optional field that is absent or null passes.
-func (c *Compiled) Passes(cat *catalog.Catalog, now time.Time, fields map[string]value.Value) (bool, error) {
-	v, err := c.Eval(cat, now, fields)
+func (c *Compiled) Passes(cat *catalog.Catalog, now time.Time, fields map[string]value.Value, maxLoad int64) (bool, error) {
+	v, err := c.Eval(cat, now, fields, maxLoad)
 	if err != nil {
 		return false, err
 	}

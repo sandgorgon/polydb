@@ -879,13 +879,24 @@ func eqKeys(v value.Value) ([][]byte, bool) {
 }
 
 // rangeKey returns a range bound's key, for values that compare only
-// with their own group.
+// with their own group. Text and bytes longer than value.KeyPrefixLen
+// can't bound a range: keys of long values sharing its start order by
+// hash, not content.
 func rangeKey(v value.Value) ([]byte, bool) {
-	if value.IsNull(v) || !scalarCode(v.Code()) || v.Code() == value.CodeID || v.Code() == value.CodeRef {
+	if value.IsNull(v) || !scalarCode(v.Code()) || v.Code() == value.CodeID || v.Code() == value.CodeRef || longValue(v) {
 		return nil, false
 	}
 	k, err := value.Key(v)
 	return k, err == nil
+}
+
+// longValue reports whether v is text or bytes whose key holds only its
+// start and hash.
+func longValue(v value.Value) bool {
+	if l, ok := v.(value.Lazy); ok {
+		return l.Len() > value.KeyPrefixLen
+	}
+	return value.LargeLen(v) > value.KeyPrefixLen
 }
 
 // probeKeys are an index lookup's evaluated values, as keys: the
@@ -976,7 +987,7 @@ func (x *executor) probeKeys(ip ixProbe, f *lang.Frame) (probeKeys, bool) {
 			return pk, false
 		}
 		t, ok := v.(value.Text)
-		if !ok {
+		if !ok || longValue(t) {
 			return pk, false
 		}
 		k, _ := value.Key(t)
@@ -1333,16 +1344,20 @@ func (x *executor) runTop(pl *lang.Pipeline, p *plan) (out []srow, done bool, er
 			return true
 		}
 		if stopped {
-			v, err := x.ev.Eval(t.sort, &lang.Frame{Row: r.vars})
-			if err == nil && value.Compare(v, last) != 0 {
-				lv.rows-- // read only to see the ties end
-				return false
+			// Read on through the ties, and through long values whose
+			// keys share last's start: those sit in hash order.
+			v, err := x.ev.EvalLazy(t.sort, &lang.Frame{Row: r.vars})
+			if err == nil {
+				if same, err := value.SameKeyGroup(v, last); err == nil && !same {
+					lv.rows-- // read only to see the ties end
+					return false
+				}
 			}
 		}
 		out = append(out, r)
 		if !r.dirty && !stopped {
 			if clean++; clean == t.n {
-				v, err := x.ev.Eval(t.sort, &lang.Frame{Row: r.vars})
+				v, err := x.ev.EvalLazy(t.sort, &lang.Frame{Row: r.vars})
 				if err == nil {
 					last, stopped = v, true
 				}

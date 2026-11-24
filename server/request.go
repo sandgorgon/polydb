@@ -100,7 +100,7 @@ func toError(err error, index int) *wire.Error {
 	return we
 }
 
-// settings applies a request's options (timeout, max_rows) to the
+// settings applies a request's options (timeout, max_rows, max_load) to the
 // session's settings.
 func (c *conn) settings(opts map[string]value.Value) (*query.Settings, error) {
 	if len(opts) == 0 {
@@ -121,6 +121,12 @@ func (c *conn) settings(opts map[string]value.Value) (*query.Settings, error) {
 				return nil, &wire.Error{Code: "type", Message: "the max_rows option is an int ≥ 0", StatementIndex: -1}
 			}
 			s.MaxRows = int(n)
+		case "max_load":
+			n, ok := v.(value.Int)
+			if !ok || n < 0 {
+				return nil, &wire.Error{Code: "type", Message: "the max_load option is an int ≥ 0 (bytes; 0 for no limit)", StatementIndex: -1}
+			}
+			s.MaxLoad = int64(n)
 		}
 	}
 	return &s, nil
@@ -148,6 +154,7 @@ func (c *conn) query(st *stream, text string, stmts []lang.Stmt, params map[stri
 	r.LazyResults = true
 	if len(stmts) == 0 {
 		id, state := r.Txn()
+		r.Close()
 		return c.send(st, &wire.ResultEnd{Txn: id, TxnState: wire.TxnState(state)}, true)
 	}
 	cancelled := func(i int) error {
@@ -226,6 +233,11 @@ func (c *conn) result(st *stream, index int, res *query.Result, r *session.Reque
 	end.Txn, end.TxnState = id, wire.TxnState(state)
 	for _, w := range res.Warnings {
 		end.Warnings = append(end.Warnings, w.Msg)
+	}
+	if last {
+		// Free the transaction before the client can see the request
+		// end, so its next request in the transaction isn't busy.
+		r.Close()
 	}
 	return c.send(st, end, last)
 }

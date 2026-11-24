@@ -446,13 +446,13 @@ func (tx *Tx) DefineIndex(name, kind string, unique, text bool, ks ...model.Inde
 	}
 	for _, eid := range members {
 		st, err := tx.loadEntity(eid)
-		if err == nil {
-			err = tx.loadKeyed(st, ix)
-		}
 		if err != nil {
 			return value.ID{}, tx.fail(err)
 		}
-		uk, ok := uniqueIndexKey(ix, st.fields)
+		uk, ok, err := uniqueIndexKey(ix, st.fields)
+		if err != nil {
+			return value.ID{}, tx.fail(err)
+		}
 		if !ok {
 			continue
 		}

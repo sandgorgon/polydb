@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -113,12 +114,11 @@ func TestLazyPassAlong(t *testing.T) {
 		}
 	}
 
-	// What needs the content goes over the limit.
+	// What makes a new large value from the content goes over the limit.
 	for _, src := range []string{
 		`find F f | where f.name = "a" | show upper(f.body)`,
-		`find F f | where f.body contains "zz" | show f.name`,
-		`find F f | sort f.body | show f.name`,
 		`find F f | where f.name = "a" | show f.body ++ "!"`,
+		`find F f | where f.name = "a" | show substr(f.body, 10)`,
 	} {
 		if _, err := lazyRun(t, s, src); codeOf(err) != "limit" {
 			t.Errorf("%s: %v, want a limit error", src, err)
@@ -190,4 +190,171 @@ func rowsText(res *query.Result) string {
 		rows = append(rows, strings.Join(cells, " "))
 	}
 	return strings.Join(rows, "; ")
+}
+
+// set max_load changes the session's limit; 0 lifts it.
+func TestMaxLoadSetting(t *testing.T) {
+	s := lazySession(t, -1)
+	ctx := context.Background()
+	q := `find F f | where f.name = "a" | show len(upper(f.body))`
+	if _, err := s.Exec(ctx, q, nil); err != nil {
+		t.Fatalf("no limit: %v", err)
+	}
+	if _, err := s.Exec(ctx, `set max_load = 1000; `+q, nil); execCode(err) != "limit" {
+		t.Fatalf("max_load 1000: %v", err)
+	}
+	if _, err := s.Exec(ctx, `set max_load = 0; `+q, nil); err != nil {
+		t.Fatalf("max_load 0: %v", err)
+	}
+	if _, err := s.Exec(ctx, `set max_load = -1`, nil); execCode(err) != "constraint" {
+		t.Fatalf("negative max_load: %v", err)
+	}
+}
+
+// Indexes and unique constraints on large values key them by their start
+// and hash: keys stay small, writes load nothing, and queries through the
+// indexes give the right rows, also for long values whose keys tie on
+// their start.
+func TestLargeValueIndexes(t *testing.T) {
+	s := lazySession(t, 1000) // writes must not load
+	ctx := context.Background()
+	p := strings.Repeat("p", 300)
+	vals := []string{p + "c", p + "a", p + "b", "a", "q", strings.Repeat("p", 256),
+		p + " " + strings.Repeat("z", 30<<10) + " needle"}
+	// In text order: 3 "a", 5 p…(256), 6 p… z… needle, 1 p…a, 2 p…b, 0 p…c, 4 "q".
+	if _, err := s.Exec(ctx, `define kind T { t: text, u: text unique, n: int }`, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i, v := range vals {
+		params := map[string]value.Value{"v": value.MustText(v), "u": value.MustText(v + "!"), "n": value.Int(i)}
+		if _, err := s.Exec(ctx, `create T { t: $v, u: $u, n: $n }`, params); err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	// Built over stored (lazy) values.
+	if _, err := s.Exec(ctx, `define index t_t on T(t); define text index t_search on T(t)`, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A duplicate long unique value is refused.
+	dup := map[string]value.Value{"u": value.MustText(vals[6] + "!")}
+	if _, err := s.Exec(ctx, `create T { t: "x", u: $u, n: 99 }`, dup); execCode(err) != "constraint" {
+		t.Fatalf("duplicate long unique value: %v", err)
+	}
+	// Copying a large value into the unique field reads only its start.
+	if _, err := s.Exec(ctx, `find T a, T b | where a.n = 6 and b.n = 4 | update b set u = a.t`, nil); err != nil {
+		t.Fatalf("copy into unique field: %v", err)
+	}
+	if _, err := s.Exec(ctx, `find T a, T b | where a.n = 6 and b.n = 3 | update b set u = a.t`, nil); execCode(err) != "constraint" {
+		t.Fatalf("copied duplicate: %v", err)
+	}
+
+	// Comparing long values loads them (until streaming comparisons).
+	if _, err := s.Exec(ctx, `set max_load = 0`, nil); err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]value.Value{"pb": value.MustText(p + "b")}
+	for q, want := range map[string]string{
+		`find T x | where x.t > "p" | sort x.n | show x.n`:                "0; 1; 2; 4; 5; 6",
+		`find T x | where x.t >= $pb and x.t < "q" | sort x.n | show x.n`: "0; 2",
+		`find T x | where x.t = $pb | show x.n`:                           "2",
+		`find T x | where x.t starts with $pb | show x.n`:                 "2",
+		`find T x | where x.t starts with "pp" | sort x.n | show x.n`:     "0; 1; 2; 5; 6",
+		`find T x | sort x.t | limit 3 | show x.n`:                        "3; 5; 6",
+		`find T x | sort x.t desc | limit 3 | show x.n`:                   "4; 0; 2",
+		`find T x | where search(x.t, "needle") | show x.n`:               "6",
+	} {
+		res, err := s.Exec(ctx, q, params)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		if got := rowsText(res[0]); got != want {
+			t.Errorf("%s:\n got %s\nwant %s", q, got, want)
+		}
+	}
+	res, err := s.Exec(ctx, `explain find T x | where x.t = $pb | show x.n`, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan := fmt.Sprint(res[0].Rows); !strings.Contains(plan, "index t_t") {
+		t.Errorf("equality on a long value doesn't use the index: %s", plan)
+	}
+	// Statistics sample large values without loading them.
+	if _, err := s.Exec(ctx, `analyze kind T`, nil); err != nil {
+		t.Fatalf("analyze: %v", err)
+	}
+}
+
+// A check on a large field counts against the statement's load limit.
+func TestCheckLoadLimit(t *testing.T) {
+	s := lazySession(t, 1000)
+	ctx := context.Background()
+	if _, err := s.Exec(ctx, `define kind C { body: text check upper(body) != "" }; create C { body: "small" }`, nil); err != nil {
+		t.Fatal(err)
+	}
+	copyBig := `find F f, C c | where f.name = "b" | update c set body = f.body`
+	if _, err := s.Exec(ctx, copyBig, nil); execCode(err) != "limit" {
+		t.Fatalf("check over the limit: %v", err)
+	}
+	if _, err := s.Exec(ctx, `set max_load = 0; `+copyBig, nil); err != nil {
+		t.Fatalf("check without a limit: %v", err)
+	}
+}
+
+// Comparing, searching and cutting large values reads them a piece at a
+// time: with a 1000-byte limit every query gives what loading gives.
+func TestLazyStreaming(t *testing.T) {
+	ctx := context.Background()
+	small, unlimited := lazySession(t, 1000), lazySession(t, -1)
+	// More texts: ones sharing a long start, bytes, and one past several
+	// pieces with a word across a piece boundary.
+	extra := map[string]value.Value{
+		"x": value.MustText(strings.Repeat("abcd", 25<<10) + "e"),
+		"y": value.MustText(strings.Repeat("abcd", 25<<10) + "a" + strings.Repeat("q", 70<<10)),
+		"z": value.MustText(strings.Repeat("-", 64<<10-3) + "needle" + strings.Repeat("é", 100<<10)),
+		"d": must(value.NewBytes([]byte(strings.Repeat("\x00\x01", 20<<10)), "")),
+	}
+	for _, s := range []*Session{small, unlimited} {
+		if _, err := s.Exec(ctx, `create F { name: "x", body: $x }; create F { name: "y", body: $y };
+			create F { name: "z", body: $z }; create F { name: "d", data: $d }; create F { name: "e", data: $d }`, extra); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, q := range []string{
+		`find F f | sort f.body, f.name | show f.name`,
+		`find F f | sort f.body desc, f.name | show f.name`,
+		`find F f, F g | where f.body < g.body | sort f.name, g.name | show f.name, g.name`,
+		`find F f, F g | where f.data = g.data and f.name < g.name | show f.name, g.name`,
+		`find F f | where f.body between "abcd" and "b" | sort f.name | show f.name`,
+		`find F f | where f.body starts with "abcdabcd" | sort f.name | show f.name`,
+		`find F f | where f.body ends with "qq" or f.body ends with "é" | sort f.name | show f.name`,
+		`find F f | where f.body contains "needle" | show f.name`,
+		`find F f | where f.body contains "dabcda" | sort f.name | show f.name`,
+		`find F f | where f.body matches "ab(cd)+e$" | show f.name`,
+		`find F f | where f.body matches "need?le" | show f.name`,
+		`find F f | where f.name = "z" | show substr(f.body, 65530, 12), len(substr(f.body, 100000, 7))`,
+		`find F f | where f.body is not null | group by f.body = f.body as same | show same, count()`,
+		`find F f | show f.body as b | distinct | show count()`,
+		`find F f | where f.body is not null | group by true as all | show min(f.body) = max(f.body), len(min(f.body)), len(max(f.body))`,
+		`find F f | where f.data is not null | show f.data as d | distinct | show count()`,
+	} {
+		want, err := unlimited.Exec(ctx, q, nil)
+		if err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		got, err := small.Exec(ctx, q, nil)
+		if err != nil {
+			t.Errorf("%s with a 1000-byte limit: %v", q, err)
+			continue
+		}
+		if a, b := rowsText(got[len(got)-1]), rowsText(want[len(want)-1]); a != b {
+			t.Errorf("%s:\n streamed %s\n loaded   %s", q, a, b)
+		}
+	}
+}
+
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
 }

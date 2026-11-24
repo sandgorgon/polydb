@@ -30,9 +30,12 @@ type Tx struct {
 	startBuild bool             // it defined an index to build in the background
 	changed    map[value.ID]int // entities saved per kind, for statistics
 
-	blobsPut  map[[32]byte]bool // blobs stored or reused (blob.go)
-	blobSync  []blob.Loc        // chunks to sync before committing
-	commitSeq *uint64           // set to the commit's sequence number
+	blobsPut map[[32]byte]bool // blobs stored or reused (blob.go)
+
+	loadLimit    int64 // SetMaxLoad
+	loadLimitSet bool
+	blobSync     []blob.Loc // chunks to sync before committing
+	commitSeq    *uint64    // set to the commit's sequence number
 }
 
 // Catalog returns the catalog as this transaction sees it, including its
@@ -331,15 +334,17 @@ func (tx *Tx) save(st *entState) error {
 	}
 
 	// Side keys: compute before and after, then write the difference.
-	if err := tx.loadKeyed(st); err != nil {
-		return err
-	}
 	var before, after map[string][]byte
+	var err error
 	if !st.isNew {
-		before = tx.sideKeys(st.origKind, st.e, st.orig)
+		if before, err = tx.sideKeys(st.origKind, st.e, st.orig); err != nil {
+			return err
+		}
 	}
 	if !st.deleted {
-		after = tx.sideKeys(st.kind, st.e, st.fields)
+		if after, err = tx.sideKeys(st.kind, st.e, st.fields); err != nil {
+			return err
+		}
 	}
 	for k := range before {
 		if _, ok := after[k]; !ok {
@@ -459,55 +464,23 @@ func checkRequired(st *entState) error {
 	return nil
 }
 
-// loadKeyed loads the lazy values of st's fields that unique constraints
-// and indexes (those of its kinds, and extra) key, since keys hold
-// content. A field unchanged since loading stays unchanged.
-func (tx *Tx) loadKeyed(st *entState, extra ...*model.Index) error {
-	keyed := func(kind *model.Kind, f *model.Field) bool {
-		if fd := fieldDef(kind, f); fd != nil && fd.Unique && f.Declared {
-			return true
-		}
-		ixs := extra
-		if kind != nil {
-			ixs = slices.Concat(tx.Catalog().IndexesOn(kind.ID), extra)
-		}
-		for _, ix := range ixs {
-			for _, k := range ix.Keys {
-				if k.Field == f.Name {
-					return true
-				}
-			}
-		}
-		return false
+// valueKey appends v's key to dst; ok is false if v can't be a key. A
+// large value's key holds its start and hash (value.KeyPrefixLen), and
+// reading a lazy value's start can fail.
+func valueKey(dst []byte, v value.Value) ([]byte, bool, error) {
+	if !value.IsKeyable(v) {
+		return dst, false, nil
 	}
-	load := func(kind *model.Kind, fields map[string]*model.Field, also map[string]*model.Field) error {
-		for name, f := range fields {
-			l, ok := f.Value.(value.Lazy)
-			if !ok || !keyed(kind, f) {
-				continue
-			}
-			v, err := l.Load()
-			if err != nil {
-				return wrap(CodeInternal, err)
-			}
-			cp := *f
-			cp.Value = v
-			if also != nil && also[name] == f {
-				also[name] = &cp
-			}
-			fields[name] = &cp
-		}
-		return nil
+	k, err := value.AppendKey(dst, v)
+	if err != nil {
+		return dst, false, wrap(CodeInternal, err)
 	}
-	if err := load(st.origKind, st.orig, st.fields); err != nil {
-		return err
-	}
-	return load(st.kind, st.fields, nil)
+	return k, true, nil
 }
 
 // sideKeys returns the unique and back-ref keys an entity's fields need,
 // with their values.
-func (tx *Tx) sideKeys(kind *model.Kind, e *model.Entity, fields map[string]*model.Field) map[string][]byte {
+func (tx *Tx) sideKeys(kind *model.Kind, e *model.Entity, fields map[string]*model.Field) (map[string][]byte, error) {
 	out := map[string][]byte{}
 	for _, f := range fields {
 		fd := fieldDef(kind, f)
@@ -520,40 +493,52 @@ func (tx *Tx) sideKeys(kind *model.Kind, e *model.Entity, fields map[string]*mod
 			}
 		}
 		if fd.Unique && f.Declared && kind != nil && !value.IsNull(f.Value) {
-			if k, err := value.Key(f.Value); err == nil {
+			k, ok, err := valueKey(nil, f.Value)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				out[string(keys.Unique(kind.ID, f.Name, k))] = e.ID[:]
 			}
 		}
 	}
 	if kind != nil {
 		for _, ix := range tx.Catalog().IndexesOn(kind.ID) {
-			if k, ok := uniqueIndexKey(ix, fields); ok {
+			k, ok, err := uniqueIndexKey(ix, fields)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				out[string(k)] = e.ID[:]
 			}
-			for k, v := range tx.indexEntries(ix, e.ID, fields) {
+			entries, err := tx.indexEntries(ix, e.ID, fields)
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range entries {
 				out[k] = v
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // uniqueIndexKey returns the unique key of a unique index for the given
 // fields, or false if the index isn't unique or a field is absent or null.
-func uniqueIndexKey(ix *model.Index, fields map[string]*model.Field) ([]byte, bool) {
+func uniqueIndexKey(ix *model.Index, fields map[string]*model.Field) ([]byte, bool, error) {
 	if !ix.Unique {
-		return nil, false
+		return nil, false, nil
 	}
 	var vals []byte
 	for _, k := range ix.Keys {
 		f, ok := fields[k.Field]
 		if !ok || f.Value == nil || value.IsNull(f.Value) || len(k.Path) > 0 {
-			return nil, false
+			return nil, false, nil
 		}
 		var err error
-		if vals, err = value.AppendKey(vals, f.Value); err != nil {
-			return nil, false
+		if vals, ok, err = valueKey(vals, f.Value); !ok || err != nil {
+			return nil, false, err
 		}
 	}
-	return keys.Unique(ix.ID, "", vals), true
+	return keys.Unique(ix.ID, "", vals), true, nil
 }

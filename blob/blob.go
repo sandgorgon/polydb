@@ -382,6 +382,19 @@ func (s *Store) Remove(oldest uint64) (int, error) {
 	return len(gone), nil
 }
 
+// PinnedRetired reports whether a retired segment that Remove(oldest)
+// could delete is held only by pins.
+func (s *Store) PinnedRetired(oldest uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for num, r := range s.retired {
+		if r.after <= oldest && s.pins[num] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Pin keeps the segments holding locs from being removed until unpin is
 // called. The caller must hold a snapshot that can read locs while it
 // pins them.
