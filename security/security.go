@@ -427,6 +427,26 @@ func (s *Store) CanSee(user, db string) bool {
 	return false
 }
 
+// CanWriteIn reports whether user may write somewhere in database db:
+// a write or admin grant on the server, the database or one of its kinds.
+// Uploading large values requires it (spec/protocol.md §7); writing an
+// upload into a field is checked against that field's kind as usual.
+func (s *Store) CanWriteIn(user, db string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.users[user]; !ok {
+		return false
+	}
+	roles := s.closure(user)
+	for _, g := range s.grants {
+		if roles[g.Role] && (g.Perm == Write || g.Perm == Admin) &&
+			(g.Scope.Level == ServerLevel || g.Scope.Database == db) {
+			return true
+		}
+	}
+	return false
+}
+
 // DropDatabase removes the grants on a database that no longer exists.
 func (s *Store) DropDatabase(db string) error {
 	return s.edit(func() error {

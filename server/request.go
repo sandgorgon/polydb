@@ -324,6 +324,10 @@ func (c *conn) serveUpload(st *stream, first *wire.BlobWrite, content io.Reader)
 		fail("not_found", "no database in use: run use <database> before uploading")
 		return
 	}
+	if !c.srv.cfg.Engine.Security().CanWriteIn(c.sess.User(), db.Name()) {
+		fail("permission", "uploading needs write permission in database "+db.Name())
+		return
+	}
 	u, err := db.StoreUpload(content, limit, c.srv.cfg.LeaseTime)
 	if err != nil {
 		if st.ctx.Err() != nil {

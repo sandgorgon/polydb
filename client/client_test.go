@@ -508,4 +508,22 @@ func TestUploads(t *testing.T) {
 	if _, err := db.Exec(ctx, `find F f | show count()`, nil); err != nil {
 		t.Fatalf("after a failed upload: %v", err)
 	}
+
+	// Uploading needs write permission somewhere in the database: read
+	// access alone is refused, write on one kind is enough.
+	if _, err := db.Exec(ctx, `create user reader password "pw"; grant read on database d to reader;
+		create user writer password "pw"; grant read on database d to writer; grant write on kind d.F to writer`, nil); err != nil {
+		t.Fatal(err)
+	}
+	for user, want := range map[string]string{"reader": "permission", "writer": ""} {
+		udb, err := client.Dial(ctx, "polydb://"+user+"@"+ts.addr+"/d", client.WithPassword("pw"), client.WithServerFingerprint(ts.fingerprint))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = udb.(*client.Conn).Upload(ctx, strings.NewReader("abc"), "bytes", "")
+		if polydb.CodeOf(err) != want {
+			t.Errorf("%s uploading: %v", user, err)
+		}
+		udb.Close()
+	}
 }
