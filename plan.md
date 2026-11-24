@@ -176,13 +176,23 @@ Both modes implement the same Go interface, so application code can switch betwe
 3. **Server + client + binary wire protocol + CLI REPL connected to the server**, plus users, roles and permissions (still on in-memory storage)
 4. Persistence: WAL + LSM, MVCC, crash recovery
 5. Indexes, full-text search, planner, `explain`
-6. Large-data work: blob store, compaction tuning, stats, transformations, backup/restore, import/export, graph export (DOT/JSON), and maintenance: a sweep that removes history past its retention for fields that are no longer written and for deleted entities (Phase 4 prunes only when a field is written)
+6. Large-data work (planned 2026-11-24; each step a commit):
+   1. History retention sweep: remove history past its retention for fields that are no longer written and for deleted entities (Phase 4 prunes only when a field is written)
+   2. Statistics: sampled per-kind field and index-key stats (null share, distinct estimate, histogram), refreshed in the background after ~10% change or by `analyze kind K`; shown by `show stats kind`; the planner uses them for ranges and join fan-out, keeping counting probes for small ranges
+   3. Row loading and bulk loads: profile and cut the ~6 µs per-row load cost; a bulk-load benchmark measuring write throughput and level-0 stalls, settling the compaction question with numbers
+   4. Blob store: values over a threshold (~64 KiB) split into content-addressed chunks in per-database append-only blob segment files, with an index and reference counts in the store; chunks fsynced before the commit that references them; snapshot-, history- and lease-aware cleanup; rewriting mostly-dead segments; a streamed upload in the protocol (negotiated feature)
+   5. Backup and restore while running: `backup database x to '/dir'` copies a consistent snapshot of the store's files and the sealed blob segments; `polydb restore`
+   6. Import and export: JSON Lines and a native binary format, for whole databases or query results, keeping IDs by default (with a remap option); graph export (DOT, JSON). Client side (CLI, Go client) over the protocol, plus server-side `import`/`export` for admins inside a configured directory
+   7. Background `alter kind` for large kinds (batched, like index builds; the new definition applies when done) and `rebuild index`
+   8. Slow-query log: statements over a threshold setting, with their plan
+   9. Hardening: crash tests for blob writes, background migrations and backups; data larger than the cache; benchmarks
 7. 9P access layer (`server/ninep`): file tree, query files, Linux mount testing
 8. Embedded mode polish and packaging; API stability review
 9. **v1.0 release**
 
 **After v1.0:**
 - multi-node: partitioning, replication, distributed queries
+- re-clustering entities traversed together, columnar layout for heavily used kinds, tiered blob storage (deferred 2026-11-24)
 - inference rules
 - TUI (with `golang.org/x/term`)
 
@@ -235,3 +245,5 @@ None. All planning questions are settled; next step is Phase 0 (specifications).
 | 2026-11-22 | One compaction at a time, for now (confirmed 2026-11-23) | Flushes run independently, but compactions are serialized, so a long deep compaction delays level 0→1 and sustained writes faster than the disk can compact (bulk loads) can stall at 12 level-0 tables. Revisit once the system is in real use, if stalls show up: run level 0→1 alongside deeper compactions, and slow writes gradually instead of stopping them |
 | 2026-11-23 | Phase 5 index and search choices | Non-unique and text indexes are built in the background, resuming after restarts, and used once ready (unique indexes stay synchronous); `search()` on a field without a text index scans with the same rules; full-text tokenizes Unicode letters and digits, ignoring case and accents, with CJK characters as single words; queries take all-words, phrases, `-word`, `prefix*` and `OR`; no stemming or ranking yet (term positions and counts are stored so BM25 can come later); the planner estimates with counting probes, and stored statistics wait for Phase 6; absent and null values aren't indexed |
 | 2026-11-23 | Query planner rules | Plans never change results or row order: an index answers a condition only when every entity the condition passes is sure to be in it; rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen (spec/rhizome.md §7.5). `explain` shows each variable's path and estimate; `explain analyze` adds actual rows and times |
+| 2026-11-24 | Phase 6 choices | Blobs live in separate append-only segment files, not in the LSM store (written once instead of rewritten by compaction, no 64 MiB record limit, no cache pollution), with content-hash chunks and reference counts in the store; clients upload large values by a streamed protocol upload; backup is a physical snapshot of files (export is the portable form); import and export run in the client over the protocol, and server side for admins within a configured directory; imports keep IDs by default; statistics are sampled in the background rather than updated on every write; a slow-query log comes in Phase 6, resource limits in Phase 8 |
+| 2026-11-24 | Deferred until after v1.0 | Re-clustering entities traversed together, a columnar layout for heavily used kinds, and tiered blob storage: each needs real workloads to design against |
