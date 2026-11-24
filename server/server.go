@@ -174,6 +174,7 @@ func (s *Server) janitor() {
 		case <-t.C:
 			s.leases.expire()
 		case <-s.done:
+			s.leases.close() // lets the blob stores delete what leases kept
 			return
 		}
 	}

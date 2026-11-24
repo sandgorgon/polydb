@@ -582,7 +582,10 @@ func (tx *Tx) EntityField(id value.ID, name string) (kind *model.Kind, v value.V
 	if err != nil {
 		return nil, nil, false, wrap(CodeInternal, err)
 	}
-	return kind, f.Value, true, nil
+	if v, err = tx.resolve(f.Value); err != nil {
+		return nil, nil, false, err
+	}
+	return kind, v, true, nil
 }
 
 // Exists reports whether id names an entity, field or relation, and which.
@@ -608,7 +611,11 @@ func (tx *Tx) FieldByID(id value.ID) (*model.Field, error) {
 		return nil, errorf(CodeInternal, "field %s has a node record but no field record", id)
 	}
 	f, err := keys.DecodeField(n.Entity, n.Name, b, tx.Catalog())
-	return f, wrap(CodeInternal, err)
+	if err != nil {
+		return nil, wrap(CodeInternal, err)
+	}
+	f.Value, err = tx.resolve(f.Value)
+	return f, err
 }
 
 // Entities calls fn with the ID of every entity of the kind, in ID order

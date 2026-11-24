@@ -21,7 +21,7 @@ type TypeCodec interface {
 
 // fields decodes a record list and checks its length.
 func fields(b []byte, what string, n int) ([]value.Value, error) {
-	v, err := value.Decode(b)
+	v, err := value.DecodeStored(b)
 	if err != nil {
 		return nil, fmt.Errorf("keys: %s record: %w", what, err)
 	}

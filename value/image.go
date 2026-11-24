@@ -28,6 +28,11 @@ type Image struct {
 // NewImage checks that data is a png, jpeg, gif, webp, bmp or tiff file and
 // returns it as an Image holding a copy of data. Only the header is decoded.
 func NewImage(data []byte) (Image, error) {
+	return newImage(bytes.Clone(data))
+}
+
+// newImage is NewImage without the copy.
+func newImage(data []byte) (Image, error) {
 	if len(data) > MaxBytesLen {
 		return Image{}, fmt.Errorf("image longer than %d bytes", MaxBytesLen)
 	}
@@ -38,7 +43,7 @@ func NewImage(data []byte) (Image, error) {
 	if !imageFormats[format] {
 		return Image{}, fmt.Errorf("unsupported image format %q", format)
 	}
-	return Image{format, cfg.Width, cfg.Height, bytes.Clone(data)}, nil
+	return Image{format, cfg.Width, cfg.Height, data}, nil
 }
 
 func (Image) Code() Code { return CodeImage }

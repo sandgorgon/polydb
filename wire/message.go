@@ -28,6 +28,7 @@ const (
 	TypeCloseStatement = 0x23
 	TypeBlobRead       = 0x24
 	TypeCancel         = 0x25
+	TypeBlobWrite      = 0x26
 	TypeResultHeader   = 0x40
 	TypeRows           = 0x41
 	TypeResultEnd      = 0x42
@@ -35,6 +36,7 @@ const (
 	TypePrepared       = 0x44
 	TypeBlobData       = 0x45
 	TypeNotice         = 0x46
+	TypeBlobStored     = 0x47
 )
 
 // Message is a protocol message.
@@ -145,6 +147,10 @@ func newMessage(typ byte) Message {
 		return &BlobRead{}
 	case TypeCancel:
 		return &Cancel{}
+	case TypeBlobWrite:
+		return &BlobWrite{}
+	case TypeBlobStored:
+		return &BlobStored{}
 	case TypeResultHeader:
 		return &ResultHeader{}
 	case TypeRows:
@@ -317,6 +323,33 @@ func getParams(b *body, n uint64, out *map[string]value.Value) error {
 			return fmt.Errorf("field %d: keys must be text", n)
 		}
 		(*out)[t.Go()] = v
+	}
+	return nil
+}
+
+func blobParamsVal(p map[string][]byte) value.Value {
+	m := map[string]value.Value{}
+	for k, tok := range p {
+		m[k] = bytesVal(tok)
+	}
+	return paramsVal(m)
+}
+
+func getBlobParams(b *body, n uint64, out *map[string][]byte) error {
+	var ps map[string]value.Value
+	if err := getParams(b, n, &ps); err != nil {
+		return err
+	}
+	if len(ps) == 0 {
+		return nil
+	}
+	*out = map[string][]byte{}
+	for k, v := range ps {
+		tok, ok := v.(value.Bytes)
+		if !ok {
+			return fmt.Errorf("field %d: tokens must be bytes", n)
+		}
+		(*out)[k] = tok.Go()
 	}
 	return nil
 }
@@ -546,6 +579,9 @@ type Query struct {
 	Params  map[string]value.Value
 	Txn     *value.ID
 	Options map[string]value.Value
+	// BlobParams gives parameters the values of blob references: param
+	// name → lease token (from BLOB_STORED or a result).
+	BlobParams map[string][]byte
 }
 
 func (*Query) Type() byte { return TypeQuery }
@@ -555,10 +591,14 @@ func (m *Query) encode(b *body) {
 	b.set(2, paramsVal(m.Params))
 	b.set(3, idOrNull(m.Txn))
 	b.set(4, paramsVal(m.Options))
+	if len(m.BlobParams) > 0 {
+		b.set(5, blobParamsVal(m.BlobParams))
+	}
 }
 
 func (m *Query) decode(b *body) error {
-	return errors.Join(getText(b, 1, &m.Text), getParams(b, 2, &m.Params), getID(b, 3, &m.Txn), getParams(b, 4, &m.Options))
+	return errors.Join(getText(b, 1, &m.Text), getParams(b, 2, &m.Params), getID(b, 3, &m.Txn), getParams(b, 4, &m.Options),
+		getBlobParams(b, 5, &m.BlobParams))
 }
 
 // Prepare prepares one statement for repeated execution.
@@ -574,6 +614,7 @@ type Execute struct {
 	Params      map[string]value.Value
 	Txn         *value.ID
 	Options     map[string]value.Value
+	BlobParams  map[string][]byte // as in Query
 }
 
 func (*Execute) Type() byte { return TypeExecute }
@@ -583,10 +624,14 @@ func (m *Execute) encode(b *body) {
 	b.set(2, paramsVal(m.Params))
 	b.set(3, idOrNull(m.Txn))
 	b.set(4, paramsVal(m.Options))
+	if len(m.BlobParams) > 0 {
+		b.set(5, blobParamsVal(m.BlobParams))
+	}
 }
 
 func (m *Execute) decode(b *body) error {
-	return errors.Join(getInt(b, 1, &m.StatementID), getParams(b, 2, &m.Params), getID(b, 3, &m.Txn), getParams(b, 4, &m.Options))
+	return errors.Join(getInt(b, 1, &m.StatementID), getParams(b, 2, &m.Params), getID(b, 3, &m.Txn), getParams(b, 4, &m.Options),
+		getBlobParams(b, 5, &m.BlobParams))
 }
 
 // CloseStatement frees a prepared statement.
@@ -613,6 +658,30 @@ func (m *BlobRead) encode(b *body) {
 
 func (m *BlobRead) decode(b *body) error {
 	return errors.Join(get(b, 1, &m.Ref), getInt(b, 2, &m.Offset), getInt(b, 3, &m.Length))
+}
+
+// BlobWrite uploads a large value (spec/protocol.md §7): the first one
+// opens a stream and names the value's type, and each carries the next
+// piece of its content. The server stores the pieces as they arrive and
+// answers the one marked Last with BLOB_STORED.
+type BlobWrite struct {
+	ValueType string // "text", "bytes" or "image" (first message)
+	MediaType string // for bytes (first message)
+	Data      []byte
+	Last      bool
+}
+
+func (*BlobWrite) Type() byte { return TypeBlobWrite }
+
+func (m *BlobWrite) encode(b *body) {
+	b.set(1, textOrNull(m.ValueType))
+	b.set(2, textOrNull(m.MediaType))
+	b.set(3, bytesVal(m.Data))
+	b.set(4, value.Bool(m.Last))
+}
+
+func (m *BlobWrite) decode(b *body) error {
+	return errors.Join(getText(b, 1, &m.ValueType), getText(b, 2, &m.MediaType), getBytes(b, 3, &m.Data), getBool(b, 4, &m.Last))
 }
 
 // Cancel stops the request on its stream.
@@ -920,6 +989,14 @@ func (m *BlobData) encode(b *body) {
 func (m *BlobData) decode(b *body) error {
 	return errors.Join(getInt(b, 1, &m.Offset), getBytes(b, 2, &m.Data))
 }
+
+// BlobStored answers a finished upload with a reference to it, whose
+// token can be passed in a request's BlobParams.
+type BlobStored struct{ Ref *BlobRef }
+
+func (*BlobStored) Type() byte             { return TypeBlobStored }
+func (m *BlobStored) encode(b *body)       { b.set(1, m.Ref) }
+func (m *BlobStored) decode(b *body) error { return get(b, 1, &m.Ref) }
 
 // Notice reports a warning or progress during a request.
 type Notice struct {

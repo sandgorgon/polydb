@@ -166,6 +166,7 @@ func (tx *Tx) sweepVersions(id value.ID, now time.Time, r *SweepResult) error {
 		at  time.Time
 	}
 	byField := map[string][]version{}
+	dropped := false
 	var names []string
 	err := tx.scan(keys.HistoryEntity(id), false, func(k, _ []byte) error {
 		_, name, err := keys.ParseHistory(k)
@@ -205,6 +206,12 @@ func (tx *Tx) sweepVersions(id value.ID, now time.Time, r *SweepResult) error {
 			tx.t.Delete(v.key)
 		}
 		r.Versions += drop
+		if drop > 0 {
+			dropped = true
+		}
+	}
+	if dropped {
+		return tx.markBlobsDirty(id)
 	}
 	return nil
 }
@@ -225,6 +232,9 @@ func (tx *Tx) sweepDeleted(id value.ID, now time.Time, r *SweepResult) error {
 	}
 	// Past retention, or the kind no longer keeps history (or is gone):
 	// no read can find the entity.
+	if err := tx.markBlobsDirty(id); err != nil {
+		return err
+	}
 	n := 0
 	err = tx.scan(keys.HistoryEntity(id), false, func(k, _ []byte) error {
 		n++
@@ -260,7 +270,11 @@ func retention(k *model.Kind) (keep time.Duration, forever bool) {
 func (db *DB) startSweeper(interval time.Duration) {
 	db.sweepQuit, db.sweepDone = make(chan struct{}), make(chan struct{})
 	every(interval, db.sweepQuit, db.sweepDone, func(ctx context.Context) {
-		db.SweepHistory(ctx) // errors are retried on the next round
+		// Errors are retried on the next round. Collecting blobs after
+		// the sweep frees what the versions it removed referenced.
+		if _, err := db.SweepHistory(ctx); err == nil {
+			db.CollectBlobs(ctx)
+		}
 	})
 }
 

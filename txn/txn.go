@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"errors"
 	"maps"
+	"math"
 	"slices"
 	"sync"
 
@@ -58,12 +59,13 @@ type Manager struct {
 	mu     sync.Mutex
 	log    []commitRecord  // commits that active transactions may conflict with
 	active map[*Txn]uint64 // read-write transactions and their start seq
+	open   map[*Txn]uint64 // every open transaction and its snapshot's seq
 	hook   func(seq uint64, keys [][]byte)
 }
 
 // NewManager returns a transaction manager for s.
 func NewManager(s storage.Store) *Manager {
-	return &Manager{store: s, active: map[*Txn]uint64{}}
+	return &Manager{store: s, active: map[*Txn]uint64{}, open: map[*Txn]uint64{}}
 }
 
 // Store returns the underlying store.
@@ -86,13 +88,28 @@ func (m *Manager) Begin(readOnly bool) *Txn {
 	if !readOnly {
 		m.active[t] = t.snap.Seq()
 	}
+	m.open[t] = t.snap.Seq()
 	return t
+}
+
+// Oldest returns the sequence number of the oldest snapshot an open
+// transaction reads, or math.MaxUint64 if none is open. Data that only
+// snapshots older than this could read can be removed.
+func (m *Manager) Oldest() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	oldest := uint64(math.MaxUint64)
+	for _, s := range m.open {
+		oldest = min(oldest, s)
+	}
+	return oldest
 }
 
 // finish removes t from the active set and drops log records no active
 // transaction can conflict with. m.mu must be held.
 func (m *Manager) finish(t *Txn) {
 	delete(m.active, t)
+	delete(m.open, t)
 	oldest := m.store.Seq()
 	for _, s := range m.active {
 		oldest = min(oldest, s)

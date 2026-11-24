@@ -62,6 +62,13 @@ type Options struct {
 	// kinds that have none or have changed by about a tenth (DB.Analyze);
 	// default a minute, negative never.
 	StatsRefresh time.Duration
+	// BlobThreshold is the length in bytes above which text, bytes and
+	// image field values are kept in the blob store (default 16 KiB, at
+	// least 4 KiB).
+	BlobThreshold int
+	// BlobSegmentSize is the size of the blob store's segment files
+	// (default blob.DefaultSegmentSize).
+	BlobSegmentSize int64
 	// PasswordIterations is the PBKDF2 iteration count for new passwords
 	// (default security.DefaultIterations, at least security.MinIterations).
 	PasswordIterations int
@@ -105,6 +112,10 @@ func Open(opts Options) (*Engine, error) {
 	if opts.StatsRefresh == 0 {
 		opts.StatsRefresh = time.Minute
 	}
+	if opts.BlobThreshold == 0 {
+		opts.BlobThreshold = DefaultBlobThreshold
+	}
+	opts.BlobThreshold = max(opts.BlobThreshold, minBlobThreshold)
 	e := &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{},
 		sec: security.New(opts.PasswordIterations)}
 	if opts.Dir != "" {
@@ -140,7 +151,7 @@ func (e *Engine) CreateDatabase(name string) (*DB, error) {
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	db, err := openDB(e, name, s)
+	db, err := openDB(e, name, s, "")
 	if err != nil {
 		s.Close()
 		return nil, err
@@ -217,12 +228,18 @@ func (e *Engine) Close() error {
 	return first
 }
 
-func openDB(e *Engine, name string, s storage.Store) (*DB, error) {
+// openDB opens a database on store s, with its blob store in blobDir
+// ("" for one in memory).
+func openDB(e *Engine, name string, s storage.Store, blobDir string) (*DB, error) {
 	cat, err := catalog.Load(s, 0)
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	db := &DB{name: name, eng: e, mgr: txn.NewManager(s), waiters: map[string]*waitList{}}
+	blobs, err := openBlobs(e, blobDir)
+	if err != nil {
+		return nil, err
+	}
+	db := &DB{name: name, eng: e, mgr: txn.NewManager(s), waiters: map[string]*waitList{}, blobs: blobs}
 	db.cat.Store(cat)
 	db.mgr.OnCommit(db.notify)
 	db.startBuilder()

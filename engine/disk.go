@@ -13,7 +13,8 @@ import (
 // An engine with a Dir keeps:
 //
 //	<dir>/system/          the system store
-//	<dir>/databases/<n>/   one store per database, numbered
+//	<dir>/databases/<n>/   one store per database, numbered, with its
+//	                       blob segments in blobs/
 //
 // The system store holds:
 //
@@ -111,7 +112,7 @@ func (e *Engine) load() (err error) {
 		if err != nil {
 			return wrap(CodeInternal, fmt.Errorf("opening database %s: %w", en.name, err))
 		}
-		db, err := openDB(e, en.name, s)
+		db, err := openDB(e, en.name, s, vfs.Join(e.databasesDir(), en.num, "blobs"))
 		if err != nil {
 			s.Close()
 			return err
@@ -162,7 +163,7 @@ func (e *Engine) createOnDisk(name string) (*DB, error) {
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	db, err := openDB(e, name, s)
+	db, err := openDB(e, name, s, vfs.Join(dir, "blobs"))
 	if err != nil {
 		s.Close()
 		fs.RemoveAll(dir)

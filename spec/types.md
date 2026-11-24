@@ -382,10 +382,19 @@ Used inside the storage engine for index keys and sorting.
 
 ## 13. Large values
 
-- **Byte strings, text and images** over **16 KiB** go to the blob store. They're split into 1 MiB chunks, and each chunk is addressed by its SHA-256 hash, so identical content is stored only once. The field holds a blob reference (tag 0x22).
-- **Collections and queues** over **1,000 elements** (or 64 KiB encoded) are stored element by element in the key-value store instead of as one blob. Pushing to a queue, adding to a set or changing one map entry then doesn't rewrite the whole collection.
-- Both thresholds are configurable per database.
+- **Byte strings, text and images** over **16 KiB** go to the blob store. They're split into 1 MiB chunks, and each chunk is addressed by its SHA-256 hash, so identical content is stored only once. The field holds a blob reference (tag 0x22). Only whole field values (and their history versions) are stored this way; a large value inside a collection, a record, metadata or relation properties stays inline.
+- **Collections and queues** over **1,000 elements** (or 64 KiB encoded) are stored element by element in the key-value store instead of as one blob. Pushing to a queue, adding to a set or changing one map entry then doesn't rewrite the whole collection. (Not implemented yet.)
+- The blob threshold is an engine setting (`engine.Options.BlobThreshold`, at least 4 KiB), the same for every database.
 - None of this is visible to queries.
+
+### 13.1 The blob store
+
+- **Segments:** each database keeps chunks in append-only segment files (`databases/<n>/blobs/00000001.seg`, …), separate from the key-value store, so large values are written once instead of being rewritten by compaction, and don't crowd the cache. A segment is sealed at 256 MiB and a new one started. Each chunk in a segment carries its hash, length and a CRC-32C, checked on every read.
+- **Records in the key-value store:** a blob record per distinct content (its length and chunk hashes), a location record per distinct chunk (segment, offset, length), and a **use record** for each entity that references a blob from a field or a history version. Writers only add use records, each for its own entity, so writers storing the same content never conflict with each other.
+- **Durability:** a transaction's new chunks are synced to their segment before it commits, so a committed reference always finds its data. A crash before the commit leaves unreferenced data at the end of a segment, which a later rewrite reclaims.
+- **Reads** replace a reference with the value again, whole, in memory. A statement that reads only some fields of an entity doesn't fetch the others' blobs, and the server sends large results by lease without holding them (protocol.md §7). Statistics sampling never fetches blob content: it counts distinct values by hash. Values of hundreds of MiB and more still need that much memory wherever a statement uses them; passing them through queries as streams is future work.
+- **Collection** runs with the history sweep (hourly by default). An entity that may have dropped a reference (a field overwritten or removed, the entity deleted, history pruned) is marked; the collector checks marked entities against the references they still hold, deletes blobs left without uses and chunks no blob lists, and rewrites sealed segments that are less than half live into the active one. A segment is deleted only once no open transaction's snapshot and no download lease (protocol.md §7) can still read it.
+- **Conflicts** settle races between writers and the collector: a writer reusing a blob guards its record, which the collector deletes; a writer reusing a chunk for new content rewrites the chunk's location record, which the collector deletes or moves. Whichever commits second fails and retries.
 
 ---
 

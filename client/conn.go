@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"sync"
 
@@ -296,11 +297,11 @@ func (c *Conn) Query(ctx context.Context, text string, params polydb.Params) (po
 }
 
 func (c *Conn) query(ctx context.Context, text string, params polydb.Params, txn *value.ID) (*Rows, error) {
-	vals, err := polydb.ParamValues(params)
+	vals, blobs, err := polydb.SplitParams(params)
 	if err != nil {
 		return nil, &polydb.Error{Code: "type", Message: err.Error(), StatementIndex: -1}
 	}
-	return c.request(ctx, &wire.Query{Text: text, Params: vals, Txn: txn})
+	return c.request(ctx, &wire.Query{Text: text, Params: vals, Txn: txn, BlobParams: blobs})
 }
 
 // request sends a QUERY or EXECUTE and reads up to the first result.
@@ -519,12 +520,72 @@ func (c *Conn) cell(v any) any {
 		}
 		return p
 	case *wire.BlobRef:
-		ref := x
-		return polydb.NewBlob(x.Type, x.Length, x.MediaType, func(ctx context.Context, off, n int64) ([]byte, error) {
-			return c.readBlob(ctx, ref, off, n)
-		})
+		return c.blob(x)
 	}
 	return v
+}
+
+func (c *Conn) blob(ref *wire.BlobRef) *polydb.Blob {
+	return polydb.NewLeasedBlob(ref.Type, ref.Length, ref.MediaType, ref.Token, func(ctx context.Context, off, n int64) ([]byte, error) {
+		return c.readBlob(ctx, ref, off, n)
+	})
+}
+
+// uploadPiece is the most content one BLOB_WRITE carries.
+const uploadPiece = 256 << 10
+
+// Upload streams a large value to the server, which stores it in the
+// current database, and returns a blob to pass as a query parameter:
+// typ is "text", "bytes" or "image", mediaType is a bytes value's media
+// type. The upload stays usable for the server's lease time (10 minutes
+// by default). A value used this way is never held whole in a message,
+// so it may be larger than the 64 MiB message limit.
+func (c *Conn) Upload(ctx context.Context, r io.Reader, typ, mediaType string) (*polydb.Blob, error) {
+	if !contains(c.hello.Features, "blob-write") {
+		return nil, &polydb.Error{Code: "unsupported", Message: "the server doesn't take uploads", StatementIndex: -1}
+	}
+	cur, next := make([]byte, uploadPiece), make([]byte, uploadPiece)
+	n, err := io.ReadFull(r, cur)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return nil, err
+	}
+	last := err != nil
+	s, err := c.open(ctx, &wire.BlobWrite{ValueType: typ, MediaType: mediaType, Data: cur[:n], Last: last})
+	if err != nil {
+		return nil, err
+	}
+	defer c.closeStream(s)
+	for !last {
+		n, err = io.ReadFull(r, next)
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			// Tell the server to drop what it has.
+			c.send(s.id, &wire.Cancel{}, false)
+			return nil, err
+		}
+		last = err != nil
+		if err := c.send(s.id, &wire.BlobWrite{Data: next[:n], Last: last}, last); err != nil {
+			return nil, err
+		}
+		cur, next = next, cur
+	}
+	for {
+		in, err := s.recv(ctx)
+		if err != nil {
+			return nil, err
+		}
+		switch m := in.Msg.(type) {
+		case *wire.BlobStored:
+			if m.Ref == nil {
+				return nil, errors.New("client: BLOB_STORED without a reference")
+			}
+			return c.blob(m.Ref), nil
+		case *wire.Error:
+			return nil, toError(m)
+		}
+		if in.EndStream {
+			return nil, errors.New("client: upload ended without an answer")
+		}
+	}
 }
 
 // readBlob fetches part of a blob with BLOB_READ.
@@ -647,7 +708,7 @@ func (s *Stmt) prepare(ctx context.Context) error {
 }
 
 func (s *Stmt) execute(ctx context.Context, params polydb.Params) (*Rows, error) {
-	vals, err := polydb.ParamValues(params)
+	vals, blobs, err := polydb.SplitParams(params)
 	if err != nil {
 		return nil, &polydb.Error{Code: "type", Message: err.Error(), StatementIndex: -1}
 	}
@@ -655,7 +716,7 @@ func (s *Stmt) execute(ctx context.Context, params polydb.Params) (*Rows, error)
 		s.mu.Lock()
 		id := s.id
 		s.mu.Unlock()
-		r, err := s.c.request(ctx, &wire.Execute{StatementID: id, Params: vals})
+		r, err := s.c.request(ctx, &wire.Execute{StatementID: id, Params: vals, BlobParams: blobs})
 		if polydb.CodeOf(err) == "stale_statement" && attempt == 0 {
 			if err := s.prepare(ctx); err != nil {
 				return nil, err

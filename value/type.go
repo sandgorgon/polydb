@@ -45,6 +45,8 @@ const (
 	CodeRecord
 	CodeUnion
 	CodeAny
+	// CodeBlobRef is a BlobRef, which only stored records hold.
+	CodeBlobRef
 )
 
 var codeNames = [...]string{
@@ -75,6 +77,7 @@ var codeNames = [...]string{
 	CodeRecord:   "record",
 	CodeUnion:    "union",
 	CodeAny:      "any",
+	CodeBlobRef:  "blobref",
 }
 
 func (c Code) String() string {

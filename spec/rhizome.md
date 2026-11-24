@@ -604,7 +604,7 @@ find Person p as of t"2026-01-01T00:00:00Z" | show p.name, p.salary;
   - fields whose history was turned off, whose versions nothing can read;
   - deleted entities, once they've been deleted for longer than any of their kind's fields keeps history.
 
-  The sweep never changes what `history` or an `as of` read within the retention returns.
+  The sweep never changes what `history` or an `as of` read within the retention returns. After each sweep, the blob store's collector frees the large values that only the removed versions referenced (types.md §13.1).
 
 ---
 

@@ -327,3 +327,41 @@ func TestDecodeListHead(t *testing.T) {
 		}
 	}
 }
+
+func TestBlobRefRoundTrip(t *testing.T) {
+	r := BlobRef{Of: CodeBytes, Len: 1 << 20, Media: "application/pdf"}
+	r.Hash[0], r.Hash[31] = 0xab, 0xcd
+	l, err := NewList(Int(1), r, Null)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(Encode(l)); err == nil {
+		t.Fatal("Decode accepted a blob reference")
+	}
+	if _, _, err := DecodeValue(Encode(r)); err == nil {
+		t.Fatal("DecodeValue accepted a blob reference")
+	}
+	got, err := DecodeStored(Encode(l))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g := got.(List).At(1); g != r {
+		t.Fatalf("got %v, want %v", g, r)
+	}
+	bad := Encode(r)
+	bad[1] = byte(CodeInt)
+	if _, err := DecodeStored(bad); err == nil {
+		t.Fatal("decoded a blob reference to an int")
+	}
+	img := Encode(BlobRef{Of: CodeImage, Len: 3})
+	if v, err := DecodeStored(img); err != nil || v.(BlobRef).Of != CodeImage {
+		t.Fatalf("image ref: %v %v", v, err)
+	}
+	if _, err := FromBlob(BlobRef{Of: CodeText, Len: 2}, []byte("abc")); err == nil {
+		t.Fatal("FromBlob accepted the wrong length")
+	}
+	v, err := FromBlob(BlobRef{Of: CodeBytes, Len: 3, Media: "x/y"}, []byte("abc"))
+	if err != nil || v.(Bytes).MediaType() != "x/y" || string(v.(Bytes).Go()) != "abc" {
+		t.Fatalf("FromBlob bytes: %v %v", v, err)
+	}
+}

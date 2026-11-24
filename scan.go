@@ -97,12 +97,22 @@ func ToValue(v any) (value.Value, error) {
 }
 
 // ParamValues converts parameters to values.
+//
+// A *Blob is read whole; see SplitParams for blobs a server holds.
 func ParamValues(p Params) (map[string]value.Value, error) {
 	if len(p) == 0 {
 		return nil, nil
 	}
 	out := make(map[string]value.Value, len(p))
 	for k, v := range p {
+		if b, ok := v.(*Blob); ok {
+			c, err := b.Value(context.Background())
+			if err != nil {
+				return nil, fmt.Errorf("parameter $%s: %w", k, err)
+			}
+			out[k] = c
+			continue
+		}
 		c, err := ToValue(v)
 		if err != nil {
 			return nil, fmt.Errorf("parameter $%s: %w", k, err)
@@ -110,6 +120,25 @@ func ParamValues(p Params) (map[string]value.Value, error) {
 		out[k] = c
 	}
 	return out, nil
+}
+
+// SplitParams is ParamValues for a client: blobs with a lease token
+// (read from results, or uploaded) are returned as tokens instead, so
+// their content isn't sent again.
+func SplitParams(p Params) (vals map[string]value.Value, tokens map[string][]byte, err error) {
+	rest := Params{}
+	for k, v := range p {
+		if b, ok := v.(*Blob); ok && b.token != nil {
+			if tokens == nil {
+				tokens = map[string][]byte{}
+			}
+			tokens[k] = b.token
+			continue
+		}
+		rest[k] = v
+	}
+	vals, err = ParamValues(rest)
+	return vals, tokens, err
 }
 
 // Scan copies cells into dest, converting as needed:

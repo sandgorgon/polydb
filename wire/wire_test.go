@@ -62,6 +62,11 @@ func sampleMessages() []Message {
 		&Execute{StatementID: 3, Params: map[string]value.Value{"n": value.MustText("Bob")}},
 		&CloseStatement{StatementID: 3},
 		&BlobRead{Ref: &BlobRef{Type: "bytes", Hash: []byte{1}, Length: 10, Token: []byte("t")}, Offset: 2, Length: 5},
+		&Query{Text: "create F { data: $d }", BlobParams: map[string][]byte{"d": []byte("tok")}},
+		&Execute{StatementID: 4, BlobParams: map[string][]byte{"d": []byte("tok"), "e": []byte("t2")}},
+		&BlobWrite{ValueType: "bytes", MediaType: "application/pdf", Data: []byte("abc")},
+		&BlobWrite{Data: []byte("def"), Last: true},
+		&BlobStored{Ref: &BlobRef{Type: "image", Hash: []byte{2}, Length: 3, MediaType: "image/png", Token: []byte("u")}},
 		&Cancel{},
 		&ResultHeader{StatementIndex: 0, Columns: []Column{{"p", "any"}, {"p.name", "text"}}},
 		&Rows{Rows: [][]any{

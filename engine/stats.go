@@ -244,7 +244,9 @@ func (tx *Tx) SampleStats(k *model.Kind) (*KindStats, error) {
 		accs[i].all, accs[i].text = map[string]int{}, map[string]string{}
 	}
 	for _, id := range ids {
-		st, err := tx.loadEntity(id)
+		// Large values stay references: their encodings, which carry the
+		// content hash, still count distinct values.
+		st, err := tx.loadEntityAs(id, false)
 		if err != nil {
 			return nil, err
 		}

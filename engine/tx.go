@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/sandgorgon/polydb/blob"
 	"github.com/sandgorgon/polydb/catalog"
 	"github.com/sandgorgon/polydb/keys"
 	"github.com/sandgorgon/polydb/model"
@@ -28,6 +29,10 @@ type Tx struct {
 	failed     error
 	startBuild bool             // it defined an index to build in the background
 	changed    map[value.ID]int // entities saved per kind, for statistics
+
+	blobsPut  map[[32]byte]bool // blobs stored or reused (blob.go)
+	blobSync  []blob.Loc        // chunks to sync before committing
+	commitSeq *uint64           // set to the commit's sequence number
 }
 
 // Catalog returns the catalog as this transaction sees it, including its
@@ -58,12 +63,20 @@ func (tx *Tx) Commit() error {
 		}
 		tx.t.Set(keys.CatalogVersion, value.Encode(value.Int(newCat.Version())))
 	}
-	if _, err := tx.t.Commit(); err != nil {
+	if err := tx.syncBlobs(); err != nil {
+		tx.t.Rollback()
+		return err
+	}
+	seq, err := tx.t.Commit()
+	if err != nil {
 		code := CodeInternal
 		if err == txn.ErrReadOnly {
 			code = CodeConstraint
 		}
 		return wrap(code, err)
+	}
+	if tx.commitSeq != nil {
+		*tx.commitSeq = seq
 	}
 	if newCat != nil {
 		tx.db.setCatalog(newCat)
@@ -182,9 +195,15 @@ type entState struct {
 	orig     map[string]*model.Field // as loaded; nil for a new entity
 	isNew    bool
 	deleted  bool
+	// blobs names the loaded fields whose records held blob references.
+	blobs map[string]bool
 }
 
-func (tx *Tx) loadEntity(id value.ID) (*entState, error) {
+func (tx *Tx) loadEntity(id value.ID) (*entState, error) { return tx.loadEntityAs(id, true) }
+
+// loadEntityAs loads an entity, leaving large values as blob references
+// unless resolve is set. Such a state is only for reading.
+func (tx *Tx) loadEntityAs(id value.ID, resolve bool) (*entState, error) {
 	b, ok, err := tx.get(keys.Entity(id))
 	if err != nil {
 		return nil, err
@@ -213,6 +232,19 @@ func (tx *Tx) loadEntity(id value.ID) (*entState, error) {
 		f, err := keys.DecodeField(id, name, v, cat)
 		if err != nil {
 			return wrap(CodeInternal, err)
+		}
+		if _, ok := f.Value.(value.BlobRef); ok {
+			if !resolve {
+				st.fields[name], st.orig[name] = f, f
+				return nil
+			}
+			if f.Value, err = tx.resolve(f.Value); err != nil {
+				return err
+			}
+			if st.blobs == nil {
+				st.blobs = map[string]bool{}
+			}
+			st.blobs[name] = true
 		}
 		st.fields[name], st.orig[name] = f, f
 		return nil
@@ -266,7 +298,25 @@ func (tx *Tx) save(st *entState) error {
 		}
 	}
 
-	if err := tx.recordHistory(st); err != nil {
+	// What the changed fields' records hold: large values go to the blob
+	// store first, and history versions hold the same references.
+	stored := map[string]value.Value{}
+	if !st.deleted {
+		for name, f := range st.fields {
+			if old, ok := st.orig[name]; (ok && old == f) || f.Value == nil {
+				continue
+			}
+			v, err := tx.storeValue(id, f.Value)
+			if err != nil {
+				return err
+			}
+			stored[name] = v
+		}
+	}
+	if err := tx.droppedBlobs(st); err != nil {
+		return err
+	}
+	if err := tx.recordHistory(st, stored); err != nil {
 		return err
 	}
 	if k := st.kind; k != nil || st.origKind != nil {
@@ -321,7 +371,13 @@ func (tx *Tx) save(st *entState) error {
 			if old, ok := st.orig[name]; ok && old == f {
 				continue // unchanged
 			}
-			rec, err := keys.EncodeField(f, cat)
+			out := f
+			if ref, ok := stored[name].(value.BlobRef); ok {
+				cp := *f
+				cp.Value = ref
+				out = &cp
+			}
+			rec, err := keys.EncodeField(out, cat)
 			if err != nil {
 				return wrap(CodeInternal, err)
 			}

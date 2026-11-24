@@ -4,6 +4,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/sandgorgon/polydb/blob"
 	"github.com/sandgorgon/polydb/catalog"
 	"github.com/sandgorgon/polydb/storage/lsm"
 	"github.com/sandgorgon/polydb/txn"
@@ -28,6 +29,10 @@ type DB struct {
 	sweepQuit, sweepDone chan struct{} // the background history sweep
 	statsQuit, statsDone chan struct{} // the background statistics refresh
 	statChanges          sync.Map      // kind ID → *atomic.Int64: changes since its last sample
+
+	blobs   *blob.Store // large values (blob.go)
+	touchMu sync.Mutex
+	touched map[uint32]uint64 // blob segment → store seq of its last append
 }
 
 // Name returns the database's name.
@@ -112,7 +117,11 @@ func (db *DB) close() error {
 		}
 	}
 	db.wmu.Unlock()
-	return db.mgr.Store().Close()
+	err := db.mgr.Store().Close()
+	if berr := db.blobs.Close(); err == nil {
+		err = berr
+	}
+	return err
 }
 
 // StoreMetrics returns the on-disk store's shape and work since it

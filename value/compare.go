@@ -46,6 +46,8 @@ func group(c Code) int {
 		return 16
 	case CodeFifo, CodeLifo, CodeRing, CodePriority:
 		return 17
+	case CodeBlobRef:
+		return 18
 	}
 	panic(fmt.Sprintf("value: no sort group for %s", c))
 }
@@ -97,6 +99,9 @@ func Compare(a, b Value) int {
 	case 10:
 		x, y := a.(Ref).Target, b.(Ref).Target
 		return bytes.Compare(x[:], y[:])
+	case 18:
+		x, y := a.(BlobRef), b.(BlobRef)
+		return bytes.Compare(x.Hash[:], y.Hash[:])
 	}
 	return compareComposite(a, b)
 }

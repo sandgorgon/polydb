@@ -172,12 +172,24 @@ type Blob struct {
 	MediaType string
 	// fetch reads length bytes at offset.
 	fetch func(ctx context.Context, offset, length int64) ([]byte, error)
+	// token is the server's lease on the content, which lets the blob be
+	// passed back as a parameter without sending the content again.
+	token []byte
 }
 
 // NewBlob returns a blob read with fetch. Implementations of DB use it.
 func NewBlob(typ string, length int64, mediaType string, fetch func(ctx context.Context, offset, length int64) ([]byte, error)) *Blob {
 	return &Blob{Type: typ, Length: length, MediaType: mediaType, fetch: fetch}
 }
+
+// NewLeasedBlob is NewBlob for content a server holds under a lease
+// token. Passed as a parameter, such a blob sends only the token.
+func NewLeasedBlob(typ string, length int64, mediaType string, token []byte, fetch func(ctx context.Context, offset, length int64) ([]byte, error)) *Blob {
+	return &Blob{Type: typ, Length: length, MediaType: mediaType, fetch: fetch, token: token}
+}
+
+// Token returns the blob's lease token, or nil.
+func (b *Blob) Token() []byte { return b.token }
 
 // ReadAt implements io.ReaderAt.
 func (b *Blob) ReadAt(p []byte, off int64) (int, error) {
