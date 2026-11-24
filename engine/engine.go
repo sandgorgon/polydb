@@ -55,6 +55,9 @@ type Options struct {
 	Now func() time.Time
 	// MaxPopWait caps how long PopWait may wait (default 15 minutes).
 	MaxPopWait time.Duration
+	// HistorySweep is how often each database removes history past its
+	// retention (DB.SweepHistory); default an hour, negative never.
+	HistorySweep time.Duration
 	// PasswordIterations is the PBKDF2 iteration count for new passwords
 	// (default security.DefaultIterations, at least security.MinIterations).
 	PasswordIterations int
@@ -91,6 +94,9 @@ func Open(opts Options) (*Engine, error) {
 	}
 	if opts.MaxPopWait <= 0 {
 		opts.MaxPopWait = 15 * time.Minute
+	}
+	if opts.HistorySweep == 0 {
+		opts.HistorySweep = time.Hour
 	}
 	e := &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{},
 		sec: security.New(opts.PasswordIterations)}
@@ -213,5 +219,6 @@ func openDB(e *Engine, name string, s storage.Store) (*DB, error) {
 	db.cat.Store(cat)
 	db.mgr.OnCommit(db.notify)
 	db.startBuilder()
+	db.startSweeper(e.opts.HistorySweep)
 	return db, nil
 }

@@ -23,6 +23,8 @@ type DB struct {
 
 	build   *builder // background index builds
 	buildMu sync.Mutex
+
+	sweepQuit, sweepDone chan struct{} // the background history sweep
 }
 
 // Name returns the database's name.
@@ -96,6 +98,7 @@ func (db *DB) setCatalog(c *catalog.Catalog) {
 }
 
 func (db *DB) close() error {
+	db.stopSweeper()
 	db.stopBuilder()
 	db.wmu.Lock()
 	for _, wl := range db.waiters {

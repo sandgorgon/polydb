@@ -595,6 +595,12 @@ find Person p as of t"2026-01-01T00:00:00Z" | show p.name, p.salary;
 ```
 - In an `as of` query, fields without history return an error if read. That's better than silently returning today's value for a past date.
 - Entities that didn't exist yet at that time aren't returned. Deleted entities whose kind has history are returned as they were.
+- **Retention.** With `keep d`, a version stays until it has been replaced for longer than `d`. A field's current version stays however old it is. Writing a field prunes its own old versions. A background sweep, hourly by default, prunes the rest:
+  - fields that are no longer written;
+  - fields whose history was turned off, whose versions nothing can read;
+  - deleted entities, once they've been deleted for longer than any of their kind's fields keeps history.
+
+  The sweep never changes what `history` or an `as of` read within the retention returns.
 
 ---
 
