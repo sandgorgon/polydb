@@ -13,13 +13,13 @@ import (
 
 // session runs statements, each in its own transaction, keeping handles.
 type session struct {
-	t       *testing.T
+	t       testing.TB
 	db      *engine.DB
 	handles map[string]Handle
 	params  map[string]value.Value
 }
 
-func newSession(t *testing.T) *session {
+func newSession(t testing.TB) *session {
 	t.Helper()
 	clock := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	eng, err := engine.Open(engine.Options{Now: func() time.Time { return clock }})

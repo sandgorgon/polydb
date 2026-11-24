@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -394,6 +396,115 @@ func TestTextIndexMatchesScan(t *testing.T) {
 			})
 			if want != fmt.Sprint(n) {
 				t.Errorf("search() counts %s, the index %d", want, n)
+			}
+		})
+	}
+}
+
+// TestCrashDuringIndexBuild (POLYDB_CRASH_ROUNDS for more rounds) cuts the power at random moments while a
+// value index and a text index build with writers running, sometimes
+// again while the build resumes. After reopening, the builds finish, the
+// indexes match the data, and queries answered from them agree with the
+// same conditions written so no index can answer them.
+func TestCrashDuringIndexBuild(t *testing.T) {
+	rounds := 4
+	if testing.Short() {
+		rounds = 1
+	}
+	if n, _ := strconv.Atoi(os.Getenv("POLYDB_CRASH_ROUNDS")); n > 0 {
+		rounds = n
+	}
+	for r := range rounds {
+		t.Run(fmt.Sprint("round", r), func(t *testing.T) {
+			rng := rand.New(rand.NewPCG(uint64(r), 21))
+			fs := vfs.NewMem()
+			o := diskOptions(fs)
+			eng := openDisk(t, o)
+			mustExec(t, eng, "", "create database test")
+			bigKind(t, eng, 2500)
+			mustExec(t, eng, "test", "define index p_age on P(age); define text index p_name on P(name)")
+			for crash := range 1 + r%2 {
+				db, _ := eng.Database("test")
+				var ids []value.ID
+				db.View(func(tx *engine.Tx) error {
+					return tx.Entities("P", func(id value.ID) bool { ids = append(ids, id); return true })
+				})
+				var stop atomic.Bool
+				var wg sync.WaitGroup
+				for w := range 2 {
+					wg.Go(func() {
+						wr := rand.New(rand.NewPCG(uint64(r*10+crash), uint64(w)))
+						for !stop.Load() {
+							id := ids[wr.IntN(len(ids))]
+							db.Update(func(tx *engine.Tx) error {
+								switch wr.IntN(6) {
+								case 0:
+									return tx.Unset(id, "age")
+								case 1:
+									return tx.Delete(id)
+								case 2:
+									return tx.Set(id, engine.Fields{"name": value.MustText(fmt.Sprintf("crash w%d", wr.IntN(9)))})
+								default:
+									return tx.Set(id, engine.Fields{"age": value.Int(int64(wr.IntN(97)))})
+								}
+							})
+						}
+					})
+				}
+				// Crash once the build has got some way, or has finished.
+				want := int64(rng.IntN(2600))
+				deadline := time.Now().Add(10 * time.Second)
+				var done int64 = -1
+				for time.Now().Before(deadline) {
+					db.View(func(tx *engine.Tx) error {
+						ix, _ := tx.Catalog().Index("p_age")
+						st, err := tx.IndexState(ix)
+						if st.Ready {
+							done = 1 << 40
+						} else {
+							done = st.Done
+						}
+						return err
+					})
+					if done >= want {
+						break
+					}
+					time.Sleep(time.Millisecond)
+				}
+				if done >= 1<<40 {
+					t.Logf("crash %d after the build finished", crash)
+				} else {
+					t.Logf("crash %d with %d of 2500 entities indexed", crash, done)
+				}
+				crashed := fs.Crash(rng)
+				stop.Store(true)
+				wg.Wait()
+				eng.Close()
+				fs = crashed
+				o.FS = fs
+				eng = openDisk(t, o)
+			}
+			defer eng.Close()
+			db, _ := eng.Database("test")
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := db.WaitIndexes(ctx); err != nil {
+				t.Fatal(err)
+			}
+			verify(t, eng, "after crashes during the build")
+			for _, q := range []string{
+				"find P p | where p.age = 7 | show count()",
+				"find P p | where p.age > 90 | show count()",
+				`find P p | where search(p.name, "crash w3") | show count()`,
+				`find P p | where search(p.name, "n00*") | show count()`,
+			} {
+				// p.age + 0 and p.name ++ "" read the same values, but no
+				// index answers them.
+				plain := strings.NewReplacer("p.age", "p.age + 0", "p.name", `p.name ++ ""`).Replace(q)
+				got, want := rows(t, eng, security.AdminUser, "test", q), rows(t, eng, security.AdminUser, "test", plain)
+				if got != want {
+					t.Errorf("%s: %s, without the index %s", q, got, want)
+				}
 			}
 		})
 	}

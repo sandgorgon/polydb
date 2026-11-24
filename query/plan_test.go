@@ -1,23 +1,61 @@
 package query
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"os"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/model"
 	"github.com/sandgorgon/polydb/security"
+	"github.com/sandgorgon/polydb/storage/lsm"
+	"github.com/sandgorgon/polydb/storage/vfs"
+	"github.com/sandgorgon/polydb/value"
 )
 
 // planData defines people with indexes of every sort and fills them with
 // random values, including absent ones.
-func planData(t *testing.T, n int, seed uint64) *session {
+// dataOpts vary how planData stores its data.
+type dataOpts struct {
+	disk bool // an LSM store with small tables, so data is flushed and compacted
+	late bool // indexes defined after the data, so big kinds build in the background
+}
+
+const planIndexes = `
+define index person_age on Person(age);
+define index city_age on Person(city, age);
+define index age_name on Person(age, name);
+define index person_friend on Person(friend);
+define index cfg_port on Person(cfg->port);
+define text index person_bio on Person(bio);
+define index pet_owner on Pet(owner);
+`
+
+func planData(t *testing.T, n int, seed uint64, opts ...dataOpts) *session {
+	var o dataOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	s := newSession(t)
+	if o.disk {
+		eng, err := engine.Open(engine.Options{Dir: "/data", FS: vfs.NewMem(),
+			Storage: lsm.Options{MemtableSize: 4 << 10, TableSize: 8 << 10, LevelBaseSize: 32 << 10, BlockSize: 512}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { eng.Close() })
+		if s.db, err = eng.CreateDatabase("test"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	s.run(`
 define kind Person {
   name   : text
@@ -30,15 +68,11 @@ define kind Person {
   misc   : any
   friend : ref<Person>?
 };
-define index person_age on Person(age);
-define index city_age on Person(city, age);
-define index age_name on Person(age, name);
-define index person_friend on Person(friend);
-define index cfg_port on Person(cfg->port);
-define text index person_bio on Person(bio);
 define kind Pet { name: text, owner: ref<Person> };
-define index pet_owner on Pet(owner);
 `)
+	if !o.late {
+		s.run(planIndexes)
+	}
 	rng := rand.New(rand.NewPCG(seed, 7))
 	cities := []string{"Oslo", "Osaka", "Lima", "Lyon", ""}
 	words := []string{"alpha", "beta", "gamma", "delta", "alps", "Beta", "ÉPSILON"}
@@ -97,6 +131,14 @@ define index pet_owner on Pet(owner);
 			s.run(fmt.Sprintf("update @p%d unset age, city;", i))
 		case 2:
 			s.run(fmt.Sprintf("update @p%d set bio = \"gamma ray\";", i))
+		}
+	}
+	if o.late {
+		s.run(planIndexes)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := s.db.WaitIndexes(ctx); err != nil {
+			t.Fatal(err)
 		}
 	}
 	return s
@@ -181,13 +223,25 @@ func TestPlanChoice(t *testing.T) {
 func TestPlannerMatchesScan(t *testing.T) {
 	rounds, _ := strconv.Atoi(os.Getenv("POLYDB_PLAN_ROUNDS"))
 	for r := range max(rounds, 1) {
-		t.Run(fmt.Sprint("round", r), func(t *testing.T) { plannerMatchesScan(t, uint64(r)) })
+		t.Run(fmt.Sprint("round", r), func(t *testing.T) {
+			plannerMatchesScan(t, planData(t, 150, 2+uint64(r)*10), 150, uint64(r), 1500, true)
+		})
 	}
 }
 
-func plannerMatchesScan(t *testing.T, seed uint64) {
-	n := 150
-	s := planData(t, n, 2+seed*10)
+// The same on disk, with indexes built in the background after the data
+// (more than syncBuildLimit people). Joins pair people only with pets, to
+// keep the plain plan's cross products small.
+func TestPlannerMatchesScanOnDisk(t *testing.T) {
+	if testing.Short() {
+		t.Skip("slow")
+	}
+	n := 1100
+	s := planData(t, n, 5, dataOpts{disk: true, late: true})
+	plannerMatchesScan(t, s, n, 5, 400, false)
+}
+
+func plannerMatchesScan(t *testing.T, s *session, n int, seed uint64, queries int, selfJoins bool) {
 	rng := rand.New(rand.NewPCG(3, 4+seed))
 	pick := func(xs ...string) string { return xs[rng.IntN(len(xs))] }
 	num := func() string { return fmt.Sprint(rng.IntN(62) - 1) }
@@ -243,7 +297,7 @@ func plannerMatchesScan(t *testing.T, seed uint64) {
 	matched, failed := 0, 0
 	used := map[string]int{}
 	defer func(n int) { probeCap = n }(probeCap)
-	for i := range 1500 {
+	for i := range queries {
 		probeCap = []int{1000, 20, 1}[i%3]
 		var q string
 		switch i % 4 {
@@ -254,7 +308,11 @@ func plannerMatchesScan(t *testing.T, seed uint64) {
 			q = "find Person p" + where("p", "") + " | sort " + key + pick("", ", p.name") +
 				pick("", " | skip 3") + fmt.Sprintf(" | limit %d", rng.IntN(8)) + " | show p.email, p.age"
 		case 3:
-			q = "find Person p, " + pick("Person q", "Pet q") + where("p", "q")
+			other := pick("Person q", "Pet q")
+			if !selfJoins {
+				other = "Pet q"
+			}
+			q = "find Person p, " + other + where("p", "q")
 			q = strings.ReplaceAll(q, "q.age", pick("q.age", "q.name"))
 			q += " | where " + cond("p", "q") + " | show p.email, q.name"
 			if strings.Contains(q, "Pet q") {
@@ -344,3 +402,59 @@ func TestPlanPermissions(t *testing.T) {
 		}
 	}
 }
+
+// FuzzSearch checks search() end to end: through the text index, by
+// matching each text (no planner), and on a copy of the field without an
+// index, a query finds the same notes or fails the same way.
+func FuzzSearch(f *testing.F) {
+	for _, q := range []string{"alpha", `"beta gamma" -delta`, "al* OR 東京", "résumé", "-x", `"open`, "a OR", "e-mail", "ÉPSILON beta*"} {
+		f.Add(q)
+	}
+	s := newSession(f)
+	s.run(`define kind Note { title: text, body: text?, copy: text? }; define text index note_body on Note(body);`)
+	rng := rand.New(rand.NewPCG(11, 12))
+	words := []string{"alpha", "Beta", "gamma", "delta", "alps", "résumé", "resume", "東京", "e-mail", "ÉPSILON", "x"}
+	for i := range 300 {
+		var ws []string
+		for range rng.IntN(7) {
+			ws = append(ws, words[rng.IntN(len(words))])
+		}
+		text := strings.Join(ws, pick(rng, " ", ", ", "-", " "))
+		if rng.IntN(8) == 0 {
+			s.run(fmt.Sprintf("create Note { title: \"t%d\" };", i))
+			continue
+		}
+		s.run(fmt.Sprintf("create Note { title: \"t%d\", body: %q, copy: %q };", i, text, text))
+	}
+	f.Fuzz(func(t *testing.T, q string) {
+		if !utf8.ValidString(q) {
+			return // texts are valid UTF-8
+		}
+		run := func(field string, noPlanner bool) string {
+			st, err := lang.ParseStatement("find Note n | where search(n." + field + ", $q) | show n.title")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx := s.db.Begin(engine.TxOptions{User: "tester"})
+			defer tx.Rollback()
+			res, err := Exec(&Context{Tx: tx, Params: map[string]value.Value{"q": value.MustText(q)}, NoPlanner: noPlanner}, st)
+			if err != nil {
+				var le *lang.Error
+				if errors.As(err, &le) {
+					return "error " + le.Code
+				}
+				return "error " + err.Error()
+			}
+			return render(res)
+		}
+		plain := run("body", true)
+		if got := run("body", false); got != plain {
+			t.Errorf("%q: index gives %s, matching gives %s", q, got, plain)
+		}
+		if got := run("copy", false); got != plain {
+			t.Errorf("%q: unindexed copy gives %s, matching gives %s", q, got, plain)
+		}
+	})
+}
+
+func pick[T any](rng *rand.Rand, xs ...T) T { return xs[rng.IntN(len(xs))] }
