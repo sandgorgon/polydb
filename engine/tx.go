@@ -26,7 +26,8 @@ type Tx struct {
 
 	guarded    bool // the catalog version key is guarded
 	failed     error
-	startBuild bool // it defined an index to build in the background
+	startBuild bool             // it defined an index to build in the background
+	changed    map[value.ID]int // entities saved per kind, for statistics
 }
 
 // Catalog returns the catalog as this transaction sees it, including its
@@ -69,6 +70,9 @@ func (tx *Tx) Commit() error {
 	}
 	if tx.startBuild {
 		tx.db.kickBuilder()
+	}
+	for kind, n := range tx.changed {
+		tx.db.changes(kind).Add(int64(n))
 	}
 	return nil
 }
@@ -264,6 +268,15 @@ func (tx *Tx) save(st *entState) error {
 
 	if err := tx.recordHistory(st); err != nil {
 		return err
+	}
+	if k := st.kind; k != nil || st.origKind != nil {
+		if k == nil || st.deleted {
+			k = st.origKind
+		}
+		if tx.changed == nil {
+			tx.changed = map[value.ID]int{}
+		}
+		tx.changed[k.ID]++
 	}
 
 	// Side keys: compute before and after, then write the difference.

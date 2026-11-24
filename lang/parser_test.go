@@ -139,6 +139,9 @@ var corpus = []string{
 	`explain find Person p | where p.age > 30`,
 	`explain analyze find Person p | where p.age > 30`,
 	`history @alice.salary`,
+	`analyze kind Person`,
+	`define kind analyze { analyze: int }`,
+	`analyze kind analyze`,
 	// expressions
 	`find p | where not a = b or c and not d`,
 	`find p | where a < b and x not in [1, 2] and y between 1 and 2 and z not between 3 and 4`,

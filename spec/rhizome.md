@@ -117,7 +117,7 @@ Reserved now for future features (inference rules, kind reuse and others), so th
 | Queries | pipelines starting with `find` |
 | Transactions | `begin`, `commit`, `rollback` |
 | Security | `create user / role`, `alter user`, `drop user / role`, `grant`, `revoke` |
-| Introspection | `describe`, `explain`, `show …`, `history` |
+| Introspection | `describe`, `explain`, `show …`, `history`, `analyze kind` |
 
 Each statement ends with `;`.
 
@@ -472,7 +472,11 @@ A planner chooses how a `find` over kinds finds its rows. Plans change speed, ne
 - **When an index can't answer.** An index holds only entities that have a value, other than null, for every one of its fields. It answers a condition only when every entity the condition lets through is sure to be in it. So `= null` is never answered from an index, and a multi-field index answers a condition on its first fields only when the conditions also constrain its other fields or those fields are required. Indexes still building aren't used.
 - **Joins.** With several variables, the one with the fewest estimated entities is bound first, and the others follow through indexes or lookups that use it, so `find Customer c, Order o | where o.customer = c and c.email = $e` reads one customer and their orders.
 - **`sort … | limit n`.** Right after the where steps, this reads an index in order and stops once it has the rows the limit keeps. It applies when the sort's first key is an indexed field whose values are all in the index, or when sorting descending, where entities without a value come last.
-- **Estimates** come from counting probes: the planner counts a constant index range up to 1000 entries. Statistics may replace this later.
+- **Estimates.**
+  - A constant index range is counted, up to 1000 entries.
+  - A larger range is estimated from the kind's **statistics**, and so is a lookup per row of an earlier variable: the kind's entities divided by the key's distinct values.
+
+  Statistics come from a random sample of up to 10,000 entities per kind. For each field, and each doc path of an index key, they record how many entities have a value or null, an estimate of the distinct values, the most common values and a histogram of the rest. The database samples a kind when it has no statistics yet, and again once about a tenth of it has changed (or at least 50 entities); `analyze kind K` samples one at once. Without statistics, the planner guesses.
 - **Errors.** A row that an index or an earlier condition rules out isn't checked against the other conditions. An error that one of them would have raised on that row, such as comparing an int with text, doesn't happen.
 
 ---
@@ -645,7 +649,8 @@ describe relation knows;
 describe #01JD...;                  // whatever the ID belongs to
 show kinds;  show relations;  show formats;  show indexes;
 show stats;                         // database size, counts per kind and relation type
-show stats kind Person;             // value distributions used by the planner
+show stats kind Person;             // the planner's statistics: per field, present, null, distinct, common values
+analyze kind Person;                // sample Person's statistics now (the database also does it as data changes)
 show sessions;                      // admin: who is connected and what's running
 explain find Person p | where p.age > 30;            // how each variable is found, estimates, steps, warnings
 explain analyze find Person p | where p.age > 30;    // runs it; shows actual counts and timings
@@ -891,7 +896,8 @@ scope          = "server" | "database" ident | "kind" [ ident "." ] ident ;
 introspect_stmt = "describe" ( target | ( "kind" | "relation" | "format" | "index" ) ident )
                 | "show" show_what
                 | "explain" [ "analyze" ] statement
-                | "history" field_ref ;
+                | "history" field_ref
+                | "analyze" "kind" ident ;
 show_what      = "databases" | "kinds" | "relations" | "formats" | "indexes"
                | "users" | "roles" | "sessions"
                | "grants" [ "for" ident ]
@@ -1030,4 +1036,5 @@ None.
      - then warnings: a scan of every entity, variables no condition links (a cross product), `search()` without a text index, and an index that is still building and so isn't used.
    - `explain analyze` on a query runs it and adds `rows` and `time` columns: the rows each variable bound and each step produced, and each step's time.
    - Introspection results are tables with a `section` column where they mix kinds of rows: `describe kind` lists the kind, its fields and its indexes; `describe @x` lists metadata, fields and relations in and out.
-14. Query planning (Phase 5, 2026-11-23): plans never change results or row order (§7.5). An index answers a condition only when every entity the condition passes is sure to be in it. Rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen. Estimates come from counting probes until statistics arrive.
+14. Query planning (Phase 5, 2026-11-23): plans never change results or row order (§7.5). An index answers a condition only when every entity the condition passes is sure to be in it. Rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen. Estimates come from counting probes and, since Phase 6, sampled statistics.
+15. Statistics (Phase 6, 2026-11-24): `analyze` is a contextual word, so existing names stay valid. `analyze kind K` needs read permission on K, samples committed data in its own transaction (so it works inside a transaction too), and returns the same table as `show stats kind K`. That table is exact for kinds no larger than the sample; a kind not yet sampled is sampled for the display without storing the result.

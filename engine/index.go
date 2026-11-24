@@ -6,7 +6,6 @@ import (
 
 	"github.com/sandgorgon/polydb/fulltext"
 	"github.com/sandgorgon/polydb/keys"
-	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/model"
 	"github.com/sandgorgon/polydb/value"
 )
@@ -63,23 +62,9 @@ func (tx *Tx) indexEntries(ix *model.Index, id value.ID, fields map[string]*mode
 	}
 	var vals []byte
 	for _, k := range ix.Keys {
-		f, ok := fields[k.Field]
-		if !ok || f.Value == nil || value.IsNull(f.Value) {
+		v, ok := tx.columnValue(k, fields)
+		if !ok || value.IsNull(v) {
 			return nil
-		}
-		v := f.Value
-		if len(k.Path) > 0 {
-			d, ok := v.(value.Doc)
-			if !ok {
-				return nil
-			}
-			format, ok := tx.Catalog().Format(d.Format())
-			if !ok {
-				return nil
-			}
-			if v, ok = lang.IndexValue(format, d, k.Path); !ok {
-				return nil
-			}
 		}
 		var err error
 		if vals, err = value.AppendKey(vals, v); err != nil {

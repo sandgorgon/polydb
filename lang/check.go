@@ -266,6 +266,9 @@ func (c *checker) stmt(s Stmt, sc *scope) error {
 		return err
 	case *Describe:
 		return c.describe(s)
+	case *Analyze:
+		_, err := c.kind(s.P, s.Kind)
+		return err
 	case *ShowStmt:
 		if s.What == "stats" && s.For != "" {
 			_, err := c.kind(s.P, s.For)

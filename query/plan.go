@@ -145,6 +145,8 @@ type planner struct {
 	pl     *lang.Pipeline
 	conds  []*cond
 	counts map[string]count
+
+	kindStats map[value.ID]*engine.KindStats
 }
 
 // A count is how many entities a kind has, up to some limit.
@@ -160,7 +162,7 @@ func (x *executor) planSource(pl *lang.Pipeline) (*plan, error) {
 	if x.past != nil || src.Start != nil || src.In != nil || len(src.Vars) == 0 {
 		return nil, nil
 	}
-	pc := &planner{x: x, pl: pl, counts: map[string]count{}}
+	pc := &planner{x: x, pl: pl, counts: map[string]count{}, kindStats: map[value.ID]*engine.KindStats{}}
 	p := &plan{}
 	for _, st := range pl.Steps {
 		w, ok := st.(*lang.Where)
@@ -406,6 +408,42 @@ func (pc *planner) level(i int, bound map[string]bool) (*level, error) {
 	return lv, nil
 }
 
+// stats returns a kind's statistics, read once per plan.
+func (pc *planner) stats(k *model.Kind) (*engine.KindStats, error) {
+	if st, ok := pc.kindStats[k.ID]; ok {
+		return st, nil
+	}
+	st, err := pc.x.tx.KindStats(k)
+	if err != nil {
+		return nil, fail(pc.pl, err)
+	}
+	pc.kindStats[k.ID] = st
+	return st, nil
+}
+
+// perValue estimates from statistics how many entities an index lookup
+// with values for its first keys finds: the kind's entities over each
+// key's distinct values, assuming independent keys.
+func (pc *planner) perValue(lv *level, a *engine.Access, keys int) (int, bool) {
+	st, err := pc.stats(lv.kind)
+	if err != nil || st == nil {
+		return 0, false
+	}
+	n, err := pc.size(lv.kv.Kind, sizeCap())
+	if err != nil {
+		return 0, false
+	}
+	est := float64(max(st.Entities, n))
+	for _, k := range a.Keys[:keys] {
+		c := st.Column(k)
+		if c == nil || c.Distinct == 0 {
+			return 0, false
+		}
+		est /= float64(c.Distinct)
+	}
+	return max(1, int(est+0.5)), true
+}
+
 // narrower prefers, between equal estimates, an index with fewer keys.
 func narrower(a, b *path) bool {
 	return a.how == pathIndex && b.how == pathIndex && len(a.acc.Keys) < len(b.acc.Keys)
@@ -509,12 +547,18 @@ func (pc *planner) paths(lv *level, facts []fact) ([]*path, error) {
 				p.est = min(n, 10)
 				if a.Unique && len(ip.eqs) == len(a.Keys) {
 					p.est = 1
+				} else if est, ok := pc.perValue(lv, a, len(ip.eqs)); ok {
+					p.est = est
 				}
 			}
 			out = append(out, p)
 			continue
 		}
-		rs, ok := x.indexProbe(ip, nil)
+		pk, ok := x.probeKeys(ip, nil)
+		if !ok {
+			continue
+		}
+		rs, ok := pk.ranges()
 		if !ok {
 			continue
 		}
@@ -524,11 +568,19 @@ func (pc *planner) paths(lv *level, facts []fact) ([]*path, error) {
 		}
 		p.fixed, p.ranges, p.est = true, rs, c
 		if c >= probeCap {
+			// Too many to count: estimate from statistics, or guess.
 			n, err := size()
 			if err != nil {
 				return nil, err
 			}
 			p.est = max(probeCap, n/2)
+			st, err := pc.stats(lv.kind)
+			if err != nil {
+				return nil, err
+			}
+			if frac, ok := pk.fraction(st, a); ok {
+				p.est = max(probeCap, int(frac*float64(max(st.Entities, n))))
+			}
 		}
 		out = append(out, p)
 	}
@@ -836,10 +888,28 @@ func rangeKey(v value.Value) ([]byte, bool) {
 	return k, err == nil
 }
 
+// probeKeys are an index lookup's evaluated values, as keys: the
+// possible keys of each leading key (several for in, or an entity's two
+// encodings), then a range or prefix on the next one.
+type probeKeys struct {
+	eqs            [][][]byte
+	lo, hi, prefix []byte
+	loIncl, hiIncl bool
+}
+
 // indexProbe evaluates an index lookup into key ranges. ok is false when
 // a value can't be evaluated or an entity matching it might not be in the
 // index; the level then scans instead.
 func (x *executor) indexProbe(ip ixProbe, f *lang.Frame) ([]keyRange, bool) {
+	pk, ok := x.probeKeys(ip, f)
+	if !ok {
+		return nil, false
+	}
+	return pk.ranges()
+}
+
+func (x *executor) probeKeys(ip ixProbe, f *lang.Frame) (probeKeys, bool) {
+	var pk probeKeys
 	eval := func(pr probe) ([]value.Value, bool) {
 		v, err := x.ev.Eval(pr.e, f)
 		if err != nil {
@@ -853,36 +923,28 @@ func (x *executor) indexProbe(ip ixProbe, f *lang.Frame) ([]keyRange, bool) {
 	for _, c := range ip.checks {
 		vs, ok := eval(c)
 		if !ok {
-			return nil, false
+			return pk, false
 		}
 		for _, v := range vs {
 			if _, ok := eqKeys(v); !ok {
-				return nil, false
+				return pk, false
 			}
 		}
 	}
-	bases := [][]byte{nil}
 	for _, eq := range ip.eqs {
 		vs, ok := eval(eq)
 		if !ok {
-			return nil, false
+			return pk, false
 		}
-		var next [][]byte
+		var ks [][]byte
 		for _, v := range vs {
-			ks, ok := eqKeys(v)
+			k, ok := eqKeys(v)
 			if !ok {
-				return nil, false
+				return pk, false
 			}
-			for _, b := range bases {
-				for _, k := range ks {
-					next = append(next, append(slices.Clip(b), k...))
-				}
-			}
-			if len(next) > maxProbes {
-				return nil, false
-			}
+			ks = append(ks, k...)
 		}
-		bases = next
+		pk.eqs = append(pk.eqs, ks)
 	}
 	bound := func(pr *probe) ([]byte, bool) {
 		vs, ok := eval(*pr)
@@ -891,62 +953,94 @@ func (x *executor) indexProbe(ip ixProbe, f *lang.Frame) ([]keyRange, bool) {
 		}
 		return rangeKey(vs[0])
 	}
-	var lo, hi, pre []byte
 	if ip.lo != nil {
 		var ok bool
-		if lo, ok = bound(ip.lo); !ok {
-			return nil, false
+		if pk.lo, ok = bound(ip.lo); !ok {
+			return pk, false
 		}
+		pk.loIncl = ip.lo.incl
 	}
 	if ip.hi != nil {
 		var ok bool
-		if hi, ok = bound(ip.hi); !ok {
-			return nil, false
+		if pk.hi, ok = bound(ip.hi); !ok {
+			return pk, false
 		}
-		if lo != nil && lo[0] != hi[0] {
-			hi = nil // a type error for every entity in range; the where step reports it
+		pk.hiIncl = ip.hi.incl
+		if pk.lo != nil && pk.lo[0] != pk.hi[0] {
+			pk.hi = nil // a type error for every entity in range; the where step reports it
 		}
 	}
 	if ip.prefix != nil {
 		v, err := x.ev.Eval(ip.prefix, f)
 		if err != nil {
-			return nil, false
+			return pk, false
 		}
 		t, ok := v.(value.Text)
 		if !ok {
-			return nil, false
+			return pk, false
 		}
 		k, _ := value.Key(t)
-		pre = k[:len(k)-2] // without the terminator
+		pk.prefix = k[:len(k)-2] // without the terminator
 	}
+	return pk, true
+}
+
+// last returns the bounds of the range on the key after the leading
+// ones, alone: nil, nil when there is none.
+func (pk probeKeys) last() (lo, hi []byte) {
+	switch {
+	case pk.lo != nil || pk.hi != nil:
+		g := pk.lo
+		if g == nil {
+			g = pk.hi
+		}
+		lo, hi = []byte{g[0]}, []byte{g[0] + 1}
+		if pk.lo != nil {
+			lo = pk.lo
+			if !pk.loIncl {
+				lo = storage.PrefixEnd(lo)
+			}
+		}
+		if pk.hi != nil {
+			hi = pk.hi
+			if pk.hiIncl {
+				hi = storage.PrefixEnd(hi)
+			}
+		}
+	case pk.prefix != nil:
+		lo, hi = pk.prefix, storage.PrefixEnd(pk.prefix)
+	}
+	return lo, hi
+}
+
+// ranges turns probe keys into index ranges: one per combination of the
+// leading keys' values.
+func (pk probeKeys) ranges() ([]keyRange, bool) {
+	bases := [][]byte{nil}
+	for _, ks := range pk.eqs {
+		var next [][]byte
+		for _, b := range bases {
+			for _, k := range ks {
+				next = append(next, append(slices.Clip(b), k...))
+			}
+		}
+		if len(next) > maxProbes {
+			return nil, false
+		}
+		bases = next
+	}
+	lo, hi := pk.last()
 	var out []keyRange
 	for _, b := range bases {
-		var r keyRange
-		switch {
-		case lo != nil || hi != nil:
-			g := lo
-			if g == nil {
-				g = hi
-			}
-			r.lo = append(slices.Clip(b), g[0])
-			r.hi = append(slices.Clip(b), g[0]+1)
-			if lo != nil {
-				r.lo = append(slices.Clip(b), lo...)
-				if !ip.lo.incl {
-					r.lo = storage.PrefixEnd(r.lo)
-				}
-			}
+		r := keyRange{lo: b, hi: storage.PrefixEnd(b)}
+		if lo != nil {
+			r.lo = append(slices.Clip(b), lo...)
+			r.hi = nil
 			if hi != nil {
 				r.hi = append(slices.Clip(b), hi...)
-				if ip.hi.incl {
-					r.hi = storage.PrefixEnd(r.hi)
-				}
+			} else if len(b) > 0 {
+				r.hi = storage.PrefixEnd(b)
 			}
-		case pre != nil:
-			r.lo = append(slices.Clip(b), pre...)
-			r.hi = storage.PrefixEnd(r.lo)
-		default:
-			r.lo, r.hi = b, storage.PrefixEnd(b)
 		}
 		if r.hi != nil && bytes.Compare(r.lo, r.hi) >= 0 {
 			continue
@@ -954,6 +1048,35 @@ func (x *executor) indexProbe(ip ixProbe, f *lang.Frame) ([]keyRange, bool) {
 		out = append(out, r)
 	}
 	return out, true
+}
+
+// fraction estimates from statistics the share of a kind's entities an
+// index lookup finds, assuming its keys are independent. ok is false
+// without statistics for every key it uses.
+func (pk probeKeys) fraction(st *engine.KindStats, a *engine.Access) (float64, bool) {
+	if st == nil {
+		return 0, false
+	}
+	frac := 1.0
+	for i, ks := range pk.eqs {
+		c := st.Column(a.Keys[i])
+		if c == nil {
+			return 0, false
+		}
+		f := 0.0
+		for _, k := range ks {
+			f += c.EqFraction(k, st.Sampled)
+		}
+		frac *= min(f, 1)
+	}
+	if lo, hi := pk.last(); lo != nil {
+		c := st.Column(a.Keys[len(pk.eqs)])
+		if c == nil {
+			return 0, false
+		}
+		frac *= c.RangeFraction(lo, hi, st.Sampled)
+	}
+	return frac, true
 }
 
 // countRanges counts index entries in ranges, up to probeCap.

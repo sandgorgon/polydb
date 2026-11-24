@@ -73,10 +73,11 @@ show stats;
 // => "relation likes" | 1
 // => "relation works_at" | 1
 show stats kind Person;
-// => "name" | "text" | 2 | 0 | 2
-// => "email" | "text" | 2 | 0 | 2
-// => "age" | "int?" | 1 | 0 | 1
-// => "boss" | "ref<Person>?" | 1 | 0 | 1
+// => "(entities)" | null | 2 | null | null | "not analyzed yet: sampled 2 now"
+// => "name" | "text" | 2 | 0 | 2 | ""
+// => "email" | "text" | 2 | 0 | 2 | ""
+// => "age" | "int?" | 1 | 0 | 1 | ""
+// => "boss" | "ref<Person>?" | 1 | 0 | 1 | ""
 
 explain find Person p | where p.age > 20 | show p.name;
 // => "find" | "p: index person_age for p.age > 20" | 1
@@ -142,3 +143,13 @@ find @ann as p | show p.age;
 explain begin;
 // error syntax: explain works on queries and data statements
 // => (none)
+
+// analyze stores the statistics the planner uses (§7.5).
+create Company { name: "Acme" };
+create Company { name: "Initech" };
+analyze kind Company;
+// => "(entities)" | null | 3 | null | null | "sampled 3 at t\"2026-11-22T12:00:00Z\""
+// => "name" | "text" | 3 | 0 | 2 | "\"Acme\" (66%)"
+show stats kind Company;
+// => "(entities)" | null | 3 | null | null | "sampled 3 at t\"2026-11-22T12:00:00Z\""
+// => "name" | "text" | 3 | 0 | 2 | "\"Acme\" (66%)"

@@ -46,6 +46,7 @@ func (*CreateRole) stmt()     {}
 func (*Grant) stmt()          {}
 func (*Describe) stmt()       {}
 func (*ShowStmt) stmt()       {}
+func (*Analyze) stmt()        {}
 func (*Explain) stmt()        {}
 func (*History) stmt()        {}
 
@@ -374,6 +375,12 @@ type ShowStmt struct {
 	At
 	What string // databases, kinds, relations, formats, indexes, users, roles, sessions, grants, keys, stats
 	For  string // grants, keys: user; stats: kind
+}
+
+// Analyze is "analyze kind K": sample the kind's statistics now.
+type Analyze struct {
+	At
+	Kind string
 }
 
 type Explain struct {

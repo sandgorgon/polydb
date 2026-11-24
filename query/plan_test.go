@@ -458,3 +458,70 @@ func FuzzSearch(f *testing.F) {
 }
 
 func pick[T any](rng *rand.Rand, xs ...T) T { return xs[rng.IntN(len(xs))] }
+
+// estimate plans a query and returns each variable's estimate.
+func (s *session) estimates(src string) []int {
+	s.t.Helper()
+	st, err := lang.ParseStatement(src)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	tx := s.db.Begin(engine.TxOptions{User: "tester"})
+	defer tx.Rollback()
+	sp, _, err := Plan(&Context{Tx: tx, Handles: s.handles}, st.(*lang.Pipeline))
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	var out []int
+	for _, v := range sp.Vars {
+		out = append(out, v.Estimate)
+	}
+	return out
+}
+
+func (s *session) count(src string) int {
+	s.t.Helper()
+	res, err := s.exec(src)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	n, _ := res.Rows[0][0].(value.Int)
+	return int(n)
+}
+
+// With statistics, ranges too big to count and per-row lookups are
+// estimated from the data instead of guessed.
+func TestPlanWithStats(t *testing.T) {
+	s := planData(t, 400, 9)
+	defer func(n int) { probeCap = n }(probeCap)
+	probeCap = 20
+	ranges := []string{"p.age > 10", "p.age < 5", "p.email >= \"e3\"", "p.city = \"Oslo\" and p.age > 30"}
+	guess := map[string]int{}
+	for _, c := range ranges {
+		guess[c] = s.estimates("find Person p | where " + c)[0]
+	}
+	if _, err := s.db.Analyze("Person"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Analyze("Pet"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range ranges {
+		est := s.estimates("find Person p | where " + c)[0]
+		actual := s.count("find Person p | where " + c + " | show count()")
+		if est < actual*3/4-5 || est > actual*5/4+5 {
+			t.Errorf("%s: estimate %d (%d without statistics), actual %d", c, est, guess[c], actual)
+		}
+	}
+	// Each person's pets: the pets over the distinct owners.
+	pets := s.count("find Pet x | show count()")
+	res, err := s.exec("find Pet x | distinct x.owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owners := len(res.Rows)
+	est := s.estimates(`find Person p, Pet x | where x.owner = p and p.email = "e1"`)
+	if want := (pets + owners/2) / owners; len(est) != 2 || est[1] != max(want, 1) {
+		t.Errorf("pets per person: estimates %v, want %d per row (%d pets, %d owners)", est, want, pets, owners)
+	}
+}

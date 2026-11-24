@@ -25,6 +25,8 @@ type DB struct {
 	buildMu sync.Mutex
 
 	sweepQuit, sweepDone chan struct{} // the background history sweep
+	statsQuit, statsDone chan struct{} // the background statistics refresh
+	statChanges          sync.Map      // kind ID → *atomic.Int64: changes since its last sample
 }
 
 // Name returns the database's name.
@@ -98,6 +100,7 @@ func (db *DB) setCatalog(c *catalog.Catalog) {
 }
 
 func (db *DB) close() error {
+	db.stopStats()
 	db.stopSweeper()
 	db.stopBuilder()
 	db.wmu.Lock()

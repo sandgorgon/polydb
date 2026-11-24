@@ -105,6 +105,8 @@ func (s *env) authorize(qc *query.Context, st lang.Stmt) error {
 			}
 		}
 		return s.authorize(qc, st.Stmt)
+	case *lang.Analyze:
+		return s.need(st, security.Read, kind(st.Kind))
 	case *lang.ShowStmt:
 		if !s.eng.Security().CanSee(s.user, s.Database()) {
 			return denied(st, "you don't have permission on database %s", s.Database())

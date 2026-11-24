@@ -674,6 +674,8 @@ func (e *env) run(ctx context.Context, qc *query.Context, st lang.Stmt) (*query.
 		return e.describe(qc, st)
 	case *lang.ShowStmt:
 		return e.show(qc, st)
+	case *lang.Analyze:
+		return e.analyzeKind(qc, st)
 	case *lang.Explain:
 		return e.explain(ctx, qc, st)
 	}

@@ -210,12 +210,21 @@ func (p *parser) optDoc(bare bool) (*string, error) {
 // mean" suggestions.
 var statementWords = []string{"create", "drop", "use", "set", "define", "alter", "update", "delete", "relate",
 	"unrelate", "push", "pop", "find", "begin", "commit", "rollback", "grant", "revoke", "describe", "show",
-	"explain", "history"}
+	"explain", "history", "analyze"}
 
 // ===== statements =====
 
 func (p *parser) statement() (Stmt, error) {
 	t := p.tok()
+	if t.Kind == Ident && !t.Quoted && t.Text == "analyze" {
+		at := p.at()
+		p.advance()
+		if !p.accept("kind") {
+			return nil, p.errExpected("kind")
+		}
+		n, err := p.name("a kind name")
+		return &Analyze{At: at, Kind: n}, err
+	}
 	if t.Kind != Keyword {
 		if t.Kind == Ident && !t.Quoted {
 			if Keywords[strings.ToLower(t.Text)] {

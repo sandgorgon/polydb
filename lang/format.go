@@ -466,6 +466,9 @@ func (f *formatter) stmt(s Stmt) {
 			f.w(s.What, " ")
 			f.name(s.Name)
 		}
+	case *Analyze:
+		f.w("analyze kind ")
+		f.name(s.Kind)
 	case *ShowStmt:
 		f.w("show ", s.What)
 		if s.For != "" {

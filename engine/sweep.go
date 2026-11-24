@@ -258,36 +258,27 @@ func retention(k *model.Kind) (keep time.Duration, forever bool) {
 // startSweeper runs the history sweep every interval until the database
 // closes.
 func (db *DB) startSweeper(interval time.Duration) {
-	db.sweepQuit = make(chan struct{})
-	db.sweepDone = make(chan struct{})
-	if interval < 0 {
-		close(db.sweepDone)
-		return
-	}
-	go func() {
-		defer close(db.sweepDone)
-		t := time.NewTicker(interval)
-		defer t.Stop()
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go func() {
-			<-db.sweepQuit
-			cancel()
-		}()
-		for {
-			select {
-			case <-db.sweepQuit:
-				return
-			case <-t.C:
-				db.SweepHistory(ctx) // errors are retried on the next tick
-			}
-		}
-	}()
+	db.sweepQuit, db.sweepDone = make(chan struct{}), make(chan struct{})
+	every(interval, db.sweepQuit, db.sweepDone, func(ctx context.Context) {
+		db.SweepHistory(ctx) // errors are retried on the next round
+	})
 }
 
 func (db *DB) stopSweeper() {
 	close(db.sweepQuit)
 	<-db.sweepDone
+}
+
+// startStats refreshes statistics every interval until the database
+// closes.
+func (db *DB) startStats(interval time.Duration) {
+	db.statsQuit, db.statsDone = make(chan struct{}), make(chan struct{})
+	every(interval, db.statsQuit, db.statsDone, db.refreshStats)
+}
+
+func (db *DB) stopStats() {
+	close(db.statsQuit)
+	<-db.statsDone
 }
 
 // CountHistory counts the stored field versions and the life records of
