@@ -661,7 +661,7 @@ func (x *executor) startNodes(pn *lang.PNode, r prow) ([]start, error) {
 	var v value.Value
 	switch {
 	case pn.Handle != "":
-		v = x.ev.Handles[pn.Handle]
+		v, _ = x.handleValue(pn.Handle)
 	case pn.ID != nil:
 		v = *pn.ID
 	default:
@@ -877,7 +877,7 @@ func (x *executor) nodeMatches(pn *lang.PNode, id value.ID, r prow) (prow, bool,
 	var want value.Value
 	switch {
 	case pn.Handle != "":
-		want = x.ev.Handles[pn.Handle]
+		want, _ = x.handleValue(pn.Handle)
 	case pn.ID != nil:
 		want = *pn.ID
 	default:

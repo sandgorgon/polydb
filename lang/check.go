@@ -17,6 +17,11 @@ type Env struct {
 	Catalog *catalog.Catalog
 	// Handles are the session's handles, with what each refers to.
 	Handles map[string]Static
+	// LookupHandle, if set, finds handles instead of Handles, so a session
+	// with many handles doesn't copy them all for every statement.
+	// HandleNames lists them, for suggestions when a name is unknown.
+	LookupHandle func(name string) (Static, bool)
+	HandleNames  func() []string
 	// Params are the parameter values supplied with the statement.
 	Params map[string]value.Value
 }
@@ -782,10 +787,18 @@ func (c *checker) target(e Expr, sc *scope) (Static, error) {
 
 func (c *checker) handle(e *HandleRef) (Static, error) {
 	t, ok := c.env.Handles[e.Name]
+	if !ok && c.env.LookupHandle != nil {
+		t, ok = c.env.LookupHandle(e.Name)
+	}
 	if !ok {
 		var names []string
 		for n := range c.env.Handles {
 			names = append(names, "@"+n)
+		}
+		if c.env.HandleNames != nil {
+			for _, n := range c.env.HandleNames() {
+				names = append(names, "@"+n)
+			}
 		}
 		return Static{}, errAt(e.P, "not_found", "no handle @%s%s", e.Name, didYouMean("@"+e.Name, names))
 	}

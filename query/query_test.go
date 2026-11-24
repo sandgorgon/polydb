@@ -419,3 +419,32 @@ func FuzzExec(f *testing.F) {
 		}
 	})
 }
+
+// A statement looks up only the handles it names, so its cost doesn't
+// grow with the session's handles (a script that binds one per entity
+// would otherwise slow down quadratically).
+func TestManyHandles(t *testing.T) {
+	s := newSession(t)
+	s.run(`define kind K { a: int }; create K @k { a: 1 };`)
+	timeRun := func() time.Duration {
+		began := time.Now()
+		for range 50 {
+			if _, err := s.exec(`find @k as k | show k.a`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return time.Since(began)
+	}
+	few := timeRun()
+	k := s.handles["k"]
+	for i := range 200000 {
+		s.handles[fmt.Sprint("h", i)] = k
+	}
+	many := timeRun()
+	if many > 5*few+50*time.Millisecond {
+		t.Errorf("50 statements took %v with 200000 handles, %v with one", many, few)
+	}
+	if _, err := s.exec(`find @kk as k | show k.a`); err == nil || !strings.Contains(err.Error(), "did you mean @k") {
+		t.Errorf("unknown handle: %v", err)
+	}
+}

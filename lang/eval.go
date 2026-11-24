@@ -55,7 +55,9 @@ type Evaluator struct {
 	Graph   Graph
 	Params  map[string]value.Value
 	Handles map[string]value.Value // a ref for an entity, an ID for a relation
-	Now     time.Time
+	// LookupHandle, if set, finds handles missing from Handles.
+	LookupHandle func(name string) (value.Value, bool)
+	Now          time.Time
 
 	regexps map[string]*regexp.Regexp
 	queries map[string]*fulltext.Query // search() queries
@@ -114,6 +116,9 @@ func (ev *Evaluator) eval(e Expr, f *Frame) (value.Value, error) {
 		return ev.name(e, f)
 	case *HandleRef:
 		v, ok := ev.Handles[e.Name]
+		if !ok && ev.LookupHandle != nil {
+			v, ok = ev.LookupHandle(e.Name)
+		}
 		if !ok {
 			return nil, runErr(e, "not_found", "no handle @%s", e.Name)
 		}

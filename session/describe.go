@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -374,14 +375,18 @@ func failAt(st lang.Node, err error) error {
 // envOf builds a checker environment for statements the session checks
 // itself.
 func envOf(qc *query.Context) *lang.Env {
-	env := &lang.Env{Catalog: qc.Tx.Catalog(), Params: qc.Params, Handles: map[string]lang.Static{}}
-	for n, h := range qc.Handles {
-		form := lang.FormEntity
-		if h.Node == model.NodeRelation {
-			form = lang.FormRelation
+	env := &lang.Env{Catalog: qc.Tx.Catalog(), Params: qc.Params}
+	env.LookupHandle = func(n string) (lang.Static, bool) {
+		h, ok := qc.Handles[n]
+		if !ok {
+			return lang.Static{}, false
 		}
-		env.Handles[n] = lang.Static{Form: form}
+		if h.Node == model.NodeRelation {
+			return lang.Static{Form: lang.FormRelation}, true
+		}
+		return lang.Static{Form: lang.FormEntity}, true
 	}
+	env.HandleNames = func() []string { return slices.Collect(maps.Keys(qc.Handles)) }
 	return env
 }
 

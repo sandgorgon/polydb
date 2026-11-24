@@ -6,6 +6,8 @@ package query
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"time"
 
 	"github.com/sandgorgon/polydb/engine"
@@ -137,7 +139,7 @@ func Exec(ctx *Context, s lang.Stmt) (*Result, error) {
 func newExecutor(ctx *Context, info *lang.Info) *executor {
 	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
 	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}, hidden: map[value.ID]bool{}, access: ctx.Access}
-	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, Handles: x.handleValues(), Now: x.now}
+	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, LookupHandle: x.handleValue, Now: x.now}
 	return x
 }
 
@@ -205,8 +207,12 @@ func (x *executor) tick(n lang.Node) error {
 // env builds the checker's view of the session.
 func (ctx *Context) env() *lang.Env {
 	cat := ctx.Tx.Catalog()
-	env := &lang.Env{Catalog: cat, Params: ctx.Params, Handles: map[string]lang.Static{}}
-	for name, h := range ctx.Handles {
+	env := &lang.Env{Catalog: cat, Params: ctx.Params}
+	env.LookupHandle = func(name string) (lang.Static, bool) {
+		h, ok := ctx.Handles[name]
+		if !ok {
+			return lang.Static{}, false
+		}
 		st := lang.Static{Form: lang.FormEntity}
 		switch h.Node {
 		case model.NodeRelation:
@@ -221,19 +227,22 @@ func (ctx *Context) env() *lang.Env {
 		default:
 			st = lang.Static{Form: lang.FormNode}
 		}
-		env.Handles[name] = st
+		return st, true
 	}
+	env.HandleNames = func() []string { return slices.Collect(maps.Keys(ctx.Handles)) }
 	return env
 }
 
 // handleValues returns the handles as the evaluator sees them: entities
 // as refs, others as IDs.
-func (x *executor) handleValues() map[string]value.Value {
-	out := map[string]value.Value{}
-	for name, h := range x.ctx.Handles {
-		out[name] = nodeValue(h.ID, h.Node)
+// handleValue is what a handle evaluates to: a ref for an entity, an ID
+// for a relation.
+func (x *executor) handleValue(name string) (value.Value, bool) {
+	h, ok := x.ctx.Handles[name]
+	if !ok {
+		return nil, false
 	}
-	return out
+	return nodeValue(h.ID, h.Node), true
 }
 
 func nodeValue(id value.ID, n model.NodeKind) value.Value {
@@ -246,7 +255,6 @@ func nodeValue(id value.ID, n model.NodeKind) value.Value {
 // bindHandle records a handle and makes it visible to later expressions.
 func (x *executor) bindHandle(name string, h Handle) {
 	x.ctx.Handles[name] = h
-	x.ev.Handles[name] = nodeValue(h.ID, h.Node)
 }
 
 // fail gives an error the position of the node being executed, keeping
