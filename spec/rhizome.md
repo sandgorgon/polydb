@@ -457,6 +457,24 @@ find Person p
   | limit 50;
 ```
 
+### 7.5 How queries run
+
+A planner chooses how a `find` over kinds finds its rows. Plans change speed, never results: a query gives the same rows, in the same order, as if every kind were scanned in ID order, every combination formed, and every step run as written.
+
+- **Where conditions.** The `where` steps right after `find` are split into the conditions joined by `and`, and each one is checked as soon as the variables it reads are bound.
+- **Access paths.** For each variable, the planner picks the cheapest of:
+  - a scan of the kind;
+  - a lookup by entity (`p = @alice`, `p in [@a, @b]`, `p = o.owner`);
+  - an ordered index (a value index, a unique index or a unique field), for `=`, `in`, `<`, `<=`, `>`, `>=`, `between` and `starts with` on its fields, or on its doc path;
+  - a text index, for `search()`.
+
+  The values compared with must not depend on the variable itself: constants, parameters, handles, or variables bound earlier.
+- **When an index can't answer.** An index holds only entities that have a value, other than null, for every one of its fields. It answers a condition only when every entity the condition lets through is sure to be in it. So `= null` is never answered from an index, and a multi-field index answers a condition on its first fields only when the conditions also constrain its other fields or those fields are required. Indexes still building aren't used.
+- **Joins.** With several variables, the one with the fewest estimated entities is bound first, and the others follow through indexes or lookups that use it, so `find Customer c, Order o | where o.customer = c and c.email = $e` reads one customer and their orders.
+- **`sort … | limit n`.** Right after the where steps, this reads an index in order and stops once it has the rows the limit keeps. It applies when the sort's first key is an indexed field whose values are all in the index, or when sorting descending, where entities without a value come last.
+- **Estimates** come from counting probes: the planner counts a constant index range up to 1000 entries. Statistics may replace this later.
+- **Errors.** A row that an index or an earlier condition rules out isn't checked against the other conditions. An error that one of them would have raised on that row, such as comparing an int with text, doesn't happen.
+
 ---
 
 ## 8. Expressions
@@ -998,5 +1016,6 @@ None.
    - `create database`, `drop database` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
    - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns.
-   - `explain` on a query lists its steps with the size of each scan and any warnings; until the planner arrives (Phase 5), steps run as written. `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` runs the statement and reports each step's rows and time.
+   - `explain` on a query lists its steps with the size of each scan and any warnings (the query planner, §7.5, came in Phase 5). `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` runs the statement and reports each step's rows and time.
    - Introspection results are tables with a `section` column where they mix kinds of rows: `describe kind` lists the kind, its fields and its indexes; `describe @x` lists metadata, fields and relations in and out.
+14. Query planning (Phase 5, 2026-11-23): plans never change results or row order (§7.5). An index answers a condition only when every entity the condition passes is sure to be in it. Rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen. Estimates come from counting probes until statistics arrive.

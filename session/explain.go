@@ -15,8 +15,8 @@ import (
 )
 
 // explain shows how a statement would run (spec/rhizome.md §12). For a
-// query it lists the steps with what each starts from; there is no cost
-// based planner yet, so steps run as written. For a data statement it
+// query it lists the steps with what each starts from; it doesn't show
+// the planner's choices yet (spec/rhizome.md §7.5). For a data statement it
 // runs the statement in a scratch transaction that is rolled back, and
 // reports what would change or what blocks it. explain analyze runs the
 // statement for real and reports rows and timings.

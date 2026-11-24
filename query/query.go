@@ -54,6 +54,9 @@ type Context struct {
 	// naming one directly is a permission error. Nil allows everything
 	// (embedded mode).
 	Access Access
+	// NoPlanner runs pipelines as written, scanning every kind, without
+	// the planner (tests compare the two).
+	NoPlanner bool
 }
 
 // Access decides what the user running a statement may do with entities
@@ -122,15 +125,20 @@ func Exec(ctx *Context, s lang.Stmt) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
-	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}, hidden: map[value.ID]bool{}, access: ctx.Access}
-	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, Handles: x.handleValues(), Now: x.now}
+	x := newExecutor(ctx, info)
 	res, err := x.stmt(s)
 	if err != nil {
 		return nil, err
 	}
 	res.Warnings = append(res.Warnings, info.Warnings...)
 	return res, nil
+}
+
+func newExecutor(ctx *Context, info *lang.Info) *executor {
+	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
+	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}, hidden: map[value.ID]bool{}, access: ctx.Access}
+	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, Handles: x.handleValues(), Now: x.now}
+	return x
 }
 
 // executor runs one checked statement.
