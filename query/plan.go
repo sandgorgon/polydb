@@ -57,6 +57,7 @@ type level struct {
 	kind  *model.Kind // nil for a kindless variable
 	path  *path
 	conds []lang.Expr // checked once the variable is bound
+	rows  int         // rows bound so far, for explain analyze
 }
 
 type pathKind uint8
@@ -1021,6 +1022,7 @@ func (x *executor) runPlan(pl *lang.Pipeline, p *plan) ([]prow, error) {
 		out, done, err = x.runTop(pl, p)
 	}
 	if err == nil && !done {
+		p.levels[0].rows = 0 // an index read that ran out counts again
 		err = walk(0, srow{vars: lang.Row{}, ids: make([]value.ID, len(pl.Source.Vars))})
 	}
 	if err != nil {
@@ -1078,6 +1080,7 @@ func (x *executor) bindLevel(pl *lang.Pipeline, lv *level, r srow, id value.ID) 
 			return srow{}, false, nil
 		}
 	}
+	lv.rows++
 	return nr, true, nil
 }
 
@@ -1209,6 +1212,7 @@ func (x *executor) runTop(pl *lang.Pipeline, p *plan) (out []srow, done bool, er
 		if stopped {
 			v, err := x.ev.Eval(t.sort, &lang.Frame{Row: r.vars})
 			if err == nil && value.Compare(v, last) != 0 {
+				lv.rows-- // read only to see the ties end
 				return false
 			}
 		}

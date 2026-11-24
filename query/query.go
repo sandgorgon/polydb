@@ -56,6 +56,9 @@ type Context struct {
 	// naming one directly is a permission error. Nil allows everything
 	// (embedded mode).
 	Access Access
+	// Planned, if set, receives how a planned source ran: its plan with
+	// the rows each variable bound, for explain analyze.
+	Planned func(*SourcePlan)
 	// NoPlanner runs pipelines as written, scanning every kind, without
 	// the planner (tests compare the two).
 	NoPlanner bool

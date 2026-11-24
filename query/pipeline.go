@@ -226,6 +226,9 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, int, error) {
 	}
 	if p != nil && !x.ctx.NoPlanner {
 		rows, err := x.runPlan(pl, p)
+		if err == nil {
+			err = x.reportPlan(pl, p)
+		}
 		if err != nil {
 			return nil, nil, 0, err
 		}
