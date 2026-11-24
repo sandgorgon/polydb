@@ -1,6 +1,6 @@
 # PolyDB Plan
 
-Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) and Phase 2 (Rhizome language) complete and merged into `master`. Phase 3 (security, wire protocol, authentication, server, Go client, CLI) complete and merged into `master`. Phase 4 (persistence: write-ahead log, LSM storage, crash safety, on-disk databases and users, `polydb init`, field history) complete and merged into `master`. Phase 5 (secondary indexes built in the background, full-text search, query planner, `explain` with plans) complete on branch `phase-5`, not yet merged. Next: Phase 6.
+Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) and Phase 2 (Rhizome language) complete and merged into `master`. Phase 3 (security, wire protocol, authentication, server, Go client, CLI) complete and merged into `master`. Phase 4 (persistence: write-ahead log, LSM storage, crash safety, on-disk databases and users, `polydb init`, field history) complete and merged into `master`. Phase 5 (secondary indexes built in the background, full-text search, query planner, `explain` with plans) complete and merged into `master`. Next: Phase 6.
 Source requirements: [req.md](req.md)
 
 ---
