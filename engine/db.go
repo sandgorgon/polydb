@@ -20,6 +20,9 @@ type DB struct {
 	waiters map[string]*waitList // PopWait waiters by field key
 
 	exprs sync.Map // exprKey → *lang.Compiled, for the current catalog
+
+	build   *builder // background index builds
+	buildMu sync.Mutex
 }
 
 // Name returns the database's name.
@@ -93,6 +96,7 @@ func (db *DB) setCatalog(c *catalog.Catalog) {
 }
 
 func (db *DB) close() error {
+	db.stopBuilder()
 	db.wmu.Lock()
 	for _, wl := range db.waiters {
 		for _, w := range wl.list {

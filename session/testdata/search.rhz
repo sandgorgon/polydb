@@ -1,0 +1,55 @@
+// Full-text search (spec/rhizome.md §8.7).
+
+define kind Note { title: text, body: text? };
+create Note { title: "Café menu", body: "Coffee, tea and the résumé of our chef." };
+create Note { title: "Cafe opening", body: "Running late: the café opens at nine." };
+create Note { title: "Runner's diary", body: "I run every morning in 東京." };
+create Note { title: "Empty note" };
+define text index note_body on Note(body);
+
+show indexes;
+// => "note_body" | "Note" | "text" | "body" | "ready"
+
+// Case and accents don't matter.
+find Note n | where search(n.body, "CAFE") | show n.title;
+// => "Cafe opening"
+find Note n | where search(n.body, "resume chef") | show n.title;
+// => "Café menu"
+
+// Phrases, exclusions, prefixes and OR.
+find Note n | where search(n.body, "\"the café\"") | show n.title;
+// => "Cafe opening"
+find Note n | where search(n.body, "the -café") | sort n.title | show n.title;
+// => "Café menu"
+find Note n | where search(n.body, "run*") | sort n.title | show n.title;
+// => "Cafe opening"
+// => "Runner's diary"
+find Note n | where search(n.body, "tea OR nine") | sort n.title | show n.title;
+// => "Cafe opening"
+// => "Café menu"
+find Note n | where search(n.body, "東京") | show n.title;
+// => "Runner's diary"
+
+// No stemming: run doesn't find running.
+find Note n | where search(n.body, "run") | show n.title;
+// => "Runner's diary"
+
+// A field without a text index is searched by matching, with the same
+// rules.
+find Note n | where search(n.title, "cafe") | sort n.title | show n.title;
+// => "Cafe opening"
+// => "Café menu"
+
+// search() of an absent field is null, so neither search() nor not
+// search() picks the empty note.
+find Note n | where not search(n.body, "coffee") | sort n.title | show n.title;
+// => "Cafe opening"
+// => "Runner's diary"
+
+// Query mistakes.
+find Note n | where search(n.body, "-coffee") | show n.title;
+// error syntax: no words to find
+find Note n | where search(n.body, "tea OR") | show n.title;
+// error syntax: OR needs a word on each side
+find Note n | where search(n.body, 3) | show n.title;
+// error type

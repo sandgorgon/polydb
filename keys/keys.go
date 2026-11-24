@@ -16,7 +16,7 @@
 //	0x21 out      0x21 from type to relation   adjacency, by start node
 //	0x22 in       0x22 to type from relation   adjacency, by end node
 //	0x23 bytype   0x23 type relation           relations of each type
-//	0x30 index    (Phase 5)                    secondary index entries
+//	0x30 index    0x30 index values entity     secondary index entries (index.go)
 //	0x31 unique   0x31 owner name 0x00 values  the entity holding a unique value;
 //	                                           owner is the kind (unique field,
 //	                                           name = field) or a unique index

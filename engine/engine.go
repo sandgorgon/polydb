@@ -212,5 +212,6 @@ func openDB(e *Engine, name string, s storage.Store) (*DB, error) {
 	db := &DB{name: name, eng: e, mgr: txn.NewManager(s), waiters: map[string]*waitList{}}
 	db.cat.Store(cat)
 	db.mgr.OnCommit(db.notify)
+	db.startBuilder()
 	return db, nil
 }

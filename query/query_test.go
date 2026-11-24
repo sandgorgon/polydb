@@ -13,13 +13,13 @@ import (
 
 // session runs statements, each in its own transaction, keeping handles.
 type session struct {
-	t       *testing.T
+	t       testing.TB
 	db      *engine.DB
 	handles map[string]Handle
 	params  map[string]value.Value
 }
 
-func newSession(t *testing.T) *session {
+func newSession(t testing.TB) *session {
 	t.Helper()
 	clock := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	eng, err := engine.Open(engine.Options{Now: func() time.Time { return clock }})
@@ -327,7 +327,12 @@ func TestDefinitionsAndErrors(t *testing.T) {
 	// Things later phases add.
 	s.wantErr(`find Person p as of t"2026-01-01T00:00:00Z"`, "unsupported", "shows fields")
 	s.wantErr(`create user ramon password "x"`, "unsupported", "security")
-	s.wantErr(`find Person p | show search(p.name, "x")`, "unsupported", "full-text")
+
+	// search(): a constant query is checked before running; others when
+	// they are used.
+	s.want(`find Person p | where search(p.name, "ANN OR bo*") | sort p.name | show p.name`, `"Ann"; "Bob"`)
+	s.wantErr(`find Person p | show search(p.name, "\"open")`, "syntax", "phrase is missing")
+	s.wantErr(`find Person p | let q = "-x" | show search(p.name, q)`, "syntax", "no words to find")
 }
 
 func TestErrorPositions(t *testing.T) {
@@ -413,4 +418,33 @@ func FuzzExec(f *testing.F) {
 			}
 		}
 	})
+}
+
+// A statement looks up only the handles it names, so its cost doesn't
+// grow with the session's handles (a script that binds one per entity
+// would otherwise slow down quadratically).
+func TestManyHandles(t *testing.T) {
+	s := newSession(t)
+	s.run(`define kind K { a: int }; create K @k { a: 1 };`)
+	timeRun := func() time.Duration {
+		began := time.Now()
+		for range 50 {
+			if _, err := s.exec(`find @k as k | show k.a`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return time.Since(began)
+	}
+	few := timeRun()
+	k := s.handles["k"]
+	for i := range 200000 {
+		s.handles[fmt.Sprint("h", i)] = k
+	}
+	many := timeRun()
+	if many > 5*few+50*time.Millisecond {
+		t.Errorf("50 statements took %v with 200000 handles, %v with one", many, few)
+	}
+	if _, err := s.exec(`find @kk as k | show k.a`); err == nil || !strings.Contains(err.Error(), "did you mean @k") {
+		t.Errorf("unknown handle: %v", err)
+	}
 }

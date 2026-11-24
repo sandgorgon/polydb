@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sandgorgon/polydb/fulltext"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -122,6 +123,22 @@ func textNull(e Node, y value.Value) (value.Value, error) {
 		return value.Null, nil
 	}
 	return nil, runErr(e, "type", "contains on text needs text, not %s", typeName(y))
+}
+
+// searchQuery parses a search() query, cached for the statement.
+func (ev *Evaluator) searchQuery(q string) (*fulltext.Query, error) {
+	if pq, ok := ev.queries[q]; ok {
+		return pq, nil
+	}
+	pq, err := fulltext.Parse(q)
+	if err != nil {
+		return nil, err
+	}
+	if ev.queries == nil {
+		ev.queries = map[string]*fulltext.Query{}
+	}
+	ev.queries[q] = pq
+	return pq, nil
 }
 
 func (ev *Evaluator) regexp(pattern string) (*regexp.Regexp, error) {

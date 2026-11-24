@@ -24,8 +24,9 @@ type Tx struct {
 	user string
 	now  time.Time
 
-	guarded bool // the catalog version key is guarded
-	failed  error
+	guarded    bool // the catalog version key is guarded
+	failed     error
+	startBuild bool // it defined an index to build in the background
 }
 
 // Catalog returns the catalog as this transaction sees it, including its
@@ -65,6 +66,9 @@ func (tx *Tx) Commit() error {
 	}
 	if newCat != nil {
 		tx.db.setCatalog(newCat)
+	}
+	if tx.startBuild {
+		tx.db.kickBuilder()
 	}
 	return nil
 }
@@ -406,6 +410,9 @@ func (tx *Tx) sideKeys(kind *model.Kind, e *model.Entity, fields map[string]*mod
 		for _, ix := range tx.Catalog().IndexesOn(kind.ID) {
 			if k, ok := uniqueIndexKey(ix, fields); ok {
 				out[string(k)] = e.ID[:]
+			}
+			for k, v := range tx.indexEntries(ix, e.ID, fields) {
+				out[k] = v
 			}
 		}
 	}

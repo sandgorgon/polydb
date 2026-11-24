@@ -620,6 +620,32 @@ func (tx *Tx) CountEntities(kind string) (int, error) {
 	return tx.count(keys.Members(k.ID))
 }
 
+// CountEntitiesUpTo counts the entities of a kind, or every entity for
+// "", stopping at max.
+func (tx *Tx) CountEntitiesUpTo(kind string, max int) (int, error) {
+	prefix := keys.Prefix(keys.PrefixEntity)
+	if kind != "" {
+		k, ok := tx.Catalog().Kind(kind)
+		if !ok {
+			return 0, tx.unknownKind(kind)
+		}
+		prefix = keys.Members(k.ID)
+	}
+	n := 0
+	stop := errorf(CodeInternal, "stop")
+	err := tx.scan(prefix, false, func(_, _ []byte) error {
+		if n >= max {
+			return stop
+		}
+		n++
+		return nil
+	})
+	if err == stop {
+		err = nil
+	}
+	return n, err
+}
+
 // CountRelations counts the relations of a type, or every relation for "".
 func (tx *Tx) CountRelations(typ string) (int, error) {
 	if typ == "" {

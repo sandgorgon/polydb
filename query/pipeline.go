@@ -77,7 +77,7 @@ func (x *executor) pipeline(pl *lang.Pipeline) ([]prow, []string, int, bool, err
 		defer restore()
 	}
 	began := time.Now()
-	rows, names, err := x.source(pl)
+	rows, names, consumed, err := x.source(pl)
 	if err != nil {
 		return nil, nil, 0, false, err
 	}
@@ -85,7 +85,13 @@ func (x *executor) pipeline(pl *lang.Pipeline) ([]prow, []string, int, bool, err
 		x.ctx.Trace(nil, len(rows), time.Since(began))
 	}
 	affected, dataOnly := 0, false
-	for _, st := range pl.Steps {
+	for i, st := range pl.Steps {
+		if i < consumed { // the source applied it
+			if x.ctx.Trace != nil {
+				x.ctx.Trace(st, len(rows), 0)
+			}
+			continue
+		}
 		began = time.Now()
 		if x.info.Grouped[st] {
 			rows = []prow{collapse(rows)}
@@ -198,19 +204,39 @@ func collapse(rows []prow) prow {
 
 // ===== Source =====
 
-func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
+// source produces a pipeline's first rows. It returns the number of
+// leading where steps it applied itself.
+func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, int, error) {
 	src := &pl.Source
 	if src.Start != nil {
 		id, n, err := x.target(src.Start, nil)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, 0, err
 		}
 		if n == model.NodeEntity {
 			if err := x.needVisible(src.Start, id); err != nil {
-				return nil, nil, err
+				return nil, nil, 0, err
 			}
 		}
-		return []prow{{vars: lang.Row{src.StartAs: nodeValue(id, n)}}}, []string{src.StartAs}, nil
+		return []prow{{vars: lang.Row{src.StartAs: nodeValue(id, n)}}}, []string{src.StartAs}, 0, nil
+	}
+	p, err := x.planSource(pl)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	if p != nil && !x.ctx.NoPlanner {
+		rows, err := x.runPlan(pl, p)
+		if err == nil {
+			err = x.reportPlan(pl, p)
+		}
+		if err != nil {
+			return nil, nil, 0, err
+		}
+		var names []string
+		for _, kv := range src.Vars {
+			names = append(names, kv.Var)
+		}
+		return rows, names, p.consumed, nil
 	}
 	rows := []prow{{vars: lang.Row{}}}
 	var names []string
@@ -219,7 +245,7 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
 		if src.In != nil {
 			var err error
 			if cands, err = x.inList(src.In, kv.Kind); err != nil {
-				return nil, nil, err
+				return nil, nil, 0, err
 			}
 		} else {
 			var stop error
@@ -227,7 +253,7 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
 			if kv.Kind != "" {
 				k, _ := x.tx.Catalog().Kind(kv.Kind)
 				if err := x.need(pl, security.Read, k); err != nil {
-					return nil, nil, err
+					return nil, nil, 0, err
 				}
 			} else {
 				filter = x.ctx.Access != nil
@@ -255,10 +281,10 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
 				return true
 			})
 			if stop != nil {
-				return nil, nil, stop
+				return nil, nil, 0, stop
 			}
 			if err != nil {
-				return nil, nil, fail(pl, err)
+				return nil, nil, 0, fail(pl, err)
 			}
 		}
 		var next []prow
@@ -270,7 +296,7 @@ func (x *executor) source(pl *lang.Pipeline) ([]prow, []string, error) {
 		rows = next
 		names = append(names, kv.Var)
 	}
-	return rows, names, nil
+	return rows, names, 0, nil
 }
 
 // inList evaluates find … in: entities (as refs) from a collection of
@@ -638,7 +664,7 @@ func (x *executor) startNodes(pn *lang.PNode, r prow) ([]start, error) {
 	var v value.Value
 	switch {
 	case pn.Handle != "":
-		v = x.ev.Handles[pn.Handle]
+		v, _ = x.handleValue(pn.Handle)
 	case pn.ID != nil:
 		v = *pn.ID
 	default:
@@ -854,7 +880,7 @@ func (x *executor) nodeMatches(pn *lang.PNode, id value.ID, r prow) (prow, bool,
 	var want value.Value
 	switch {
 	case pn.Handle != "":
-		want = x.ev.Handles[pn.Handle]
+		want, _ = x.handleValue(pn.Handle)
 	case pn.ID != nil:
 		want = *pn.ID
 	default:

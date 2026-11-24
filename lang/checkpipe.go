@@ -413,6 +413,10 @@ func (c *checker) edge(e *Edge, sc *scope, match bool) error {
 
 // ===== Helpers =====
 
+// Walk calls fn for e and its subexpressions, depth first, descending
+// into an expression's parts only while fn returns true for it.
+func Walk(e Expr, fn func(Expr) bool) { walk(e, fn) }
+
 // walk calls fn for e and its subexpressions, depth first, while fn
 // returns true.
 func walk(e Expr, fn func(Expr) bool) {

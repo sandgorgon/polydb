@@ -43,10 +43,12 @@ func TestParamsAndExplainAnalyze(t *testing.T) {
 	}
 	var steps []string
 	for _, row := range res[0].Rows {
-		steps = append(steps, row[0].(value.Value).String()+"="+row[1].(value.Value).String())
+		steps = append(steps, row[0].(value.Value).String()+" "+row[1].(value.Value).String()+"="+row[3].(value.Value).String())
 	}
-	if got := strings.Join(steps, " "); got != `"source"=3 "where where k.a > 2"=2 "show show k.a"=2 "total"=2` {
-		t.Errorf("explain analyze: %s", got)
+	want := `"find" "k: scan kind K"=2 "source" "the rows the source produced"=2 ` +
+		`"where" "where k.a > 2 (checked at the source)"=null "show" "show k.a"=2 "total" ""=2`
+	if got := strings.Join(steps, " "); got != want {
+		t.Errorf("explain analyze:\n got %s\nwant %s", got, want)
 	}
 }
 

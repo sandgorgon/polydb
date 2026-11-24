@@ -426,10 +426,16 @@ func (tx *Tx) DefineIndex(name, kind string, unique, text bool, ks ...model.Inde
 		return value.ID{}, err
 	}
 	id, err := e.DefineIndex(model.Index{Name: name, Kind: k.ID, Unique: unique, Text: text, Keys: ks})
-	if err != nil || !unique {
+	if err != nil {
 		return id, wrap(CodeConstraint, err)
 	}
 	ix, _ := tx.Catalog().IndexByID(id)
+	if !unique {
+		if err := tx.buildIndex(ix); err != nil {
+			return value.ID{}, tx.fail(err)
+		}
+		return id, nil
+	}
 	var members []value.ID
 	if err := tx.scan(keys.Members(k.ID), false, func(mk, _ []byte) error {
 		_, eid, err := keys.ParseMember(mk)
@@ -473,6 +479,10 @@ func (tx *Tx) DropIndex(name string) error {
 	if ix.Unique {
 		r := keys.Range(keys.UniquePrefix(ix.ID, ""))
 		tx.t.DeleteRange(r.Lower, r.Upper)
+	} else {
+		r := keys.Range(keys.IndexPrefix(ix.ID))
+		tx.t.DeleteRange(r.Lower, r.Upper)
+		tx.t.Delete(keys.IndexBuild(ix.ID))
 	}
 	return nil
 }

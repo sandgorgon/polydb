@@ -15,8 +15,8 @@ import (
 )
 
 // explain shows how a statement would run (spec/rhizome.md §12). For a
-// query it lists the steps with what each starts from; there is no cost
-// based planner yet, so steps run as written. For a data statement it
+// query it shows the planner's choices (spec/rhizome.md §7.5) and the
+// steps. For a data statement it
 // runs the statement in a scratch transaction that is rolled back, and
 // reports what would change or what blocks it. explain analyze runs the
 // statement for real and reports rows and timings.
@@ -45,49 +45,88 @@ func (s *env) explain(ctx context.Context, qc *query.Context, st *lang.Explain) 
 	return nil, sessionErr(st, "syntax", "explain works on queries and data statements")
 }
 
-// plan describes a pipeline's steps without running it.
+// plan describes how a pipeline would run, without running it: how the
+// source finds each variable (spec/rhizome.md §7.5) with its estimated
+// entities, then the steps.
 func (s *env) plan(qc *query.Context, pl *lang.Pipeline) (*query.Result, error) {
-	info, err := lang.Check(envOf(qc), pl)
+	sp, info, err := query.Plan(qc, pl)
 	if err != nil {
 		return nil, err
 	}
-	tx := qc.Tx
-	r := table("step", "detail")
+	r := table("step", "detail", "estimate")
+	consumed, err := s.sourceRows(qc, pl, sp, func(step, detail string, est any) {
+		add(r, step, detail, est)
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i, step := range pl.Steps {
+		add(r, stepName(step), stepDetail(info, step, i < consumed), nil)
+	}
+	return withWarnings(r, info, sp, func(msg string) { add(r, "warning", msg, nil) }), nil
+}
+
+// sourceRows describes a pipeline's source, and returns how many where
+// steps it applies.
+func (s *env) sourceRows(qc *query.Context, pl *lang.Pipeline, sp *query.SourcePlan, row func(step, detail string, est any)) (int, error) {
 	src := pl.Source
 	switch {
 	case src.Start != nil:
-		add(r, "start", "at "+lang.FormatExpr(src.Start)+" as "+src.StartAs)
+		row("find", "start at "+lang.FormatExpr(src.Start)+" as "+src.StartAs, 1)
 	case src.In != nil:
-		add(r, "start", "the entities in "+lang.FormatExpr(src.In))
-	default:
+		row("find", "the entities in "+lang.FormatExpr(src.In), nil)
+	case sp == nil: // as of: every kind is scanned
 		for _, kv := range src.Vars {
-			n, err := tx.CountEntities(kv.Kind)
+			n, err := qc.Tx.CountEntities(kv.Kind)
 			if err != nil {
-				return nil, failAt(pl, err)
+				return 0, failAt(pl, err)
 			}
+			what := "scan kind " + kv.Kind
 			if kv.Kind == "" {
-				add(r, "scan", fmt.Sprintf("every entity as %s (%d, a full scan)", kv.Var, n))
-			} else {
-				add(r, "scan", fmt.Sprintf("kind %s as %s (%s)", kv.Kind, kv.Var, count(n, "entity", "entities")))
+				what = "scan every entity"
 			}
+			row("find", kv.Var+": "+what, n)
 		}
-		if len(src.Vars) > 1 {
-			add(r, "join", "every combination of the scans (a cross product)")
+	default:
+		for _, v := range sp.Vars {
+			est := any(v.Estimate)
+			if v.PerRow {
+				est = fmt.Sprintf("%d per row", v.Estimate)
+			}
+			row("find", v.Detail, est)
 		}
+		if sp.Top != "" {
+			row("top", sp.Top, sp.TopLimit)
+		}
+		return sp.Consumed, nil
 	}
-	for _, step := range pl.Steps {
-		detail := lang.FormatStep(step)
-		if info.Grouped[step] {
-			detail += " (aggregates every row)"
-		}
-		add(r, stepName(step), detail)
+	return 0, nil
+}
+
+func stepDetail(info *lang.Info, step lang.Step, atSource bool) string {
+	detail := lang.FormatStep(step)
+	if info.Grouped[step] {
+		detail += " (aggregates every row)"
 	}
-	res := r
-	res.Warnings = info.Warnings
+	if atSource {
+		detail += " (checked at the source)"
+	}
+	return detail
+}
+
+// withWarnings adds the checker's and the planner's warnings to a result.
+func withWarnings(r *query.Result, info *lang.Info, sp *query.SourcePlan, row func(string)) *query.Result {
+	r.Warnings = append(r.Warnings, info.Warnings...)
 	for _, w := range info.Warnings {
-		add(r, "warning", w.Msg)
+		row(w.Msg)
 	}
-	return res, nil
+	if sp != nil {
+		for _, w := range sp.Warnings {
+			r.Warnings = append(r.Warnings, &lang.Error{Code: "warning", Msg: w})
+			row(w)
+		}
+	}
+	return r
 }
 
 func stepName(st lang.Step) string {
@@ -125,25 +164,69 @@ func stepName(st lang.Step) string {
 	return "step"
 }
 
-// analyze runs a pipeline and reports each step's rows and time.
+// analyze runs a pipeline and reports, next to the plan's estimates,
+// the rows each variable and step produced and the time each step took.
 func (s *env) analyze(qc *query.Context, pl *lang.Pipeline) (*query.Result, error) {
-	r := table("step", "rows", "time")
+	type stepRun struct {
+		rows int
+		d    time.Duration
+	}
+	var source *stepRun
+	runs := map[lang.Step]stepRun{}
+	var planned *query.SourcePlan
 	traced := *qc
 	traced.Trace = func(step lang.Step, rows int, d time.Duration) {
-		name := "source"
-		if step != nil {
-			name = stepName(step) + " " + lang.FormatStep(step)
+		if step == nil {
+			source = &stepRun{rows, d}
+		} else {
+			runs[step] = stepRun{rows, d}
 		}
-		add(r, name, rows, value.Duration(d))
 	}
+	traced.Planned = func(sp *query.SourcePlan) { planned = sp }
 	began := time.Now()
 	res, err := query.Exec(&traced, pl)
 	if err != nil {
 		return nil, err
 	}
-	add(r, "total", len(res.Rows), value.Duration(time.Since(began)))
-	r.Warnings = res.Warnings
-	return r, nil
+	total := time.Since(began)
+	_, info, err := query.Plan(qc, pl)
+	if err != nil {
+		return nil, err
+	}
+	r := table("step", "detail", "estimate", "rows", "time")
+	if planned != nil {
+		for _, v := range planned.Vars {
+			est := any(v.Estimate)
+			if v.PerRow {
+				est = fmt.Sprintf("%d per row", v.Estimate)
+			}
+			add(r, "find", v.Detail, est, v.Rows, nil)
+		}
+		if planned.Top != "" {
+			add(r, "top", planned.Top, planned.TopLimit, nil, nil)
+		}
+	} else if _, err := s.sourceRows(qc, pl, nil, func(step, detail string, est any) {
+		add(r, step, detail, est, nil, nil)
+	}); err != nil {
+		return nil, err
+	}
+	if source != nil {
+		add(r, "source", "the rows the source produced", nil, source.rows, value.Duration(source.d))
+	}
+	consumed := 0
+	if planned != nil {
+		consumed = planned.Consumed
+	}
+	for i, step := range pl.Steps {
+		run, ok := runs[step]
+		var rows, d any
+		if ok && i >= consumed {
+			rows, d = run.rows, value.Duration(run.d)
+		}
+		add(r, stepName(step), stepDetail(info, step, i < consumed), nil, rows, d)
+	}
+	add(r, "total", "", nil, len(res.Rows), value.Duration(total))
+	return withWarnings(r, info, planned, func(msg string) { add(r, "warning", msg, nil, nil, nil) }), nil
 }
 
 // dryRun runs a data statement in a scratch transaction and reports what

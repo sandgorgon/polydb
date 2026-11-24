@@ -457,6 +457,24 @@ find Person p
   | limit 50;
 ```
 
+### 7.5 How queries run
+
+A planner chooses how a `find` over kinds finds its rows. Plans change speed, never results: a query gives the same rows, in the same order, as if every kind were scanned in ID order, every combination formed, and every step run as written.
+
+- **Where conditions.** The `where` steps right after `find` are split into the conditions joined by `and`, and each one is checked as soon as the variables it reads are bound.
+- **Access paths.** For each variable, the planner picks the cheapest of:
+  - a scan of the kind;
+  - a lookup by entity (`p = @alice`, `p in [@a, @b]`, `p = o.owner`);
+  - an ordered index (a value index, a unique index or a unique field), for `=`, `in`, `<`, `<=`, `>`, `>=`, `between` and `starts with` on its fields, or on its doc path;
+  - a text index, for `search()`.
+
+  The values compared with must not depend on the variable itself: constants, parameters, handles, or variables bound earlier.
+- **When an index can't answer.** An index holds only entities that have a value, other than null, for every one of its fields. It answers a condition only when every entity the condition lets through is sure to be in it. So `= null` is never answered from an index, and a multi-field index answers a condition on its first fields only when the conditions also constrain its other fields or those fields are required. Indexes still building aren't used.
+- **Joins.** With several variables, the one with the fewest estimated entities is bound first, and the others follow through indexes or lookups that use it, so `find Customer c, Order o | where o.customer = c and c.email = $e` reads one customer and their orders.
+- **`sort … | limit n`.** Right after the where steps, this reads an index in order and stops once it has the rows the limit keeps. It applies when the sort's first key is an indexed field whose values are all in the index, or when sorting descending, where entities without a value come last.
+- **Estimates** come from counting probes: the planner counts a constant index range up to 1000 entries. Statistics may replace this later.
+- **Errors.** A row that an index or an earlier condition rules out isn't checked against the other conditions. An error that one of them would have raised on that row, such as comparing an int with text, doesn't happen.
+
 ---
 
 ## 8. Expressions
@@ -527,6 +545,25 @@ find Person p
   - For a **base format** the result is `any`. Its type is checked at run time.
   - For a **derived format based on json**, and for a **table format**, the result has the type declared in the format's shape. For `doc<invoice>`, `->total` is `decimal(12,2)` and `->lines->[0]->qty` is `int`, so type errors are reported before the query runs, and a step the shape doesn't declare is an error. Derived formats on other bases give `any`, because their steps (child elements, rows) don't follow the shape's fields.
 - Paths in `define index` (`config->server->port`) use the same rules.
+
+### 8.7 Full-text search
+
+`search(field, "query")` is true when the field's text matches the query. A `define text index` on the field makes it fast; without one the text is matched directly, with exactly the same rules.
+
+- **Words** are runs of letters, digits and combining marks. They are compared with case ignored and, for Latin, Greek and Cyrillic letters, accents ignored, so `"Résumé"` matches `resume` (marks in other scripts are part of the word). Chinese, Japanese and Korean characters are each a word of their own. There is no stemming: `run` doesn't match `running` (use `run*`).
+- **Queries:**
+
+  | Query | Matches text that has |
+  |---|---|
+  | `ann smith` | both words, anywhere |
+  | `"ann smith"` | the phrase: the words next to each other, in order |
+  | `-smith` | not the word (a query needs at least one word to find) |
+  | `smi*` | a word starting with `smi` |
+  | `ann OR anna` | either; OR binds tighter than the implicit AND, so `smith ann OR anna` is smith and (ann or anna) |
+
+  A query word that splits into several words (`e-mail`, `東京`) is a phrase. A malformed query is a `syntax` error: when the query is a constant, before the statement runs.
+- `search()` of an absent or null field is null, like other functions.
+- A text index covers one text field. Relevance ranking may come later; text indexes already store word positions and counts.
 
 ---
 
@@ -604,7 +641,7 @@ show kinds;  show relations;  show formats;  show indexes;
 show stats;                         // database size, counts per kind and relation type
 show stats kind Person;             // value distributions used by the planner
 show sessions;                      // admin: who is connected and what's running
-explain find Person p | where p.age > 30;            // planned steps, indexes used, estimates
+explain find Person p | where p.age > 30;            // how each variable is found, estimates, steps, warnings
 explain analyze find Person p | where p.age > 30;    // runs it; shows actual counts and timings
 ```
 
@@ -979,5 +1016,12 @@ None.
    - `create database`, `drop database` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
    - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns.
-   - `explain` on a query lists its steps with the size of each scan and any warnings; until the planner arrives (Phase 5), steps run as written. `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` runs the statement and reports each step's rows and time.
+   - `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` on one runs it and reports the rows it changed and the time.
+   - `explain` on a query (Phase 5) shows the plan as a table with the columns `step`, `detail` and `estimate`:
+     - a `find` row per variable, in the order they're bound. It says how the variable is found (`scan kind Person`, `lookup for p = @ann`, `index person_age for p.age > 30`, `text index …`, or `…, for each p` when it uses an earlier variable) and the estimated entities (`n per row` for those).
+     - a `top` row when `sort … limit` reads an index in order and stops early;
+     - then the steps, where steps the source applies marked `(checked at the source)`;
+     - then warnings: a scan of every entity, variables no condition links (a cross product), `search()` without a text index, and an index that is still building and so isn't used.
+   - `explain analyze` on a query runs it and adds `rows` and `time` columns: the rows each variable bound and each step produced, and each step's time.
    - Introspection results are tables with a `section` column where they mix kinds of rows: `describe kind` lists the kind, its fields and its indexes; `describe @x` lists metadata, fields and relations in and out.
+14. Query planning (Phase 5, 2026-11-23): plans never change results or row order (§7.5). An index answers a condition only when every entity the condition passes is sure to be in it. Rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen. Estimates come from counting probes until statistics arrive.
