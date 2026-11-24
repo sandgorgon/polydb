@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/sandgorgon/polydb/catalog"
+	"github.com/sandgorgon/polydb/storage/lsm"
 	"github.com/sandgorgon/polydb/txn"
 )
 
@@ -112,4 +113,14 @@ func (db *DB) close() error {
 	}
 	db.wmu.Unlock()
 	return db.mgr.Store().Close()
+}
+
+// StoreMetrics returns the on-disk store's shape and work since it
+// opened; ok is false for a database kept in memory.
+func (db *DB) StoreMetrics() (m lsm.Metrics, ok bool) {
+	s, ok := db.mgr.Store().(*lsm.Store)
+	if !ok {
+		return m, false
+	}
+	return s.Metrics(), true
 }

@@ -193,6 +193,9 @@ func (s *Store) flush(imm *memtable) error {
 		o.abandon()
 		return err
 	}
+	for _, m := range o.made {
+		s.flushBytes.Add(m.size)
+	}
 	return s.log.RemoveBefore(imm.logSeg)
 }
 
@@ -224,14 +227,16 @@ func (s *Store) levelTarget(level int) uint64 {
 	return t
 }
 
-// pick chooses the most urgent compaction, or nil.
+// pick chooses the most urgent compaction whose levels no running
+// compaction uses, or nil. The caller holds cmu.
 func (s *Store) pick(v *version) *compaction {
 	best, level := 1.0, -1
-	if score := float64(len(v.levels[0])) / float64(s.o.L0CompactionTrigger); score >= best {
+	free := func(l int) bool { return !s.busy[l] && !s.busy[l+1] }
+	if score := float64(len(v.levels[0])) / float64(s.o.L0CompactionTrigger); score >= best && free(0) {
 		best, level = score, 0
 	}
 	for l := 1; l < numLevels-1; l++ {
-		if score := float64(v.levelSize(l)) / float64(s.levelTarget(l)); score >= best {
+		if score := float64(v.levelSize(l)) / float64(s.levelTarget(l)); score >= best && free(l) {
 			best, level = score, l
 		}
 	}
@@ -362,6 +367,10 @@ func (s *Store) compact(c *compaction) error {
 	}
 	for _, t := range o.made {
 		e.added = append(e.added, describe(c.out(), t))
+	}
+	s.compactions.Add(1)
+	for _, m := range o.made {
+		s.compactBytes.Add(m.size)
 	}
 	if err := s.logAndApply(e, o.made, nil); err != nil {
 		o.abandon()

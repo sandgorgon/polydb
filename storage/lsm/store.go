@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sandgorgon/polydb/storage"
 	"github.com/sandgorgon/polydb/storage/sstable"
@@ -32,10 +33,14 @@ type Options struct {
 	TableSize           int64 // target size of compacted tables; default 8 MiB
 	LevelBaseSize       int64 // target size of level 1; ×10 per level; default 64 MiB
 	L0CompactionTrigger int   // level-0 tables that start a compaction; default 4
-	L0StopWrites        int   // level-0 tables that stall writes; default 12
+	L0StopWrites        int   // level-0 tables that stall writes; default 24 (bloom filters keep reads cheap)
 	CacheSize           int64 // block cache size; default 64 MiB
 	BlockSize           int   // table block size; default 4 KiB
 	NoMmap              bool  // read tables with ReadAt, through the cache
+	// MaxCompactions is how many compactions may run at once, on
+	// different levels; default 2, so that a long compaction between
+	// deeper levels doesn't hold up level 0, which writes wait on.
+	MaxCompactions int
 }
 
 func (o *Options) defaults() {
@@ -58,7 +63,10 @@ func (o *Options) defaults() {
 		o.L0CompactionTrigger = 4
 	}
 	if o.L0StopWrites <= 0 {
-		o.L0StopWrites = 12
+		o.L0StopWrites = 24
+	}
+	if o.MaxCompactions <= 0 {
+		o.MaxCompactions = 2
 	}
 }
 
@@ -92,6 +100,11 @@ type Store struct {
 	published atomic.Uint64
 	failed    error // a write failed: the store takes no more writes
 
+	// Counters since the store opened (Metrics).
+	stalls, stallNanos       atomic.Int64
+	flushBytes, compactBytes atomic.Uint64
+	compactions              atomic.Int64
+
 	// vmu serializes version edits.
 	vmu        sync.Mutex
 	nextFile   atomic.Uint64
@@ -99,7 +112,12 @@ type Store struct {
 	logNum     uint64
 	editBytes  int
 
-	cmu        sync.Mutex // one compaction at a time
+	// cmu guards which levels compactions are using and where each
+	// level's compactions take turns. A compaction from level l uses l
+	// and l+1; compactions run at once only on levels apart.
+	cmu        sync.Mutex
+	cmuCond    *sync.Cond // on cmu: a compaction finished
+	busy       [numLevels]bool
 	compactPtr [numLevels][]byte
 
 	snapMu sync.Mutex
@@ -233,9 +251,12 @@ func Open(o Options) (_ *Store, err error) {
 	}
 	s.next = last + 1
 	s.published.Store(last)
-	s.wg.Add(2)
+	s.cmuCond = sync.NewCond(&s.cmu)
+	s.wg.Add(1 + o.MaxCompactions)
 	go s.flusher()
-	go s.compactor()
+	for range o.MaxCompactions {
+		go s.compactor()
+	}
 	notify(s.compactCh)
 	return s, nil
 }
@@ -408,17 +429,26 @@ func (s *Store) compactor() {
 
 func (s *Store) maybeCompact() (bool, error) {
 	s.cmu.Lock()
-	defer s.cmu.Unlock()
 	rs, ok := s.acquire()
 	if !ok {
+		s.cmu.Unlock()
 		return false, nil
 	}
 	defer rs.v.unref()
 	c := s.pick(rs.v)
 	if c == nil {
+		s.cmu.Unlock()
 		return false, nil
 	}
-	return true, s.compact(c)
+	s.busy[c.level], s.busy[c.out()] = true, true
+	s.cmu.Unlock()
+	err := s.compact(c)
+	s.cmu.Lock()
+	s.busy[c.level], s.busy[c.out()] = false, false
+	s.cmuCond.Broadcast()
+	s.cmu.Unlock()
+	notify(s.compactCh) // another compactor may find work its levels blocked
+	return true, err
 }
 
 // waitPublished waits until every batch up to seq is durable and
@@ -443,6 +473,11 @@ func (s *Store) waitPublished(seq uint64) error {
 // is waiting to flush or compact (a write stall).
 func (s *Store) rotateMemtable() error {
 	s.stateMu.Lock()
+	var stalled time.Time
+	if len(s.imms) >= s.o.MaxImmutable || len(s.cur.levels[0]) >= s.o.L0StopWrites {
+		stalled = time.Now()
+		s.stalls.Add(1)
+	}
 	for len(s.imms) >= s.o.MaxImmutable || len(s.cur.levels[0]) >= s.o.L0StopWrites {
 		if s.closed.Load() {
 			s.stateMu.Unlock()
@@ -455,6 +490,9 @@ func (s *Store) rotateMemtable() error {
 		s.stallCond.Wait()
 	}
 	s.stateMu.Unlock()
+	if !stalled.IsZero() {
+		s.stallNanos.Add(int64(time.Since(stalled)))
+	}
 	seg, err := s.log.Rotate()
 	if err != nil {
 		s.fail(err)
@@ -582,8 +620,22 @@ func (s *Store) CompactAll() error {
 	if err := s.Flush(); err != nil {
 		return err
 	}
+	// Wait for running compactions, and keep new ones out.
 	s.cmu.Lock()
-	defer s.cmu.Unlock()
+	for slices.Contains(s.busy[:], true) {
+		s.cmuCond.Wait()
+	}
+	for l := range s.busy {
+		s.busy[l] = true
+	}
+	s.cmu.Unlock()
+	defer func() {
+		s.cmu.Lock()
+		clear(s.busy[:])
+		s.cmuCond.Broadcast()
+		s.cmu.Unlock()
+		notify(s.compactCh)
+	}()
 	for l := range numLevels {
 		rs, ok := s.acquire()
 		if !ok {
@@ -611,16 +663,25 @@ type LevelMetrics struct {
 	Bytes  uint64
 }
 
-// Metrics describes the store's shape.
+// Metrics describes the store's shape, and its work since it opened.
 type Metrics struct {
 	Levels        [numLevels]LevelMetrics
 	Memtables     int // including the active one
 	MemtableBytes int64
+
+	Stalls       int64         // writes that waited for flushes or compactions
+	StallTime    time.Duration // how long they waited in all
+	FlushBytes   uint64        // table bytes written by flushes
+	CompactBytes uint64        // table bytes written by compactions
+	Compactions  int64
 }
 
 // Metrics returns the store's current shape.
 func (s *Store) Metrics() Metrics {
-	var m Metrics
+	m := Metrics{
+		Stalls: s.stalls.Load(), StallTime: time.Duration(s.stallNanos.Load()),
+		FlushBytes: s.flushBytes.Load(), CompactBytes: s.compactBytes.Load(), Compactions: s.compactions.Load(),
+	}
 	rs, ok := s.acquire()
 	if !ok {
 		return m

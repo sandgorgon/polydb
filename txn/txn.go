@@ -19,6 +19,7 @@ package txn
 import (
 	"bytes"
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 
@@ -42,9 +43,6 @@ func (s span) has(k []byte) bool { return storage.InRange(k, s.lo, s.hi) }
 func (s span) overlaps(o span) bool {
 	return (s.hi == nil || bytes.Compare(o.lo, s.hi) < 0) && (o.hi == nil || bytes.Compare(s.lo, o.hi) < 0)
 }
-
-// pointSpan is the range holding exactly key k.
-func pointSpan(k []byte) span { return span{k, append(slices.Clip(k), 0)} }
 
 // commitRecord is what a committed transaction wrote.
 type commitRecord struct {
@@ -123,7 +121,8 @@ type Txn struct {
 	writes map[string]*entry
 	ranges []span // range deletions
 	sorted []string
-	guards []span
+	guards []span              // guarded ranges
+	points map[string]struct{} // guarded single keys
 }
 
 // Seq returns the sequence number of the snapshot the transaction reads.
@@ -233,7 +232,10 @@ func (t *Txn) Guard(lo, hi []byte) {
 // GuardKey guards a single key.
 func (t *Txn) GuardKey(key []byte) {
 	if !t.readOnly {
-		t.guards = append(t.guards, pointSpan(bytes.Clone(key)))
+		if t.points == nil {
+			t.points = map[string]struct{}{}
+		}
+		t.points[string(key)] = struct{}{}
 	}
 }
 
@@ -322,28 +324,39 @@ func (t *Txn) Commit() (uint64, error) {
 	return seq, nil
 }
 
-// conflicts reports whether rec wrote anything t wrote or guarded.
+// conflicts reports whether rec wrote anything t wrote or guarded. Its
+// cost is linear in what rec wrote, plus a binary search per range, so
+// big transactions committing side by side stay cheap.
 func (t *Txn) conflicts(rec commitRecord) bool {
-	mine := append(slices.Clip(t.guards), t.ranges...)
 	for _, k := range rec.keys {
 		if _, ok := t.writes[string(k)]; ok {
 			return true
 		}
-		for _, s := range mine {
-			if s.has(k) {
-				return true
-			}
+		if _, ok := t.points[string(k)]; ok {
+			return true
 		}
 	}
-	for _, r := range rec.ranges {
-		for _, s := range mine {
+	// rec.keys are sorted: find the first at or after each range's start.
+	for _, s := range slices.Concat(t.guards, t.ranges) {
+		i, _ := slices.BinarySearchFunc(rec.keys, s.lo, bytes.Compare)
+		if i < len(rec.keys) && s.has(rec.keys[i]) {
+			return true
+		}
+		for _, r := range rec.ranges {
 			if s.overlaps(r) {
 				return true
 			}
 		}
-		for k := range t.writes {
-			if r.has([]byte(k)) {
-				return true
+	}
+	if len(rec.ranges) > 0 {
+		writes := t.sortedKeys()
+		points := slices.Sorted(maps.Keys(t.points))
+		for _, r := range rec.ranges {
+			for _, ks := range [][]string{writes, points} {
+				i, _ := slices.BinarySearchFunc(ks, r.lo, func(k string, lo []byte) int { return bytes.Compare([]byte(k), lo) })
+				if i < len(ks) && r.has([]byte(ks[i])) {
+					return true
+				}
 			}
 		}
 	}

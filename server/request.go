@@ -55,13 +55,21 @@ func (c *conn) serve(st *stream, m wire.Message) {
 	c.send(st, we, true)
 }
 
-// send writes a message on a stream.
+// send writes a message on a stream. The stream's last message frees
+// its place first, so a client that has seen a stream end can always
+// open another.
 func (c *conn) send(st *stream, m wire.Message, end bool) error {
+	if end {
+		c.release(st)
+	}
 	return c.w.WriteMessage(st.id, m, end)
 }
 
 // sendFlow writes a flow-controlled message (ROWS, BLOB_DATA).
 func (c *conn) sendFlow(st *stream, m wire.Message, end bool) error {
+	if end {
+		c.release(st)
+	}
 	return c.w.WriteBody(st.id, m.Type(), wire.Encode(m), end, func(want int) (int, error) {
 		return wire.TakeBoth(st.ctx, st.win, c.connWin, want)
 	})

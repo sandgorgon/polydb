@@ -90,6 +90,17 @@ func EncodeEntity(e *model.Entity) []byte {
 		e.Meta.Labels, value.MustText(e.Meta.Owner), e.Meta.Props)
 }
 
+// EntityKind decodes only an entity record's kind (zero for kindless).
+func EntityKind(b []byte) (value.ID, error) {
+	vs, err := value.DecodeListHead(b, 1)
+	if err != nil || len(vs) != 1 {
+		return value.ID{}, fmt.Errorf("keys: entity record: %v", err)
+	}
+	r := &reader{what: "entity", vs: vs}
+	id := r.optID()
+	return id, r.err
+}
+
 // DecodeEntity decodes an entity header.
 func DecodeEntity(id value.ID, b []byte) (*model.Entity, error) {
 	vs, err := fields(b, "entity", 7)

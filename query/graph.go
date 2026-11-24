@@ -8,17 +8,26 @@ import (
 )
 
 // graph implements lang.Graph on a transaction. Entities are cached for
-// the statement; writes reset the cache.
+// the statement, up to cacheLimit at a time; writes reset the cache.
+// The first field read from an entity reads only that field; reading
+// it again loads and caches the whole entity, so a scan that touches
+// each entity once stays cheap and a join that revisits them does too.
 type graph struct {
 	tx     *engine.Tx
 	ents   map[value.ID]*engine.Entity
 	hidden map[value.ID]bool // entities the user can't read
+	seen   map[value.ID]bool // entities read once, one field at a time
 	access Access
 }
+
+// cacheLimit bounds the entities a statement keeps cached, so a scan
+// over a large kind doesn't hold all of it.
+const cacheLimit = 16384
 
 func (g *graph) reset() {
 	clear(g.ents)
 	clear(g.hidden)
+	clear(g.seen)
 }
 
 // entity loads an entity, or reports false if id isn't one or is of a
@@ -39,23 +48,65 @@ func (g *graph) entity(id value.ID) (*engine.Entity, bool, error) {
 		return nil, false, err
 	}
 	if g.access != nil && !g.access.Can(security.Read, e.Kind) {
-		g.hidden[id] = true
+		g.hide(id)
 		return nil, false, nil
+	}
+	if len(g.ents) >= cacheLimit {
+		clear(g.ents)
 	}
 	g.ents[id] = e
 	return e, true, nil
 }
 
+func (g *graph) hide(id value.ID) {
+	if len(g.hidden) >= cacheLimit {
+		clear(g.hidden)
+	}
+	g.hidden[id] = true
+}
+
 func (g *graph) Field(id value.ID, name string) (value.Value, bool, error) {
-	if e, ok, err := g.entity(id); err != nil || ok {
-		if err != nil {
-			return nil, false, err
-		}
+	if e, ok := g.ents[id]; ok {
 		f, ok := e.Field(name)
 		if !ok || f.Value == nil {
 			return value.Null, false, nil
 		}
 		return f.Value, true, nil
+	}
+	if g.hidden[id] {
+		return value.Null, false, nil
+	}
+	if g.seen[id] {
+		// The second visit: load and cache the whole entity.
+		if e, ok, err := g.entity(id); err != nil || ok {
+			if err != nil {
+				return nil, false, err
+			}
+			f, ok := e.Field(name)
+			if !ok || f.Value == nil {
+				return value.Null, false, nil
+			}
+			return f.Value, true, nil
+		}
+		return value.Null, false, nil // hidden
+	}
+	kind, v, isEntity, err := g.tx.EntityField(id, name)
+	if err != nil {
+		return nil, false, err
+	}
+	if isEntity {
+		if g.access != nil && !g.access.Can(security.Read, kind) {
+			g.hide(id)
+			return value.Null, false, nil
+		}
+		if g.seen == nil || len(g.seen) >= cacheLimit {
+			g.seen = map[value.ID]bool{}
+		}
+		g.seen[id] = true
+		if v == nil {
+			return value.Null, false, nil
+		}
+		return v, true, nil
 	}
 	if n, ok, err := g.tx.Exists(id); err != nil || !ok || n != model.NodeRelation {
 		return value.Null, false, err

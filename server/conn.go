@@ -38,6 +38,7 @@ type conn struct {
 
 	mu         sync.Mutex
 	streams    map[uint32]*stream
+	open       int // streams counting against MaxStreams
 	lastStream uint32
 	goingAway  bool
 	closed     bool
@@ -52,6 +53,7 @@ type stream struct {
 	cancel context.CancelFunc
 	// cancelled is set by CANCEL, so the request reports "cancelled".
 	cancelled atomic.Bool
+	released  bool // its place counts no more against MaxStreams (on conn.mu)
 }
 
 func (s *Server) handle(nc net.Conn) {
@@ -343,7 +345,7 @@ func (c *conn) start(id uint32, m wire.Message) error {
 		c.w.WriteMessage(id, &wire.Error{Code: "shutting_down", Message: "the connection is closing", StatementIndex: -1}, true)
 		return nil
 	}
-	if len(c.streams) >= c.srv.cfg.MaxStreams {
+	if c.open >= c.srv.cfg.MaxStreams {
 		c.mu.Unlock()
 		c.w.WriteMessage(id, &wire.Error{Code: "limit", Message: "too many requests at once on this connection", StatementIndex: -1}, true)
 		return nil
@@ -351,6 +353,7 @@ func (c *conn) start(id uint32, m wire.Message) error {
 	st := &stream{id: id, win: wire.NewWindow(c.srv.cfg.StreamWindow)}
 	st.ctx, st.cancel = context.WithCancel(c.ctx)
 	c.streams[id] = st
+	c.open++
 	c.mu.Unlock()
 	c.requests.Add(1)
 	c.srv.wg.Add(1)
@@ -362,10 +365,22 @@ func (c *conn) start(id uint32, m wire.Message) error {
 	return nil
 }
 
+// release frees a stream's place under MaxStreams. The stream stays
+// open (for going away and idle timeouts) until finish.
+func (c *conn) release(st *stream) {
+	c.mu.Lock()
+	if !st.released {
+		st.released = true
+		c.open--
+	}
+	c.mu.Unlock()
+}
+
 // finish removes a finished stream; the last one closes a connection
 // that is going away.
 func (c *conn) finish(st *stream) {
 	st.cancel()
+	c.release(st)
 	c.mu.Lock()
 	delete(c.streams, st.id)
 	done := c.goingAway && len(c.streams) == 0

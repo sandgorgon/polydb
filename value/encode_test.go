@@ -309,3 +309,21 @@ func (g *gen) value(depth int) Value {
 		return must(NewRecord(names, vals))
 	}
 }
+
+func TestDecodeListHead(t *testing.T) {
+	b := Encode(must2(NewList(Int(1), MustText("two"), Bool(true))))
+	for n, want := range map[int]int{0: 0, 1: 1, 3: 3, 9: 3} {
+		vs, err := DecodeListHead(b, n)
+		if err != nil || len(vs) != want {
+			t.Errorf("head %d: %v %v", n, vs, err)
+		}
+	}
+	if vs, _ := DecodeListHead(b, 2); !Equal(vs[1], MustText("two")) {
+		t.Errorf("second element: %v", vs[1])
+	}
+	for _, bad := range [][]byte{nil, Encode(Int(1)), b[:3]} {
+		if _, err := DecodeListHead(bad, 3); err == nil {
+			t.Errorf("%x: no error", bad)
+		}
+	}
+}

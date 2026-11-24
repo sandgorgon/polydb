@@ -213,6 +213,29 @@ func Decode(b []byte) (Value, error) {
 // Docs are checked for valid NFC text but not re-validated against their
 // format, which may be a derived format defined in a database's catalog;
 // writes validate docs before they are stored.
+// DecodeListHead decodes only the first n elements of an encoded list
+// (fewer if it is shorter), for reading a record's leading fields without
+// decoding the rest.
+func DecodeListHead(b []byte, n int) ([]Value, error) {
+	d := decoder{b: b}
+	tag, err := d.byte()
+	if err != nil {
+		return nil, err
+	}
+	if tag != tagList {
+		return nil, fmt.Errorf("decode: not a list (tag %#x)", tag)
+	}
+	count, err := d.count()
+	if err != nil {
+		return nil, err
+	}
+	vs, err := d.values(min(n, count), 2)
+	if err != nil {
+		return nil, fmt.Errorf("decode at byte %d: %w", d.pos, err)
+	}
+	return vs, nil
+}
+
 func DecodeValue(b []byte) (Value, int, error) {
 	d := decoder{b: b}
 	v, err := d.value(1)

@@ -643,3 +643,17 @@ func TestPermissionsOverProtocol(t *testing.T) {
 		t.Errorf("show sessions: %v", e)
 	}
 }
+
+// A client that has seen a stream end may open another at once, even
+// with one stream allowed: the server frees the place before the
+// stream's last message.
+func TestStreamPlaceFreedBeforeEnd(t *testing.T) {
+	ts := startServer(t, Config{MaxStreams: 1}, "tls")
+	c := admin(t, ts)
+	c.mustQuery(`create database d; use d; define kind W { n: int }; create W { n: 1 }`)
+	for i := range 300 {
+		if _, e := c.query(`find W w | show w.n`, nil, nil); e != nil {
+			t.Fatalf("request %d: %v", i, e)
+		}
+	}
+}

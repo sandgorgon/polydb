@@ -557,6 +557,34 @@ func (tx *Tx) Get(id value.ID) (*Entity, error) {
 	return out, nil
 }
 
+// EntityField reads one field of an entity without loading the others:
+// the entity's kind (nil for kindless) and the field's value, nil when
+// the field is absent. isEntity is false when id isn't an entity.
+func (tx *Tx) EntityField(id value.ID, name string) (kind *model.Kind, v value.Value, isEntity bool, err error) {
+	b, ok, err := tx.get(keys.Entity(id))
+	if err != nil || !ok {
+		return nil, nil, false, err
+	}
+	kid, err := keys.EntityKind(b)
+	if err != nil {
+		return nil, nil, false, wrap(CodeInternal, err)
+	}
+	if !kid.IsZero() {
+		if kind, ok = tx.Catalog().KindByID(kid); !ok {
+			return nil, nil, false, errorf(CodeInternal, "entity %s has unknown kind %s", id, kid)
+		}
+	}
+	fb, ok, err := tx.get(keys.Field(id, name))
+	if err != nil || !ok {
+		return kind, nil, true, err
+	}
+	f, err := keys.DecodeField(id, name, fb, tx.Catalog())
+	if err != nil {
+		return nil, nil, false, wrap(CodeInternal, err)
+	}
+	return kind, f.Value, true, nil
+}
+
 // Exists reports whether id names an entity, field or relation, and which.
 func (tx *Tx) Exists(id value.ID) (model.NodeKind, bool, error) {
 	n, ok, err := tx.node(id, false)
