@@ -69,6 +69,11 @@ type Options struct {
 	// BlobSegmentSize is the size of the blob store's segment files
 	// (default blob.DefaultSegmentSize).
 	BlobSegmentSize int64
+	// BackupDir is where backup and restore statements read and write:
+	// their paths are relative to it (default <Dir>/backups; with no
+	// Dir, the statements are refused). DB.Backup and RestoreDatabase
+	// take any path.
+	BackupDir string
 	// MaxLoad is how many bytes of large values one statement may load
 	// into memory, for functions and operators that need their content:
 	// the default of sessions' max_load setting (default DefaultMaxLoad,
@@ -126,6 +131,9 @@ func Open(opts Options) (*Engine, error) {
 		opts.BlobThreshold = DefaultBlobThreshold
 	}
 	opts.BlobThreshold = max(opts.BlobThreshold, minBlobThreshold)
+	if opts.BackupDir == "" && opts.Dir != "" {
+		opts.BackupDir = vfs.Join(opts.Dir, "backups")
+	}
 	if opts.MaxLoad == 0 {
 		opts.MaxLoad = DefaultMaxLoad
 	}
@@ -153,7 +161,7 @@ func (e *Engine) CreateDatabase(name string) (*DB, error) {
 		return nil, errorf(CodeConstraint, "database %s already exists", name)
 	}
 	if e.sys != nil {
-		db, err := e.createOnDisk(name)
+		db, err := e.createOnDisk(name, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -164,7 +172,7 @@ func (e *Engine) CreateDatabase(name string) (*DB, error) {
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	db, err := openDB(e, name, s, "")
+	db, err := openDB(e, name, s, blobPlace{})
 	if err != nil {
 		s.Close()
 		return nil, err
@@ -243,12 +251,12 @@ func (e *Engine) Close() error {
 
 // openDB opens a database on store s, with its blob store in blobDir
 // ("" for one in memory).
-func openDB(e *Engine, name string, s storage.Store, blobDir string) (*DB, error) {
+func openDB(e *Engine, name string, s storage.Store, bp blobPlace) (*DB, error) {
 	cat, err := catalog.Load(s, 0)
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	blobs, err := openBlobs(e, blobDir)
+	blobs, err := openBlobs(e, bp)
 	if err != nil {
 		return nil, err
 	}

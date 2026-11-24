@@ -112,7 +112,7 @@ func (e *Engine) load() (err error) {
 		if err != nil {
 			return wrap(CodeInternal, fmt.Errorf("opening database %s: %w", en.name, err))
 		}
-		db, err := openDB(e, en.name, s, vfs.Join(e.databasesDir(), en.num, "blobs"))
+		db, err := openDB(e, en.name, s, blobPlace{e.opts.FS, vfs.Join(e.databasesDir(), en.num, "blobs")})
 		if err != nil {
 			s.Close()
 			return err
@@ -144,9 +144,10 @@ func (e *Engine) load() (err error) {
 	return nil
 }
 
-// createOnDisk creates a database's store and records it. The caller
+// createOnDisk creates a database's store and records it. populate, if
+// set, fills the new database's directory first (a restore). The caller
 // holds e.mu.
-func (e *Engine) createOnDisk(name string) (*DB, error) {
+func (e *Engine) createOnDisk(name string, populate func(dir string) error) (*DB, error) {
 	next := 1
 	if v, ok, err := e.sysGet("next-db"); err != nil {
 		return nil, wrap(CodeInternal, err)
@@ -159,11 +160,17 @@ func (e *Engine) createOnDisk(name string) (*DB, error) {
 	dir := vfs.Join(e.databasesDir(), num)
 	fs := e.opts.FS
 	fs.RemoveAll(dir) // left by an earlier attempt
+	if populate != nil {
+		if err := populate(dir); err != nil {
+			fs.RemoveAll(dir)
+			return nil, err
+		}
+	}
 	s, err := lsm.Open(e.storeOptions(dir))
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	db, err := openDB(e, name, s, vfs.Join(dir, "blobs"))
+	db, err := openDB(e, name, s, blobPlace{fs, vfs.Join(dir, "blobs")})
 	if err != nil {
 		s.Close()
 		fs.RemoveAll(dir)

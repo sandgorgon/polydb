@@ -75,10 +75,17 @@ const (
 // in the transaction that empties the segment.
 func blobSegKey(seg uint32) []byte { return keys.Meta(fmt.Sprintf("blobseg/%d", seg)) }
 
-func openBlobs(e *Engine, dir string) (*blob.Store, error) {
-	o := blob.Options{FS: e.opts.FS, Dir: dir, SegmentSize: e.opts.BlobSegmentSize}
-	if dir == "" {
-		o.FS, o.Dir, o.NoSync = vfs.NewMem(), "/blobs", true
+// blobPlace is where a database's blob segments are: a directory on fs,
+// or, when fs is nil, a new store in memory.
+type blobPlace struct {
+	fs  vfs.FS
+	dir string
+}
+
+func openBlobs(e *Engine, p blobPlace) (*blob.Store, error) {
+	o := blob.Options{FS: p.fs, Dir: p.dir, SegmentSize: e.opts.BlobSegmentSize, NoSync: e.opts.Dir == ""}
+	if p.fs == nil {
+		o.FS, o.Dir = vfs.NewMem(), "/blobs"
 	}
 	s, err := blob.Open(o)
 	return s, wrap(CodeInternal, err)

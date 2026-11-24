@@ -111,7 +111,7 @@ Reserved now for future features (inference rules, kind reuse and others), so th
 
 | Group | Statements |
 |---|---|
-| Databases and session | `create database`, `drop database`, `use`, `set`, `show databases` |
+| Databases and session | `create database`, `drop database`, `use`, `set`, `show databases`, `backup database`, `restore database` |
 | Definitions | `define kind / relation / format / index`, `alter …`, `drop …` |
 | Data | `create`, `update`, `delete`, `relate`, `unrelate`, `push`, `pop` |
 | Queries | pipelines starting with `find` |
@@ -134,9 +134,14 @@ show databases;
 set timeout = 30s;               // session settings
 set max_rows = 10000;
 set max_load = 1073741824;       // bytes of large values a statement may load
+
+backup database sales to "nightly/mon";      // while it runs; needs admin on sales
+restore database sales_copy from "nightly/mon";  // creates sales_copy; needs admin
 ```
 
 Queries can't span databases in v1.
+
+**Backups.** `backup database` writes the database as of one commit to a directory, while it keeps taking reads and writes: the key-value store's latest data written as compacted files, the blob segments copied, and a `BACKUP` file listing every file with its SHA-256, written last. History versions are data, so they are in the backup; users, roles and grants are server-wide and aren't. It returns the path, keys, files and bytes. `restore database` creates a new database from a backup, checking every file as it copies it; it never replaces an existing database (drop it first, or restore under another name and switch). Paths are directories relative to the server's backup directory (`polydb serve --backup-dir`, default `<data-dir>/backups`); a backup's directory must not exist yet. On a stopped server, `polydb restore [--database name] dir` does the same from any directory. Embedded programs call `DB.Backup` and `Engine.RestoreDatabase` with any path.
 
 ---
 
@@ -1018,7 +1023,7 @@ None.
 13. Permissions (Phase 3, 2026-11-22):
    - **Entities of kinds you can't read are invisible:** scans and patterns skip them, reads through refs give null, and `degree` doesn't count relations to them. `find Kind x` without read on that kind, or naming such an entity by handle or ID, is a `permission` error.
    - Kindless entities are covered by database-level and server-level grants only.
-   - `use` needs some permission on the database, and `show databases` lists only those. `create database` and `drop database` need admin on the server.
+   - `use` needs some permission on the database, and `show databases` lists only those. `create database`, `drop database` and `restore database` need admin on the server; `backup database` needs admin on that database.
    - `relate` and `unrelate` need `relate` on the source's kind and `read` on the target's. Writing to an entity needs `write` on its kind, and `define` at kind level covers `alter kind`, `drop kind` and indexes on that kind.
    - Users, roles, grants and keys change at once, outside transactions: running one of those statements inside a transaction is an error. Admins of a database can grant permissions on it; roles and server grants need a server admin.
    - Grants on a kind follow it when it is renamed. `show grants for x` lists x's grants and those of its roles; users who aren't admins see only their own.
@@ -1026,7 +1031,7 @@ None.
 12. Sessions (Phase 2, 2026-11-22):
    - **Any error inside a transaction aborts it.** Later statements fail with `txn_aborted` until `rollback`, and `commit` rolls back and reports `txn_aborted` too (protocol.md §6.3). This stops the rest of a script from running as if the failed statement had worked.
    - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.
-   - `create database`, `drop database` and `use` aren't allowed inside a transaction.
+   - `create database`, `drop database`, `backup database`, `restore database` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
    - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns. `max_load` caps the bytes of large values a statement may load into memory (types.md §13.1; default 256 MiB, set by the server's `--max-load`; 0 means no limit).
    - `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` on one runs it and reports the rows it changed and the time.

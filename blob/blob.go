@@ -333,6 +333,46 @@ func (s *Store) Sealed() []Segment {
 	return out
 }
 
+// Copy writes every segment, as long as it is when Copy starts, to w
+// (a file of the same name for each), keeping the segments from removal
+// while it copies. A chunk whose write finished before Copy started is
+// in the copy; one appended after may be or not, which is garbage there.
+// Segments start with a header and grow by whole entries, so a copy is a
+// valid segment.
+func (s *Store) Copy(w func(name string, size int64, r io.Reader) error) error {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return errors.New("blob: store is closed")
+	}
+	var segs []Segment
+	for num, seg := range s.segs {
+		segs = append(segs, Segment{num, seg.size.Load()})
+		s.pins[num]++
+	}
+	files := map[uint32]vfs.File{}
+	for num, seg := range s.segs {
+		files[num] = seg.f
+	}
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		for _, sg := range segs {
+			if s.pins[sg.Num]--; s.pins[sg.Num] <= 0 {
+				delete(s.pins, sg.Num)
+			}
+		}
+		s.mu.Unlock()
+	}()
+	slices.SortFunc(segs, func(a, b Segment) int { return int(a.Num) - int(b.Num) })
+	for _, sg := range segs {
+		if err := w(segName(sg.Num), sg.Size, io.NewSectionReader(files[sg.Num], 0, sg.Size)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Size returns the total size of the segments.
 func (s *Store) Size() (total int64, segments int) {
 	s.mu.Lock()

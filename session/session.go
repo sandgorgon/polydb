@@ -375,6 +375,10 @@ func (r *Request) db(st lang.Node) (*engine.DB, error) {
 func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]value.Value) (*query.Result, error) {
 	s := r.s
 	switch st := st.(type) {
+	case *lang.Backup:
+		return r.backup(ctx, st, params)
+	case *lang.Restore:
+		return r.restore(ctx, st, params)
 	case *lang.CreateDatabase:
 		if err := r.noTx(st, "create database"); err != nil {
 			return nil, err

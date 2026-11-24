@@ -33,6 +33,7 @@ type serveConfig struct {
 	compression bool
 	inlineLimit int64
 	maxLoad     int64
+	backupDir   string
 	verbose     bool
 	iterations  int
 }
@@ -51,6 +52,7 @@ func serveCmd(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.BoolVar(&c.compression, "compression", false, "allow deflate compression")
 	fs.Int64Var(&c.inlineLimit, "inline-limit", 0, "largest value sent inline, in bytes (default 16384)")
 	fs.Int64Var(&c.maxLoad, "max-load", 0, "bytes of large values one statement may load into memory, by default (default 268435456; -1 for no limit; sessions change it with set max_load)")
+	fs.StringVar(&c.backupDir, "backup-dir", "", "directory that backup and restore statements write and read (default: <data-dir>/backups)")
 	fs.BoolVar(&c.verbose, "v", false, "log connections")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -88,7 +90,7 @@ func serve(ctx context.Context, c serveConfig, out, errOut io.Writer, ready func
 		return fmt.Errorf("--durability is durable or relaxed, not %q", c.durability)
 	}
 	eng, err := engine.Open(engine.Options{Dir: c.dataDir, Durability: durability, PasswordIterations: c.iterations,
-		MaxLoad: c.maxLoad})
+		MaxLoad: c.maxLoad, BackupDir: c.backupDir})
 	if err != nil {
 		return err
 	}

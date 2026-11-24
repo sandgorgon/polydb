@@ -469,6 +469,16 @@ func (f *formatter) stmt(s Stmt) {
 	case *Analyze:
 		f.w("analyze kind ")
 		f.name(s.Kind)
+	case *Backup:
+		f.w("backup database ")
+		f.name(s.Name)
+		f.w(" to ")
+		f.expr(s.Path, 0)
+	case *Restore:
+		f.w("restore database ")
+		f.name(s.Name)
+		f.w(" from ")
+		f.expr(s.Path, 0)
 	case *ShowStmt:
 		f.w("show ", s.What)
 		if s.For != "" {

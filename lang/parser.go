@@ -210,12 +210,35 @@ func (p *parser) optDoc(bare bool) (*string, error) {
 // mean" suggestions.
 var statementWords = []string{"create", "drop", "use", "set", "define", "alter", "update", "delete", "relate",
 	"unrelate", "push", "pop", "find", "begin", "commit", "rollback", "grant", "revoke", "describe", "show",
-	"explain", "history", "analyze"}
+	"explain", "history", "analyze", "backup", "restore"}
 
 // ===== statements =====
 
 func (p *parser) statement() (Stmt, error) {
 	t := p.tok()
+	if t.Kind == Ident && !t.Quoted && (t.Text == "backup" || t.Text == "restore") {
+		at := p.at()
+		p.advance()
+		if !p.accept("database") {
+			return nil, p.errExpected("database")
+		}
+		n, err := p.name("a database name")
+		if err != nil {
+			return nil, err
+		}
+		if t.Text == "backup" {
+			if err := p.expect("to"); err != nil {
+				return nil, err
+			}
+			path, err := p.expr()
+			return &Backup{at, n, path}, err
+		}
+		if err := p.expect("from"); err != nil {
+			return nil, err
+		}
+		path, err := p.expr()
+		return &Restore{at, n, path}, err
+	}
 	if t.Kind == Ident && !t.Quoted && t.Text == "analyze" {
 		at := p.at()
 		p.advance()

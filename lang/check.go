@@ -230,6 +230,10 @@ func (c *checker) stmt(s Stmt, sc *scope) error {
 		return nil
 	case *SetSetting:
 		return c.setSetting(s)
+	case *Backup:
+		return c.constText(s.Path, "a backup path")
+	case *Restore:
+		return c.constText(s.Path, "a backup path")
 	case *DefineKind:
 		return c.defineKind(s)
 	case *AlterKind:
@@ -290,6 +294,14 @@ var settings = map[string]*value.Type{
 	"max_rows":  value.TypeInt,
 	"max_depth": value.TypeInt,
 	"max_load":  value.TypeInt,
+}
+
+// constText checks an expression that must be text from constants and
+// parameters only.
+func (c *checker) constText(e Expr, what string) error {
+	sc := newScope()
+	sc.noRows = what
+	return c.write(e, value.TypeText, sc)
 }
 
 func (c *checker) setSetting(s *SetSetting) error {

@@ -33,6 +33,7 @@ func main() {
 const usage = `usage:
   polydb init [--key] [--generate]   set up the server's first admin (polydb init -h for flags)
   polydb serve [flags]               run the server (polydb serve -h for flags)
+  polydb restore [flags] backup-dir  restore a database into a stopped server's data directory
   polydb [flags] [url]               open an interactive shell
   polydb run [flags] [url] file.rhz  run a script ("-" reads standard input)
   polydb whoami [--fingerprint]      show this machine's 9auth identity
@@ -54,6 +55,8 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 		return initCmd(args, out, errOut)
 	case "serve":
 		return serveCmd(ctx, args, out, errOut)
+	case "restore":
+		return restoreCmd(ctx, args, out, errOut)
 	case "run":
 		return runCmd(ctx, args, in, out, errOut)
 	case "whoami":

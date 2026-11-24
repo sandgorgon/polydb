@@ -47,6 +47,8 @@ func (*Grant) stmt()          {}
 func (*Describe) stmt()       {}
 func (*ShowStmt) stmt()       {}
 func (*Analyze) stmt()        {}
+func (*Backup) stmt()         {}
+func (*Restore) stmt()        {}
 func (*Explain) stmt()        {}
 func (*History) stmt()        {}
 
@@ -375,6 +377,22 @@ type ShowStmt struct {
 	At
 	What string // databases, kinds, relations, formats, indexes, users, roles, sessions, grants, keys, stats
 	For  string // grants, keys: user; stats: kind
+}
+
+// Backup is "backup database d to 'path'": write a consistent copy of a
+// database to a directory under the server's backup directory.
+type Backup struct {
+	At
+	Name string
+	Path Expr // text: a constant or parameter
+}
+
+// Restore is "restore database d from 'path'": create database d from a
+// backup.
+type Restore struct {
+	At
+	Name string
+	Path Expr
 }
 
 // Analyze is "analyze kind K": sample the kind's statistics now.
