@@ -582,7 +582,7 @@ func (tx *Tx) EntityField(id value.ID, name string) (kind *model.Kind, v value.V
 	if err != nil {
 		return nil, nil, false, wrap(CodeInternal, err)
 	}
-	if v, err = tx.resolve(f.Value); err != nil {
+	if v, err = tx.lazy(f.Value); err != nil {
 		return nil, nil, false, err
 	}
 	return kind, v, true, nil
@@ -614,7 +614,7 @@ func (tx *Tx) FieldByID(id value.ID) (*model.Field, error) {
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	f.Value, err = tx.resolve(f.Value)
+	f.Value, err = tx.lazy(f.Value)
 	return f, err
 }
 

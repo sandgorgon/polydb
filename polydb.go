@@ -12,6 +12,7 @@
 package polydb
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -175,6 +176,9 @@ type Blob struct {
 	// token is the server's lease on the content, which lets the blob be
 	// passed back as a parameter without sending the content again.
 	token []byte
+	// lazy is the value an embedded database returned, which goes back
+	// as a parameter without being read.
+	lazy *value.Lazy
 }
 
 // NewBlob returns a blob read with fetch. Implementations of DB use it.
@@ -205,14 +209,20 @@ func (b *Blob) ReadAt(p []byte, off int64) (int, error) {
 	return len(data), err
 }
 
-// Reader returns a reader of the whole blob.
-func (b *Blob) Reader() io.Reader { return io.NewSectionReader(b, 0, b.Length) }
+// Reader returns a reader of the whole blob. It fetches the content in
+// pieces of 1 MiB, however little each Read asks for.
+func (b *Blob) Reader() io.Reader {
+	return bufio.NewReaderSize(io.NewSectionReader(b, 0, b.Length), 1<<20)
+}
 
 // Bytes reads the whole blob.
 func (b *Blob) Bytes(ctx context.Context) ([]byte, error) { return b.fetch(ctx, 0, b.Length) }
 
 // Value reads the whole blob as the value it stands for.
 func (b *Blob) Value(ctx context.Context) (value.Value, error) {
+	if b.lazy != nil {
+		return b.lazy.Load()
+	}
 	data, err := b.Bytes(ctx)
 	if err != nil {
 		return nil, err

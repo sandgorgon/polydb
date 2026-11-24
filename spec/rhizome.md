@@ -679,7 +679,7 @@ Each error has a **code**, a **message** and, where it applies, the **position**
 | `not_found` | unknown database, kind, field, handle or ID |
 | `conflict` | transaction conflict; safe to retry |
 | `permission` | not allowed for this user |
-| `limit` | timeout, row limit, depth limit or size limit exceeded |
+| `limit` | timeout, row limit, depth limit, size limit, or the per-statement limit on loading large values (types.md §13.1) exceeded |
 | `internal` | a bug or storage failure |
 
 Error messages suggest fixes where they can: "did you mean `find`?" for `FIND`, or "add `cast(x as float)`" for mixed arithmetic.

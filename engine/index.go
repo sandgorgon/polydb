@@ -105,6 +105,9 @@ func (tx *Tx) buildIndex(ix *model.Index) error {
 // indexEntity writes one entity's entry in an index.
 func (tx *Tx) indexEntity(ix *model.Index, id value.ID) error {
 	st, err := tx.loadEntity(id)
+	if err == nil {
+		err = tx.loadKeyed(st, ix)
+	}
 	if err != nil {
 		return err
 	}
@@ -361,6 +364,9 @@ func (db *DB) VerifyIndexes() error {
 			err = tx.scan(keys.Members(ix.Kind), false, func(k, _ []byte) error {
 				id := value.ID(k[len(k)-16:])
 				e, err := tx.loadEntity(id)
+				if err == nil {
+					err = tx.loadKeyed(e, ix)
+				}
 				if err != nil {
 					return err
 				}

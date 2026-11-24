@@ -117,6 +117,8 @@ func AppendValue(dst []byte, v Value) []byte {
 		return append(append(dst, tagID), x[:]...)
 	case Ref:
 		return append(append(dst, tagRef), x.Target[:]...)
+	case Lazy:
+		return AppendValue(dst, x.Ref)
 	case BlobRef:
 		dst = append(append(dst, tagBlobRef, byte(x.Of)), x.Hash[:]...)
 		dst = binary.AppendUvarint(dst, uint64(x.Len))

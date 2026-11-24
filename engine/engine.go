@@ -69,6 +69,11 @@ type Options struct {
 	// BlobSegmentSize is the size of the blob store's segment files
 	// (default blob.DefaultSegmentSize).
 	BlobSegmentSize int64
+	// MaxLoad is how many bytes of large values one statement may load
+	// into memory, for functions and operators that need their content
+	// (default DefaultMaxLoad, negative no limit). Passing large values
+	// along (showing, storing, len, =) loads nothing.
+	MaxLoad int64
 	// PasswordIterations is the PBKDF2 iteration count for new passwords
 	// (default security.DefaultIterations, at least security.MinIterations).
 	PasswordIterations int
@@ -90,6 +95,10 @@ type Engine struct {
 // Security returns the engine's system store: users, roles, grants and
 // keys.
 func (e *Engine) Security() *security.Store { return e.sec }
+
+// MaxLoad returns how many bytes of large values a statement may load,
+// or a negative number for no limit (Options.MaxLoad).
+func (e *Engine) MaxLoad() int64 { return e.opts.MaxLoad }
 
 // Open returns an engine: a new, empty one in memory, or the one kept in
 // opts.Dir (created if needed).
@@ -116,6 +125,9 @@ func Open(opts Options) (*Engine, error) {
 		opts.BlobThreshold = DefaultBlobThreshold
 	}
 	opts.BlobThreshold = max(opts.BlobThreshold, minBlobThreshold)
+	if opts.MaxLoad == 0 {
+		opts.MaxLoad = DefaultMaxLoad
+	}
 	e := &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{},
 		sec: security.New(opts.PasswordIterations)}
 	if opts.Dir != "" {

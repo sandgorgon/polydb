@@ -446,6 +446,9 @@ func (tx *Tx) DefineIndex(name, kind string, unique, text bool, ks ...model.Inde
 	}
 	for _, eid := range members {
 		st, err := tx.loadEntity(eid)
+		if err == nil {
+			err = tx.loadKeyed(st, ix)
+		}
 		if err != nil {
 			return value.ID{}, tx.fail(err)
 		}

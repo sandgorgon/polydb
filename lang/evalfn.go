@@ -21,18 +21,41 @@ func (ev *Evaluator) call(e *Call, f *Frame) (value.Value, error) {
 	switch e.Name {
 	case "coalesce":
 		for _, a := range e.Args {
-			v, err := ev.Eval(a, f)
+			v, err := ev.EvalLazy(a, f)
 			if err != nil || !value.IsNull(v) {
 				return v, err
 			}
 		}
 		return value.Null, nil
 	case "typeof":
-		v, err := ev.Eval(e.Args[0], f)
+		v, err := ev.EvalLazy(e.Args[0], f)
 		if err != nil {
 			return nil, err
 		}
 		return value.MustText(typeName(v)), nil
+	case "len":
+		// The length of a large value needs no loading: bytes have it,
+		// and text counts its characters a piece at a time.
+		v, err := ev.EvalLazy(e.Args[0], f)
+		if err != nil {
+			return nil, err
+		}
+		if l, ok := v.(value.Lazy); ok {
+			switch l.Code() {
+			case value.CodeBytes:
+				return value.Int(l.Len()), nil
+			case value.CodeText:
+				n, err := l.RuneCount()
+				if err != nil {
+					return nil, runErr(e, "internal", "%v", err)
+				}
+				return value.Int(n), nil
+			}
+			if v, err = ev.Load(e.Args[0], v); err != nil {
+				return nil, err
+			}
+		}
+		return ev.callWith(e, []value.Value{v})
 	case "now":
 		return built(value.NewTime(ev.Now))
 	case "today":
@@ -43,6 +66,11 @@ func (ev *Evaluator) call(e *Call, f *Frame) (value.Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ev.callWith(e, args)
+}
+
+// callWith calls a function with its evaluated arguments.
+func (ev *Evaluator) callWith(e *Call, args []value.Value) (value.Value, error) {
 	// Functions return null when an argument is null (§8.3).
 	for _, a := range args {
 		if value.IsNull(a) {
@@ -557,7 +585,11 @@ func (ev *Evaluator) aggregate(e *Call, f *Frame) (value.Value, error) {
 			vals = append(vals, value.Bool(true))
 			continue
 		}
-		v, err := ev.Eval(e.Args[0], &Frame{Row: r, Target: f.Target, HasTarget: f.HasTarget})
+		eval := ev.Eval
+		if e.Name == "count" {
+			eval = ev.EvalLazy // counting needs no content
+		}
+		v, err := eval(e.Args[0], &Frame{Row: r, Target: f.Target, HasTarget: f.HasTarget})
 		if err != nil {
 			return nil, err
 		}

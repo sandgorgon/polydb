@@ -250,6 +250,9 @@ type Request struct {
 	// Settings, if set, replace the session's settings for this request
 	// (QUERY options).
 	Settings *query.Settings
+	// LazyResults leaves large values in results as value.Lazy, for a
+	// caller that sends or reads them a piece at a time (query.Context).
+	LazyResults bool
 }
 
 // Request starts a request in transaction txn (nil for none). A
@@ -600,6 +603,7 @@ func (r *Request) inTx(ctx context.Context, st lang.Stmt, params map[string]valu
 		Tx: tx, Handles: view, Params: params, Settings: settings,
 		Interrupt: func() error { return interrupted(ctx, settings.Timeout) },
 		Access:    e.access(),
+		MaxLoad:   s.eng.MaxLoad(), LazyResults: r.LazyResults,
 	}
 	if auto && !noWait {
 		qc.Wait = func(id value.ID, field string, wait time.Duration) (value.Value, error) {

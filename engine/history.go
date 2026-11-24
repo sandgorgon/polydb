@@ -209,7 +209,7 @@ func (tx *Tx) versions(id value.ID, name string) ([]Version, error) {
 		if err != nil {
 			return wrap(CodeInternal, err)
 		}
-		if val, err = tx.resolve(val); err != nil {
+		if val, err = tx.lazy(val); err != nil {
 			return err
 		}
 		out = append(out, Version{t, val})

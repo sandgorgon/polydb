@@ -145,6 +145,7 @@ func (c *conn) query(st *stream, text string, stmts []lang.Stmt, params map[stri
 	}
 	defer r.Close()
 	r.Settings = settings
+	r.LazyResults = true
 	if len(stmts) == 0 {
 		id, state := r.Txn()
 		return c.send(st, &wire.ResultEnd{Txn: id, TxnState: wire.TxnState(state)}, true)
@@ -196,7 +197,10 @@ func (c *conn) result(st *stream, index int, res *query.Result, r *session.Reque
 	for _, row := range res.Rows {
 		cells := make([]any, len(row))
 		for i, cell := range row {
-			cells[i] = c.cell(cell)
+			var err error
+			if cells[i], err = c.cell(cell); err != nil {
+				return err
+			}
 		}
 		batch = append(batch, cells)
 		size += len(wire.AppendAny(nil, cells))
@@ -237,7 +241,7 @@ func typeName(t lang.Static) string {
 
 // cell converts a result cell to its wire form, sending large text,
 // bytes and images as blob references.
-func (c *conn) cell(v any) any {
+func (c *conn) cell(v any) (any, error) {
 	switch x := v.(type) {
 	case *query.Entity:
 		e := &wire.Entity{ID: x.ID, Kind: x.Kind, Meta: wire.Meta{Created: x.Meta.Created, Updated: x.Meta.Updated,
@@ -245,36 +249,56 @@ func (c *conn) cell(v any) any {
 		for _, f := range x.Fields {
 			wf := &wire.Field{ID: f.ID, Name: f.Name, Type: f.Type.String(), Doc: f.Doc, Declared: f.Declared}
 			if f.Value != nil {
-				wf.Value = c.cell(f.Value)
+				var err error
+				if wf.Value, err = c.cell(f.Value); err != nil {
+					return nil, err
+				}
 			}
 			e.Fields = append(e.Fields, wf)
 		}
-		return e
+		return e, nil
 	case *query.Relation:
-		return &wire.Relation{ID: x.ID, Type: x.Type, From: x.From, To: x.To, Props: x.Props}
+		return &wire.Relation{ID: x.ID, Type: x.Type, From: x.From, To: x.To, Props: x.Props}, nil
 	case *query.Path:
 		p := &wire.Path{}
 		for _, n := range x.Nodes {
-			p.Nodes = append(p.Nodes, c.cell(n))
+			cn, err := c.cell(n)
+			if err != nil {
+				return nil, err
+			}
+			p.Nodes = append(p.Nodes, cn)
 		}
 		for _, r := range x.Rels {
-			p.Rels = append(p.Rels, c.cell(r).(*wire.Relation))
+			cr, err := c.cell(r)
+			if err != nil {
+				return nil, err
+			}
+			p.Rels = append(p.Rels, cr.(*wire.Relation))
 		}
-		return p
+		return p, nil
+	case value.Lazy:
+		if x.Len() > c.inline {
+			return c.leaseLazy(x)
+		}
+		lv, err := x.Load()
+		if err != nil {
+			return nil, &wire.Error{Code: "internal", Message: err.Error(), StatementIndex: -1}
+		}
+		return c.cell(lv)
 	case value.Text:
 		if int64(len(x.Go())) > c.inline {
-			return c.lease("text", []byte(x.Go()), "text/plain; charset=utf-8")
+			return c.lease("text", []byte(x.Go()), "text/plain; charset=utf-8"), nil
 		}
 	case value.Bytes:
 		if int64(x.Len()) > c.inline {
-			return c.lease("bytes", x.Go(), x.MediaType())
+			return c.lease("bytes", x.Go(), x.MediaType()), nil
 		}
 	case value.Image:
 		if int64(x.Len()) > c.inline {
-			return c.lease("image", x.Data(), "image/"+x.Format())
+			return c.lease("image", x.Data(), "image/"+x.Format()), nil
 		}
 	}
-	return v
+	return v, nil
 }
 
 // lease sends a value as a blob reference. If the current database's
@@ -282,13 +306,45 @@ func (c *conn) cell(v any) any {
 // than keeping it in memory.
 func (c *conn) lease(typ string, data []byte, media string) *wire.BlobRef {
 	h := sha256.Sum256(data)
-	le := &lease{typ: typ, media: media, size: int64(len(data)), data: data}
+	le := &lease{typ: typ, media: media, size: int64(len(data)), hash: h, data: data}
 	if db := c.database(); db != nil {
 		if r, ok, err := db.OpenBlob(h); err == nil && ok {
 			le.data, le.reader = nil, r
 		}
 	}
 	return &wire.BlobRef{Type: typ, Hash: h[:], Length: le.size, MediaType: media, Token: c.srv.leases.add(le)}
+}
+
+// leaseLazy sends a large value still in a blob store as a blob
+// reference, reading it from there when the client fetches it.
+func (c *conn) leaseLazy(l value.Lazy) (*wire.BlobRef, error) {
+	typ := l.Code().String()
+	r, ok := engine.ReaderOf(l)
+	if !ok {
+		lv, err := l.Load()
+		if err != nil {
+			return nil, &wire.Error{Code: "internal", Message: err.Error(), StatementIndex: -1}
+		}
+		data, media, _ := value.Large(lv)
+		if im, ok := lv.(value.Image); ok {
+			media = "image/" + im.Format()
+		}
+		return c.lease(typ, data, media), nil
+	}
+	media := l.MediaType()
+	switch l.Code() {
+	case value.CodeText:
+		media = "text/plain; charset=utf-8"
+	case value.CodeImage:
+		format, err := value.ImageFormat(io.NewSectionReader(r, 0, r.Len))
+		if err != nil {
+			r.Close()
+			return nil, &wire.Error{Code: "internal", Message: err.Error(), StatementIndex: -1}
+		}
+		media = "image/" + format
+	}
+	le := &lease{typ: typ, media: media, size: l.Len(), hash: l.Ref.Hash, reader: r}
+	return &wire.BlobRef{Type: typ, Hash: l.Ref.Hash[:], Length: le.size, MediaType: media, Token: c.srv.leases.add(le)}, nil
 }
 
 // database returns the session's current database, if it has one.
@@ -328,7 +384,8 @@ func (c *conn) serveUpload(st *stream, first *wire.BlobWrite, content io.Reader)
 		fail("permission", "uploading needs write permission in database "+db.Name())
 		return
 	}
-	u, err := db.StoreUpload(content, limit, c.srv.cfg.LeaseTime)
+	of := map[string]value.Code{"text": value.CodeText, "bytes": value.CodeBytes, "image": value.CodeImage}[first.ValueType]
+	u, err := db.StoreUpload(content, of, limit, c.srv.cfg.LeaseTime)
 	if err != nil {
 		if st.ctx.Err() != nil {
 			return // cancelled, or the connection is gone
@@ -347,7 +404,7 @@ func (c *conn) serveUpload(st *stream, first *wire.BlobWrite, content io.Reader)
 	case "image":
 		media = ""
 	}
-	le := &lease{typ: first.ValueType, media: media, size: u.Len, db: db, upload: u}
+	le := &lease{typ: first.ValueType, media: media, size: u.Len, hash: u.Hash, db: db, upload: u}
 	ref := &wire.BlobRef{Type: first.ValueType, Hash: u.Hash[:], Length: u.Len, MediaType: media, Token: c.srv.leases.add(le)}
 	c.send(st, &wire.BlobStored{Ref: ref}, true)
 }
@@ -453,6 +510,7 @@ type leases struct {
 type lease struct {
 	typ, media string // "text", "bytes" or "image", and the media type
 	size       int64
+	hash       [32]byte // SHA-256 of the content
 	expires    time.Time
 
 	data   []byte             // in memory, or
@@ -465,19 +523,33 @@ type lease struct {
 func (l *lease) read(off, n int64) ([]byte, error) {
 	switch {
 	case l.reader != nil:
-		return l.reader.ReadAt(off, n)
+		return l.reader.Read(off, n)
 	case l.upload != nil:
 		return l.db.ReadUpload(l.upload, off, n)
 	}
 	return l.data[off : off+n], nil
 }
 
-// value rebuilds the value the lease stands for.
+// value returns the value the lease stands for, to pass to a statement:
+// content in a blob store as a value.Lazy, so it isn't loaded unless the
+// statement needs it.
 func (l *lease) value() (value.Value, error) {
-	data, err := l.read(0, l.size)
-	if err != nil {
-		return nil, err
+	switch {
+	case l.upload != nil:
+		return l.db.UploadValue(l.upload, l.media)
+	case l.reader != nil:
+		ref := value.BlobRef{Hash: l.hash, Len: l.size}
+		switch l.typ {
+		case "text":
+			ref.Of = value.CodeText
+		case "bytes":
+			ref.Of, ref.Media = value.CodeBytes, l.media
+		case "image":
+			ref.Of = value.CodeImage
+		}
+		return value.Lazy{Ref: ref, Src: l.reader.Retain()}, nil
 	}
+	data := l.data
 	switch l.typ {
 	case "text":
 		return value.NewText(string(data))

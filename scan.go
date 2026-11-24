@@ -98,7 +98,8 @@ func ToValue(v any) (value.Value, error) {
 
 // ParamValues converts parameters to values.
 //
-// A *Blob is read whole; see SplitParams for blobs a server holds.
+// A *Blob is read whole, unless an embedded database returned it; see
+// SplitParams for blobs a server holds.
 func ParamValues(p Params) (map[string]value.Value, error) {
 	if len(p) == 0 {
 		return nil, nil
@@ -106,6 +107,10 @@ func ParamValues(p Params) (map[string]value.Value, error) {
 	out := make(map[string]value.Value, len(p))
 	for k, v := range p {
 		if b, ok := v.(*Blob); ok {
+			if b.lazy != nil {
+				out[k] = *b.lazy
+				continue
+			}
 			c, err := b.Value(context.Background())
 			if err != nil {
 				return nil, fmt.Errorf("parameter $%s: %w", k, err)

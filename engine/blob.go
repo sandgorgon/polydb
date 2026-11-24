@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/sandgorgon/polydb/blob"
@@ -12,13 +14,16 @@ import (
 	"github.com/sandgorgon/polydb/storage"
 	"github.com/sandgorgon/polydb/storage/vfs"
 	"github.com/sandgorgon/polydb/value"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Large values (spec/types.md §13). A text, bytes or image field value
 // longer than the blob threshold is stored in the database's blob store
 // (package blob): its content is split into chunks, and the field record
 // (or history version) holds a value.BlobRef instead. Reads replace the
-// reference with the value again, so nothing above the engine sees one.
+// reference with a value.Lazy that reads the content when something
+// needs it (Tx.lazy), so nothing above the engine sees a reference, and
+// a value passed along (shown, stored elsewhere) is never loaded.
 //
 // What the key-value store records (keys/blob.go):
 //
@@ -62,6 +67,8 @@ const (
 	// rewriteLive is the share of a sealed segment that must still be live
 	// for it to be kept as it is.
 	rewriteLive = 0.5
+	// DefaultMaxLoad is Options.MaxLoad's default.
+	DefaultMaxLoad = 256 << 20
 )
 
 // blobSegKey is the retire mark of a blob segment: the collector sets it
@@ -81,26 +88,77 @@ func (db *DB) blobThreshold() int { return db.eng.opts.BlobThreshold }
 
 // storeValue returns what a stored record of entity's field holds for v:
 // v itself, or a reference after putting v's content in the blob store.
-// It records the entity's use of the blob.
+// It records the entity's use of the blob. A lazy value's content is
+// copied a chunk at a time, or not at all when this store has it.
 func (tx *Tx) storeValue(entity value.ID, v value.Value) (value.Value, error) {
-	if _, ok := v.(value.BlobRef); ok {
+	var ref value.BlobRef
+	switch x := v.(type) {
+	case value.BlobRef:
 		return nil, errorf(CodeType, "a blob reference is not a value")
+	case value.Lazy:
+		if x.Ref.Len <= int64(tx.db.blobThreshold()) {
+			lv, err := x.Load()
+			if err != nil {
+				return nil, wrap(CodeInternal, err)
+			}
+			return tx.storeValue(entity, lv)
+		}
+		if err := tx.putBlob(x.Ref.Hash, x.Ref.Len, lazyChunks(x)); err != nil {
+			return nil, err
+		}
+		ref = x.Ref
+	default:
+		content, media, ok := value.Large(v)
+		if !ok || len(content) <= tx.db.blobThreshold() {
+			return v, nil
+		}
+		h := sha256.Sum256(content)
+		if err := tx.putBlob(h, int64(len(content)), contentChunks(content)); err != nil {
+			return nil, err
+		}
+		ref = value.BlobRef{Of: v.Code(), Hash: h, Len: int64(len(content)), Media: media}
 	}
-	content, media, ok := value.Large(v)
-	if !ok || len(content) <= tx.db.blobThreshold() {
-		return v, nil
-	}
-	h := sha256.Sum256(content)
-	if err := tx.putBlob(h, content); err != nil {
-		return nil, err
-	}
-	tx.t.Set(keys.BlobUse(h, entity), nil)
-	tx.t.Set(keys.BlobEnt(entity, h), nil)
-	return value.BlobRef{Of: v.Code(), Hash: h, Len: int64(len(content)), Media: media}, nil
+	tx.t.Set(keys.BlobUse(ref.Hash, entity), nil)
+	tx.t.Set(keys.BlobEnt(entity, ref.Hash), nil)
+	return ref, nil
 }
 
-// putBlob makes sure blob h, with the given content, is stored.
-func (tx *Tx) putBlob(h [32]byte, content []byte) error {
+// chunkFunc returns a blob's chunk i: its hash, and a function reading
+// its data, called only if the store doesn't have the chunk.
+type chunkFunc func(i int) (h [32]byte, data func() ([]byte, error), err error)
+
+// contentChunks splits content in memory into chunks.
+func contentChunks(content []byte) chunkFunc {
+	return func(i int) ([32]byte, func() ([]byte, error), error) {
+		data := content[i*blob.ChunkSize : min((i+1)*blob.ChunkSize, len(content))]
+		return sha256.Sum256(data), func() ([]byte, error) { return data, nil }, nil
+	}
+}
+
+// lazyChunks reads a lazy value's chunks. Content in a blob store comes
+// with its chunk hashes, so a chunk this store has isn't read at all;
+// other content is read a chunk at a time.
+func lazyChunks(l value.Lazy) chunkFunc {
+	if r, ok := l.Src.(*BlobReader); ok {
+		return func(i int) ([32]byte, func() ([]byte, error), error) {
+			h := r.rec.Chunks[i]
+			return h, func() ([]byte, error) { return r.db.blobs.Get(h, r.locs[i]) }, nil
+		}
+	}
+	buf := make([]byte, blob.ChunkSize)
+	return func(i int) ([32]byte, func() ([]byte, error), error) {
+		off := int64(i) * blob.ChunkSize
+		data := buf[:min(int64(blob.ChunkSize), l.Ref.Len-off)]
+		if _, err := l.Src.ReadAt(data, off); err != nil {
+			return [32]byte{}, nil, err
+		}
+		return sha256.Sum256(data), func() ([]byte, error) { return data, nil }, nil
+	}
+}
+
+// putBlob makes sure blob h, n bytes in the chunks chunk returns, is
+// stored.
+func (tx *Tx) putBlob(h [32]byte, n int64, chunk chunkFunc) error {
 	if tx.blobsPut[h] {
 		return nil
 	}
@@ -113,10 +171,12 @@ func (tx *Tx) putBlob(h [32]byte, content []byte) error {
 		return nil
 	}
 	store := tx.db.blobs
-	rec := keys.BlobRecord{Len: int64(len(content))}
-	for off := 0; off < len(content); off += blob.ChunkSize {
-		data := content[off:min(off+blob.ChunkSize, len(content))]
-		ch := sha256.Sum256(data)
+	rec := keys.BlobRecord{Len: n}
+	for i := 0; int64(i)*blob.ChunkSize < n; i++ {
+		ch, data, err := chunk(i)
+		if err != nil {
+			return wrap(CodeInternal, err)
+		}
 		rec.Chunks = append(rec.Chunks, ch)
 		ck := keys.Chunk(ch)
 		cur, ok, err := tx.get(ck)
@@ -133,7 +193,11 @@ func (tx *Tx) putBlob(h [32]byte, content []byte) error {
 		if uploaded {
 			tx.t.Set(blobSegKey(loc.Seg), nil)
 		} else {
-			if loc, err = tx.db.putChunk(ch, data); err != nil {
+			d, err := data()
+			if err != nil {
+				return wrap(CodeInternal, err)
+			}
+			if loc, err = tx.db.putChunk(ch, d); err != nil {
 				return tx.fail(err)
 			}
 			tx.blobSync = append(tx.blobSync, loc)
@@ -197,8 +261,9 @@ func (tx *Tx) syncBlobs() error {
 	return nil
 }
 
-// resolve replaces a blob reference with the value it stands for.
-func (tx *Tx) resolve(v value.Value) (value.Value, error) {
+// lazy replaces a blob reference with a lazy value reading the blob's
+// content from the locations this transaction sees.
+func (tx *Tx) lazy(v value.Value) (value.Value, error) {
 	r, ok := v.(value.BlobRef)
 	if !ok {
 		return v, nil
@@ -207,12 +272,7 @@ func (tx *Tx) resolve(v value.Value) (value.Value, error) {
 	if err != nil {
 		return nil, err
 	}
-	content, err := readChunks(tx.db.blobs, rec, locs, 0, rec.Len)
-	if err != nil {
-		return nil, wrap(CodeInternal, err)
-	}
-	out, err := value.FromBlob(r, content)
-	return out, wrap(CodeInternal, err)
+	return value.Lazy{Ref: r, Src: tx.db.newReader(rec, locs)}, nil
 }
 
 // blobLocs returns a blob's record and the locations of its chunks.
@@ -244,24 +304,6 @@ func (tx *Tx) blobLocs(h [32]byte) ([]blob.Loc, keys.BlobRecord, error) {
 		locs[i] = blob.Loc(l)
 	}
 	return locs, rec, nil
-}
-
-// readChunks reads n bytes from offset off of a blob's content.
-func readChunks(s *blob.Store, rec keys.BlobRecord, locs []blob.Loc, off, n int64) ([]byte, error) {
-	if off < 0 || n < 0 || off+n > rec.Len {
-		return nil, fmt.Errorf("blob range %d+%d outside %d bytes", off, n, rec.Len)
-	}
-	out := make([]byte, 0, n)
-	for i := int(off / blob.ChunkSize); int64(len(out)) < n; i++ {
-		data, err := s.Get(rec.Chunks[i], locs[i])
-		if err != nil {
-			return nil, err
-		}
-		start := max(off+int64(len(out))-int64(i)*blob.ChunkSize, 0)
-		data = data[start:]
-		out = append(out, data[:min(int64(len(data)), n-int64(len(out)))]...)
-	}
-	return out, nil
 }
 
 // markBlobsDirty marks an entity for the collector if it has any blob
@@ -303,19 +345,34 @@ func (tx *Tx) droppedBlobs(st *entState) error {
 
 // --- reading blobs outside a transaction ---
 
-// BlobReader reads a stored value's content after the transaction that
-// found it has ended, as download leases do.
+// BlobReader reads a large value's content from the blob store, also
+// after the transaction that found it has ended: the content of a
+// value.Lazy, and of download leases. It keeps the segments it reads
+// from until Close, or until it is garbage.
 type BlobReader struct {
 	Len   int64
 	db    *DB
 	rec   keys.BlobRecord
 	locs  []blob.Loc
 	unpin func()
+
+	// The chunk read last, so that reads smaller than a chunk, one after
+	// another, read and check each chunk once.
+	mu       sync.Mutex
+	lastNum  int
+	lastData []byte
+}
+
+// newReader returns a reader of the chunks at locs. The caller must hold
+// a snapshot that can read them, or another reader of them.
+func (db *DB) newReader(rec keys.BlobRecord, locs []blob.Loc) *BlobReader {
+	r := &BlobReader{Len: rec.Len, db: db, rec: rec, locs: locs, unpin: db.blobs.Pin(locs)}
+	runtime.AddCleanup(r, func(unpin func()) { unpin() }, r.unpin)
+	return r
 }
 
 // OpenBlob returns a reader of the content with SHA-256 h if the blob
 // store holds it, so a lease can keep the reader instead of the content.
-// The reader keeps the segments it reads from until Close.
 func (db *DB) OpenBlob(h [32]byte) (*BlobReader, bool, error) {
 	var r *BlobReader
 	err := db.View(func(tx *Tx) error {
@@ -326,16 +383,77 @@ func (db *DB) OpenBlob(h [32]byte) (*BlobReader, bool, error) {
 		if err != nil {
 			return err
 		}
-		// The snapshot can read locs, so they are still there to pin.
-		r = &BlobReader{Len: rec.Len, db: db, rec: rec, locs: locs, unpin: db.blobs.Pin(locs)}
+		r = db.newReader(rec, locs)
 		return nil
 	})
 	return r, r != nil, err
 }
 
-// ReadAt reads n bytes from offset off.
-func (r *BlobReader) ReadAt(off, n int64) ([]byte, error) {
-	return readChunks(r.db.blobs, r.rec, r.locs, off, n)
+// ReaderOf returns the blob store reader behind a lazy value, if it has
+// one, holding the segments for the caller until its Close.
+func ReaderOf(l value.Lazy) (*BlobReader, bool) {
+	r, ok := l.Src.(*BlobReader)
+	if !ok {
+		return nil, false
+	}
+	return r.Retain(), true
+}
+
+// Retain returns another reader of the same content, holding the
+// segments until its own Close.
+func (r *BlobReader) Retain() *BlobReader { return r.db.newReader(r.rec, r.locs) }
+
+// Read reads n bytes from offset off.
+func (r *BlobReader) Read(off, n int64) ([]byte, error) {
+	if n < 0 {
+		return nil, fmt.Errorf("blob: negative length %d", n)
+	}
+	out := make([]byte, n)
+	return out, r.readInto(off, out)
+}
+
+// readInto fills p from offset off, through the last chunk read.
+func (r *BlobReader) readInto(off int64, p []byte) error {
+	n := int64(len(p))
+	if off < 0 || off+n > r.Len {
+		return fmt.Errorf("blob range %d+%d outside %d bytes", off, n, r.Len)
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	done := int64(0)
+	for i := int(off / blob.ChunkSize); done < n; i++ {
+		if r.lastData == nil || r.lastNum != i {
+			data, err := r.db.blobs.Get(r.rec.Chunks[i], r.locs[i])
+			if err != nil {
+				return err
+			}
+			r.lastNum, r.lastData = i, data
+		}
+		start := max(off+done-int64(i)*blob.ChunkSize, 0)
+		done += int64(copy(p[done:], r.lastData[start:]))
+	}
+	return nil
+}
+
+// ReadAt implements io.ReaderAt.
+func (r *BlobReader) ReadAt(p []byte, off int64) (int, error) {
+	if off < 0 {
+		return 0, fmt.Errorf("blob: negative offset %d", off)
+	}
+	if off >= r.Len {
+		if len(p) == 0 {
+			return 0, nil
+		}
+		return 0, io.EOF
+	}
+	n := min(int64(len(p)), r.Len-off)
+	if err := r.readInto(off, p[:n]); err != nil {
+		return 0, err
+	}
+	if n < int64(len(p)) {
+		return int(n), io.EOF
+	}
+	return int(n), nil
 }
 
 // Close lets the collector remove the segments the reader used.
@@ -346,17 +464,28 @@ func (r *BlobReader) Close() { r.unpin() }
 // Upload is content streamed into the blob store ahead of the statement
 // that stores it (spec/protocol.md §7).
 type Upload struct {
-	Hash   [32]byte
-	Len    int64
-	chunks []blob.Loc
-	hashes [][32]byte
+	Hash    [32]byte
+	Len     int64
+	of      value.Code
+	invalid error // why the content isn't a valid value of its type
+	chunks  []blob.Loc
+	hashes  [][32]byte
+	r       *BlobReader
 }
 
 // StoreUpload writes r's content to the blob store as chunks no record
 // references yet. A write of the same content within ttl uses them as
 // they are; after that they are garbage. It reads at most limit bytes.
-func (db *DB) StoreUpload(r io.Reader, limit int64, ttl time.Duration) (*Upload, error) {
-	u := &Upload{}
+// Text is normalized to NFC as it arrives and checked to be UTF-8, and
+// an image's header is checked: an invalid upload is stored, and fails
+// when a statement uses it (UploadValue).
+func (db *DB) StoreUpload(r io.Reader, of value.Code, limit int64, ttl time.Duration) (*Upload, error) {
+	u := &Upload{of: of}
+	var text *value.TextChecker
+	if of == value.CodeText {
+		text = &value.TextChecker{}
+		r = norm.NFC.Reader(r)
+	}
 	whole := sha256.New()
 	buf := make([]byte, blob.ChunkSize)
 	var last blob.Loc
@@ -368,6 +497,9 @@ func (db *DB) StoreUpload(r io.Reader, limit int64, ttl time.Duration) (*Upload,
 			}
 			data := buf[:n]
 			whole.Write(data)
+			if text != nil {
+				text.Write(data)
+			}
 			ch := sha256.Sum256(data)
 			loc, perr := db.putChunk(ch, data)
 			if perr != nil {
@@ -389,14 +521,33 @@ func (db *DB) StoreUpload(r io.Reader, limit int64, ttl time.Duration) (*Upload,
 		}
 	}
 	copy(u.Hash[:], whole.Sum(nil))
+	u.r = db.newReader(keys.BlobRecord{Len: u.Len, Chunks: u.hashes}, u.chunks)
+	switch of {
+	case value.CodeText:
+		u.invalid = text.Err()
+	case value.CodeImage:
+		_, u.invalid = value.ImageFormat(io.NewSectionReader(u.r, 0, u.Len))
+	}
 	return u, nil
 }
 
 // ReadUpload reads n bytes from offset off of an upload's content.
 func (db *DB) ReadUpload(u *Upload, off, n int64) ([]byte, error) {
-	rec := keys.BlobRecord{Len: u.Len, Chunks: u.hashes}
-	out, err := readChunks(db.blobs, rec, u.chunks, off, n)
+	out, err := u.r.Read(off, n)
 	return out, wrap(CodeInternal, err)
+}
+
+// UploadValue returns an upload as a lazy value to pass to a statement,
+// or why its content isn't a valid value of its type.
+func (db *DB) UploadValue(u *Upload, mediaType string) (value.Value, error) {
+	if u.invalid != nil {
+		return nil, u.invalid
+	}
+	ref := value.BlobRef{Of: u.of, Hash: u.Hash, Len: u.Len}
+	if u.of == value.CodeBytes {
+		ref.Media = mediaType
+	}
+	return value.Lazy{Ref: ref, Src: u.r.Retain()}, nil
 }
 
 // --- the collector ---

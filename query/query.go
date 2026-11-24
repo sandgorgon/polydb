@@ -62,6 +62,13 @@ type Context struct {
 	// NoPlanner runs pipelines as written, scanning every kind, without
 	// the planner (tests compare the two).
 	NoPlanner bool
+	// MaxLoad is how many bytes of large values the statement may load
+	// (engine.Options.MaxLoad); zero or negative means no limit.
+	MaxLoad int64
+	// LazyResults leaves large values in results as value.Lazy, for
+	// callers that send or read them a piece at a time. Otherwise they
+	// are loaded (within MaxLoad).
+	LazyResults bool
 }
 
 // Access decides what the user running a statement may do with entities
@@ -135,6 +142,11 @@ func Exec(ctx *Context, s lang.Stmt) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !ctx.LazyResults {
+		if err := x.loadResult(s, res); err != nil {
+			return nil, err
+		}
+	}
 	res.Warnings = append(res.Warnings, info.Warnings...)
 	return res, nil
 }
@@ -142,8 +154,49 @@ func Exec(ctx *Context, s lang.Stmt) (*Result, error) {
 func newExecutor(ctx *Context, info *lang.Info) *executor {
 	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
 	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}, hidden: map[value.ID]bool{}, access: ctx.Access}
-	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, LookupHandle: x.handleValue, Now: x.now}
+	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, LookupHandle: x.handleValue, Now: x.now,
+		MaxLoad: ctx.MaxLoad}
 	return x
+}
+
+// loadResult loads the large values in a result's cells and entities.
+func (x *executor) loadResult(s lang.Stmt, res *Result) error {
+	load := func(v value.Value) (value.Value, error) {
+		v, err := x.ev.Load(s, v)
+		return v, fail(s, err)
+	}
+	var cell func(c any) (any, error)
+	cell = func(c any) (any, error) {
+		switch c := c.(type) {
+		case value.Value:
+			return load(c)
+		case *Entity:
+			for _, f := range c.Fields {
+				if f.Value != nil {
+					var err error
+					if f.Value, err = load(f.Value); err != nil {
+						return nil, err
+					}
+				}
+			}
+		case *Path:
+			for _, n := range c.Nodes {
+				if _, err := cell(n); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return c, nil
+	}
+	for _, row := range res.Rows {
+		for i, c := range row {
+			var err error
+			if row[i], err = cell(c); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // executor runs one checked statement.

@@ -481,7 +481,11 @@ func (x *executor) distinct(st *lang.Distinct, rows []prow) ([]prow, error) {
 			}
 		} else {
 			for _, n := range slices.Sorted(maps.Keys(r.vars)) {
-				vs = append(vs, value.MustText(n), r.vars[n])
+				v, err := x.ev.Load(st, r.vars[n])
+				if err != nil {
+					return nil, fail(st, err)
+				}
+				vs = append(vs, value.MustText(n), v)
 			}
 		}
 		if k := rowKey(vs); !seen[k] {
@@ -517,7 +521,7 @@ func (x *executor) show(st *lang.Show, rows []prow) ([]prow, []string, error) {
 	for i, r := range rows {
 		vars := lang.Row{}
 		for j, it := range st.Items {
-			v, err := x.eval(it.Expr, r.frame())
+			v, err := x.evalLazy(it.Expr, r.frame())
 			if err != nil {
 				return nil, nil, err
 			}

@@ -3,6 +3,8 @@ package polydb
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"sync"
 
 	"github.com/sandgorgon/polydb/engine"
@@ -44,6 +46,7 @@ func (db *embedded) run(ctx context.Context, txn *value.ID, stmts []lang.Stmt, p
 		return nil, nil, convertErr(err, -1)
 	}
 	defer r.Close()
+	r.LazyResults = true // large values become *Blob, read when the application reads them
 	var out []*query.Result
 	for i, st := range stmts {
 		res, err := r.Exec(ctx, st, vals)
@@ -316,7 +319,7 @@ func fromQuery(c any) any {
 		for _, f := range x.Fields {
 			pf := &Field{ID: f.ID, Name: f.Name, Type: f.Type.String(), Doc: f.Doc, Declared: f.Declared}
 			if f.Value != nil {
-				pf.Value = f.Value
+				pf.Value = fromQuery(f.Value)
 			}
 			e.Fields = append(e.Fields, pf)
 		}
@@ -332,8 +335,36 @@ func fromQuery(c any) any {
 			p.Rels = append(p.Rels, fromQuery(r).(*Relation))
 		}
 		return p
+	case value.Lazy:
+		return lazyBlob(x)
 	}
 	return c
+}
+
+// lazyBlob returns a large value still in the blob store as a Blob that
+// reads it when the application does.
+func lazyBlob(l value.Lazy) *Blob {
+	typ, media := l.Code().String(), l.MediaType()
+	switch l.Code() {
+	case value.CodeText:
+		media = "text/plain; charset=utf-8"
+	case value.CodeImage:
+		if format, err := value.ImageFormat(io.NewSectionReader(l.Src, 0, l.Len())); err == nil {
+			media = "image/" + format
+		}
+	}
+	b := NewBlob(typ, l.Len(), media, func(ctx context.Context, off, n int64) ([]byte, error) {
+		if off < 0 || n < 0 || off+n > l.Len() {
+			return nil, fmt.Errorf("polydb: blob range %d+%d outside %d bytes", off, n, l.Len())
+		}
+		out := make([]byte, n)
+		if _, err := l.Src.ReadAt(out, off); err != nil {
+			return nil, err
+		}
+		return out, nil
+	})
+	b.lazy = &l
+	return b
 }
 
 // meta converts metadata values.

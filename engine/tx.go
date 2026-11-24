@@ -201,8 +201,9 @@ type entState struct {
 
 func (tx *Tx) loadEntity(id value.ID) (*entState, error) { return tx.loadEntityAs(id, true) }
 
-// loadEntityAs loads an entity, leaving large values as blob references
-// unless resolve is set. Such a state is only for reading.
+// loadEntityAs loads an entity, with large values as value.Lazy, or left
+// as blob references unless resolve is set. Such a state is only for
+// reading.
 func (tx *Tx) loadEntityAs(id value.ID, resolve bool) (*entState, error) {
 	b, ok, err := tx.get(keys.Entity(id))
 	if err != nil {
@@ -238,7 +239,7 @@ func (tx *Tx) loadEntityAs(id value.ID, resolve bool) (*entState, error) {
 				st.fields[name], st.orig[name] = f, f
 				return nil
 			}
-			if f.Value, err = tx.resolve(f.Value); err != nil {
+			if f.Value, err = tx.lazy(f.Value); err != nil {
 				return err
 			}
 			if st.blobs == nil {
@@ -330,6 +331,9 @@ func (tx *Tx) save(st *entState) error {
 	}
 
 	// Side keys: compute before and after, then write the difference.
+	if err := tx.loadKeyed(st); err != nil {
+		return err
+	}
 	var before, after map[string][]byte
 	if !st.isNew {
 		before = tx.sideKeys(st.origKind, st.e, st.orig)
@@ -453,6 +457,52 @@ func checkRequired(st *entState) error {
 		}
 	}
 	return nil
+}
+
+// loadKeyed loads the lazy values of st's fields that unique constraints
+// and indexes (those of its kinds, and extra) key, since keys hold
+// content. A field unchanged since loading stays unchanged.
+func (tx *Tx) loadKeyed(st *entState, extra ...*model.Index) error {
+	keyed := func(kind *model.Kind, f *model.Field) bool {
+		if fd := fieldDef(kind, f); fd != nil && fd.Unique && f.Declared {
+			return true
+		}
+		ixs := extra
+		if kind != nil {
+			ixs = slices.Concat(tx.Catalog().IndexesOn(kind.ID), extra)
+		}
+		for _, ix := range ixs {
+			for _, k := range ix.Keys {
+				if k.Field == f.Name {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	load := func(kind *model.Kind, fields map[string]*model.Field, also map[string]*model.Field) error {
+		for name, f := range fields {
+			l, ok := f.Value.(value.Lazy)
+			if !ok || !keyed(kind, f) {
+				continue
+			}
+			v, err := l.Load()
+			if err != nil {
+				return wrap(CodeInternal, err)
+			}
+			cp := *f
+			cp.Value = v
+			if also != nil && also[name] == f {
+				also[name] = &cp
+			}
+			fields[name] = &cp
+		}
+		return nil
+	}
+	if err := load(st.origKind, st.orig, st.fields); err != nil {
+		return err
+	}
+	return load(st.kind, st.fields, nil)
 }
 
 // sideKeys returns the unique and back-ref keys an entity's fields need,

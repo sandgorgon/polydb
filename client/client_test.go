@@ -33,9 +33,16 @@ type testServer struct {
 
 // startServer runs a server with a TLS identity on loopback, and a Unix
 // socket where the current OS user logs in as admin.
-func startServer(t *testing.T) *testServer {
+func startServer(t testing.TB) *testServer {
 	t.Helper()
-	eng, err := engine.Open(engine.Options{PasswordIterations: security.MinIterations})
+	return startServerWith(t, engine.Options{})
+}
+
+// startServerWith is startServer with an engine opened with opts.
+func startServerWith(t testing.TB, opts engine.Options) *testServer {
+	t.Helper()
+	opts.PasswordIterations = security.MinIterations
+	eng, err := engine.Open(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,5 +532,53 @@ func TestUploads(t *testing.T) {
 			t.Errorf("%s uploading: %v", user, err)
 		}
 		udb.Close()
+	}
+}
+
+// Large values come back as blobs from both implementations: read when
+// scanned, and passed back as parameters without being read.
+func TestLargeValuesShared(t *testing.T) {
+	ctx := context.Background()
+	big := strings.Repeat("ab€", 20<<10) // 100 KiB: in the blob store, sent by reference
+	for name, db := range implementations(t) {
+		t.Run(name, func(t *testing.T) {
+			kind := map[string]string{"embedded": "LE", "client": "LC"}[name]
+			if _, err := db.Exec(ctx, `define kind `+kind+` { name: text, body: text? };
+				create `+kind+` { name: "a", body: $b }`, polydb.Params{"b": big}); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := db.Query(ctx, `find `+kind+` x | show x.body, x.body as again, x`, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !rows.Next() {
+				t.Fatal("no row")
+			}
+			b, ok := rows.Values()[0].(*polydb.Blob)
+			if !ok || b.Type != "text" || b.Length != int64(len(big)) {
+				t.Fatalf("large value as %T", rows.Values()[0])
+			}
+			var s string
+			var e *polydb.Entity
+			if err := rows.Scan(&s, new(any), &e); err != nil || s != big {
+				t.Fatalf("scan: %d bytes, %v", len(s), err)
+			}
+			if _, ok := e.Value("body").(*polydb.Blob); !ok {
+				t.Errorf("entity field is %T", e.Value("body"))
+			}
+			rows.Close()
+			if _, err := db.Exec(ctx, `create `+kind+` { name: "b", body: $b }`, polydb.Params{"b": b}); err != nil {
+				t.Fatal(err)
+			}
+			rows, err = db.Query(ctx, `find `+kind+` x, `+kind+` y | where x.name = "a" and y.name = "b" | show x.body = y.body`, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var same bool
+			if !rows.Next() || rows.Scan(&same) != nil || !same {
+				t.Error("blob passed back stored differently")
+			}
+			rows.Close()
+		})
 	}
 }

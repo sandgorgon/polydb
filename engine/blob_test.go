@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"math/rand/v2"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sandgorgon/polydb/blob"
 	"github.com/sandgorgon/polydb/keys"
 	"github.com/sandgorgon/polydb/model"
 	"github.com/sandgorgon/polydb/storage/vfs"
@@ -91,8 +93,20 @@ func collect(t *testing.T, db *DB) BlobResult {
 	return r
 }
 
+// loaded loads a lazy value.
+func loaded(t *testing.T, v value.Value) value.Value {
+	t.Helper()
+	v, err := value.Load(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v
+}
+
+// sameVal compares values, loading got if it is lazy.
 func sameVal(t *testing.T, got, want value.Value) {
 	t.Helper()
+	got = loaded(t, got)
 	if !value.Equal(got, want) || got.Code() != want.Code() {
 		t.Fatalf("got %.60s, want %.60s", got, want)
 	}
@@ -121,18 +135,29 @@ func TestBlobRoundTrip(t *testing.T) {
 	sameVal(t, fieldValue(t, db, a, "body"), body)
 	sameVal(t, fieldValue(t, db, a, "pic"), pic)
 	sameVal(t, fieldValue(t, db, b, "data"), small)
-	if got := fieldValue(t, db, a, "data").(value.Bytes).MediaType(); got != "application/octet-stream" {
+	// Large values read back lazily; small ones as they are.
+	lz, ok := fieldValue(t, db, a, "data").(value.Lazy)
+	if !ok || lz.Len() != int64(data.Len()) || lz.Code() != value.CodeBytes {
+		t.Fatalf("large value read as %T", fieldValue(t, db, a, "data"))
+	}
+	if _, ok := fieldValue(t, db, b, "data").(value.Bytes); !ok {
+		t.Fatal("small value read lazily")
+	}
+	if got := loaded(t, fieldValue(t, db, a, "data")).(value.Bytes).MediaType(); got != "application/octet-stream" {
 		t.Fatalf("media type %q", got)
+	}
+	if n, err := fieldValue(t, db, a, "body").(value.Lazy).RuneCount(); err != nil || n != int64(body.Len()) {
+		t.Fatalf("rune count %d, %v; want %d", n, err, body.Len())
 	}
 	e := get(t, db, a)
 	f, _ := e.Field("pic")
-	if img := f.Value.(value.Image); img.Format() != "png" || img.Width() != 1 {
+	if img := loaded(t, f.Value).(value.Image); img.Format() != "png" || img.Width() != 1 {
 		t.Fatalf("image %s %d", img.Format(), img.Width())
 	}
 
 	// Large values are references in storage, small ones inline.
 	for _, name := range []string{"data", "body", "pic"} {
-		if r, ok := rawField(t, db, a, name).(value.BlobRef); !ok || r.Len != int64(value.LargeLen(fieldValue(t, db, a, name))) {
+		if r, ok := rawField(t, db, a, name).(value.BlobRef); !ok || r.Len != int64(value.LargeLen(loaded(t, fieldValue(t, db, a, name)))) {
 			t.Fatalf("%s stored as %.40s", name, rawField(t, db, a, name))
 		}
 	}
@@ -301,7 +326,7 @@ func TestBlobRewriteAndSnapshots(t *testing.T) {
 		sameVal(t, v, blobBytes(i, 100<<10))
 	}
 	old.Rollback()
-	if r := collect(t, db); r.Segments == 0 {
+	if r := collectUnpinned(t, db); r.Segments == 0 {
 		t.Fatalf("no segment deleted once the reader ended: %+v", r)
 	}
 	st := blobStats(t, db)
@@ -335,7 +360,7 @@ func TestBlobReaderPins(t *testing.T) {
 	update(t, db, func(tx *Tx) error { return tx.Delete(id) })
 	collect(t, db)
 	collect(t, db)
-	part, err := r.ReadAt(1<<20-10, 20)
+	part, err := r.Read(1<<20-10, 20)
 	if err != nil {
 		t.Fatalf("pinned read: %v", err)
 	}
@@ -343,20 +368,41 @@ func TestBlobReaderPins(t *testing.T) {
 		t.Fatal("pinned read returned the wrong bytes")
 	}
 	r.Close()
-	if r := collect(t, db); r.Segments == 0 {
+	if r := collectUnpinned(t, db); r.Segments == 0 {
 		t.Fatalf("segment not deleted after unpin: %+v", r)
 	}
+}
+
+// collectUnpinned collects after letting the garbage collector release
+// the segments that lazy values read in earlier transactions pinned,
+// trying a few times since cleanups run in the background.
+func collectUnpinned(t *testing.T, db *DB) BlobResult {
+	t.Helper()
+	var total BlobResult
+	for range 20 {
+		runtime.GC()
+		time.Sleep(5 * time.Millisecond)
+		r := collect(t, db)
+		total.Uses += r.Uses
+		total.Blobs += r.Blobs
+		total.Chunks += r.Chunks
+		total.Moved += r.Moved
+		if total.Segments += r.Segments; r.Segments > 0 {
+			break
+		}
+	}
+	return total
 }
 
 func TestBlobUpload(t *testing.T) {
 	db := newDB(t)
 	defineFiles(t, db, false)
 	data := content(1, 2<<20+5)
-	u, err := db.StoreUpload(bytes.NewReader(data), 10<<20, time.Minute)
+	u, err := db.StoreUpload(bytes.NewReader(data), value.CodeBytes, 10<<20, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.StoreUpload(bytes.NewReader(data), 1<<20, time.Minute); err == nil {
+	if _, err := db.StoreUpload(bytes.NewReader(data), value.CodeBytes, 1<<20, time.Minute); err == nil {
 		t.Fatal("upload over the limit accepted")
 	}
 	got, err := db.ReadUpload(u, 0, u.Len)
@@ -369,6 +415,99 @@ func TestBlobUpload(t *testing.T) {
 		t.Fatalf("stored uploaded content again: %d → %d bytes", before, after)
 	}
 	sameVal(t, fieldValue(t, db, id, "data"), must(value.NewBytes(data, "")))
+
+	// As a lazy value, an upload is stored without being read.
+	u2, err := db.StoreUpload(bytes.NewReader(content(2, 3<<20)), value.CodeBytes, 10<<20, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lv, err := db.UploadValue(u2, "application/x-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before = blobStats(t, db).FileBytes
+	id2 := create(t, db, "File", Fields{"name": txt("b"), "data": lv})
+	if after := blobStats(t, db).FileBytes; after != before {
+		t.Fatalf("stored a lazy upload again: %d → %d bytes", before, after)
+	}
+	got2 := loaded(t, fieldValue(t, db, id2, "data")).(value.Bytes)
+	if !bytes.Equal(got2.Go(), content(2, 3<<20)) || got2.MediaType() != "application/x-test" {
+		t.Fatal("lazy upload stored wrong")
+	}
+}
+
+// Uploaded text is normalized to NFC and checked to be UTF-8, also
+// across chunk boundaries; uploaded images have their header checked.
+func TestBlobUploadChecks(t *testing.T) {
+	db := newDB(t)
+	defineFiles(t, db, false)
+	upload := func(data []byte, of value.Code) (value.Value, error) {
+		t.Helper()
+		u, err := db.StoreUpload(bytes.NewReader(data), of, 10<<20, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return db.UploadValue(u, "")
+	}
+	// "é" as e + combining acute, with a two-byte character straddling
+	// the first chunk boundary.
+	decomposed := strings.Repeat("e\u0301", 1<<19)
+	straddle := strings.Repeat("a", blob.ChunkSize-1) + "ü" + strings.Repeat("b", 30<<10)
+	for _, s := range []string{decomposed, straddle} {
+		v, err := upload([]byte(s), value.CodeText)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := create(t, db, "File", Fields{"name": txt("t"), "body": v})
+		sameVal(t, fieldValue(t, db, id, "body"), txt(s)) // txt normalizes too
+	}
+	bad := []byte(strings.Repeat("a", blob.ChunkSize-1) + "\xc3" + strings.Repeat("b", 10))
+	if _, err := upload(bad, value.CodeText); err == nil {
+		t.Fatal("invalid UTF-8 across chunks accepted")
+	}
+	if _, err := upload([]byte(strings.Repeat("a", 30<<10)+"\xe2\x82"), value.CodeText); err == nil {
+		t.Fatal("text ending in a partial character accepted")
+	}
+	if _, err := upload(content(3, 40<<10), value.CodeImage); err == nil {
+		t.Fatal("non-image accepted as an image")
+	}
+	img := pngOf(40 << 10)
+	v, err := upload(img.Data(), value.CodeImage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := create(t, db, "File", Fields{"name": txt("i"), "pic": v})
+	if got := loaded(t, fieldValue(t, db, id, "pic")).(value.Image); got.Format() != "png" {
+		t.Fatalf("image format %q", got.Format())
+	}
+}
+
+// A lazy value stored in another database is copied there a chunk at a
+// time; one whose blob the collector removed after it was read is still
+// readable from the segments it pins, and is stored again.
+func TestBlobLazyCopies(t *testing.T) {
+	eng := must(Open(Options{Now: func() time.Time { return clock }, HistorySweep: -1, StatsRefresh: -1}))
+	defer eng.Close()
+	a, b := must(eng.CreateDatabase("a")), must(eng.CreateDatabase("b"))
+	defineFiles(t, a, false)
+	defineFiles(t, b, false)
+	data := blobBytes(1, 2<<20+77)
+	ida := create(t, a, "File", Fields{"name": txt("x"), "data": data})
+	lv := fieldValue(t, a, ida, "data")
+	idb := create(t, b, "File", Fields{"name": txt("y"), "data": lv})
+	sameVal(t, fieldValue(t, b, idb, "data"), data)
+	if st := blobStats(t, b); st.Blobs != 1 || st.Chunks != 3 {
+		t.Fatalf("copy into b: %+v", st)
+	}
+
+	// Delete the only use in a, collect, then store the old lazy value.
+	update(t, a, func(tx *Tx) error { return tx.Delete(ida) })
+	collect(t, a)
+	if st := blobStats(t, a); st.Blobs != 0 {
+		t.Fatalf("blob not collected: %+v", st)
+	}
+	id := create(t, a, "File", Fields{"name": txt("again"), "data": lv})
+	sameVal(t, fieldValue(t, a, id, "data"), data)
 }
 
 func TestBlobDurable(t *testing.T) {
@@ -481,6 +620,7 @@ func TestBlobConcurrent(t *testing.T) {
 				t.Errorf("entity %s: %v", id, err)
 				return false
 			}
+			v = loaded(t, v)
 			n := value.LargeLen(v)
 			seed := (n - 20<<10) / 7000
 			sameVal(t, v, blobBytes(seed, n))

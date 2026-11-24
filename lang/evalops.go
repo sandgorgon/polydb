@@ -57,12 +57,23 @@ func (ev *Evaluator) binary(e *Binary, f *Frame) (value.Value, error) {
 	if e.Op == "and" || e.Op == "or" {
 		return ev.logic(e, f)
 	}
-	x, err := ev.Eval(e.X, f)
+	x, err := ev.EvalLazy(e.X, f)
 	if err != nil {
 		return nil, err
 	}
-	y, err := ev.Eval(e.Y, f)
+	y, err := ev.EvalLazy(e.Y, f)
 	if err != nil {
+		return nil, err
+	}
+	if e.Op == "=" || e.Op == "!=" {
+		if eq, ok := lazyEqual(x, y); ok {
+			return value.Bool(eq == (e.Op == "=")), nil
+		}
+	}
+	if x, err = ev.Load(e.X, x); err != nil {
+		return nil, err
+	}
+	if y, err = ev.Load(e.Y, y); err != nil {
 		return nil, err
 	}
 	switch e.Op {
@@ -594,8 +605,33 @@ func mergeMaps(e Node, a, b value.Map) (value.Value, error) {
 
 // ===== Type tests =====
 
+// lazyEqual decides x = y without loading when a large value is
+// involved and the references tell: two values of the same type with
+// the same content have the same hash, and values of different lengths
+// differ. ok is false when the content must be compared.
+func lazyEqual(x, y value.Value) (eq, ok bool) {
+	lx, xok := x.(value.Lazy)
+	ly, yok := y.(value.Lazy)
+	if !xok && !yok {
+		return false, false
+	}
+	if !xok {
+		x, y, lx = y, x, ly
+	}
+	if x.Code() != y.Code() {
+		return false, false // the usual rules decide, after loading
+	}
+	if ly, ok := y.(value.Lazy); ok {
+		return lx.Ref.Hash == ly.Ref.Hash, true
+	}
+	if n := value.LargeLen(y); n >= 0 && int64(n) != lx.Len() {
+		return false, true
+	}
+	return false, false
+}
+
 func (ev *Evaluator) is(e *Is, f *Frame) (value.Value, error) {
-	x, err := ev.Eval(e.X, f)
+	x, err := ev.EvalLazy(e.X, f)
 	if err != nil {
 		return nil, err
 	}
