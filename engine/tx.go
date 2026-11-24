@@ -34,6 +34,7 @@ type Tx struct {
 
 	loadLimit    int64 // SetMaxLoad
 	loadLimitSet bool
+	importing    bool       // ImportEntity: ref targets may come later
 	blobSync     []blob.Loc // chunks to sync before committing
 	commitSeq    *uint64    // set to the commit's sequence number
 }
@@ -200,6 +201,8 @@ type entState struct {
 	deleted  bool
 	// blobs names the loaded fields whose records held blob references.
 	blobs map[string]bool
+	// imported keeps the metadata an import gives (ImportEntity).
+	imported bool
 }
 
 func (tx *Tx) loadEntity(id value.ID) (*entState, error) { return tx.loadEntityAs(id, true) }
@@ -406,8 +409,10 @@ func (tx *Tx) save(st *entState) error {
 		}
 		return nil
 	}
-	st.e.Meta.Version++
-	st.e.Meta.Updated = tx.timeNow()
+	if !st.imported {
+		st.e.Meta.Version++
+		st.e.Meta.Updated = tx.timeNow()
+	}
 	tx.t.Set(keys.Entity(id), keys.EncodeEntity(st.e))
 	if st.isNew {
 		tx.t.Set(keys.Node(id), keys.EncodeNode(keys.NodeRef{Kind: model.NodeEntity}))

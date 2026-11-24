@@ -111,7 +111,7 @@ Reserved now for future features (inference rules, kind reuse and others), so th
 
 | Group | Statements |
 |---|---|
-| Databases and session | `create database`, `drop database`, `use`, `set`, `show databases`, `backup database`, `restore database` |
+| Databases and session | `create database`, `drop database`, `use`, `set`, `show databases`, `backup database`, `restore database`, `export`, `import` |
 | Definitions | `define kind / relation / format / index`, `alter …`, `drop …` |
 | Data | `create`, `update`, `delete`, `relate`, `unrelate`, `push`, `pop` |
 | Queries | pipelines starting with `find` |
@@ -137,11 +137,30 @@ set max_load = 1073741824;       // bytes of large values a statement may load
 
 backup database sales to "nightly/mon";      // while it runs; needs admin on sales
 restore database sales_copy from "nightly/mon";  // creates sales_copy; needs admin
+
+export database sales to "sales.jsonl";          // or without "to": returned as a bytes value
+export database sales as native;
+import into database sales2 from "sales.jsonl";  // or from $file, an uploaded export
+import into database sales from $file with new ids;
+export (find Person p ~knows~> Person f) as dot; // also jsonl, native, csv, graph
+export security to "security.jsonl";             // users, roles, grants, password hashes
+export security without passwords;
+import security from "security.jsonl" replace;
 ```
 
 Queries can't span databases in v1.
 
 **Backups.** `backup database` writes the database as of one commit to a directory, while it keeps taking reads and writes: the key-value store's latest data written as compacted files, the blob segments copied, and a `BACKUP` file listing every file with its SHA-256, written last. History versions are data, so they are in the backup; users, roles and grants are server-wide and aren't. It returns the path, keys, files and bytes. `restore database` creates a new database from a backup, checking every file as it copies it; it never replaces an existing database (drop it first, or restore under another name and switch). Paths are directories relative to the server's backup directory (`polydb serve --backup-dir`, default `<data-dir>/backups`); a backup's directory must not exist yet. On a stopped server, `polydb restore [--database name] dir` does the same from any directory. Embedded programs call `DB.Backup` and `Engine.RestoreDatabase` with any path.
+
+**Export and import.** An export is a portable copy, read and written a record at a time, so neither side holds it in memory:
+
+- **Formats:** `jsonl` (JSON Lines, the default: one record per line, values in their JSON form, types.md §12.3) and `native` (the binary value encoding, smaller and faster). Large values are written once each, in pieces, before the first entity using them.
+- **A database export** holds its definitions (as `define` statements, run on import like any other), then every entity (ID, kind, metadata, fields, the definitions of fields it added itself) and every relation, as of one snapshot. History versions aren't exported: a backup keeps them.
+- **`import into database d`** creates the definitions d lacks; ones it has must be the same, or the import fails naming the difference before writing anything. IDs are kept, and one that exists is an error; `with new ids` gives every entity, field and relation a new ID and rewrites the refs pointing at them (plain `id` values are kept), which copies data into a database that has it. An export may only hold definitions, entities and relations: any other statement in it is refused. Entities and relations are written in batches of transactions; an import that fails keeps the batches before the failure, and says how far it got. Ref targets aren't checked, since they may come later in the export.
+- **`export (query)`** writes a query's result: `jsonl` and `native` as rows (whole entities and relations as maps), `csv` with a header and plain cells (text as is, numbers, times and IDs in their usual forms, bytes in base64, collections as JSON), and `dot` (Graphviz) or `graph` (JSON: `{"nodes": […], "edges": […]}`) with the result's entities as nodes, labelled by kind and a `name`, `title` or `label` field, and as edges the relations in the result and those between its nodes. A graph names large values without their content.
+- **`export security`** holds every user (with password credentials: salted PBKDF2 hashes, never the passwords, but still worth guessing at, so the file is a secret; `without passwords` leaves them out), key fingerprints, roles and memberships, and grants, with kinds by name so they apply to restored or imported databases. **`import security`** creates the users and roles that don't exist and adds memberships and grants; a user that exists keeps its password and keys unless `replace` is given; grants on databases or kinds that don't exist are skipped and counted.
+- **Where:** `to "path"` writes a file in the backup directory, which must not exist yet; without it the export is the statement's result, a bytes value the client downloads in pieces (a security export comes from memory, the others from the database's blob store). `from` takes a path there, or the export itself, usually a parameter uploaded with `Conn.Upload`. `polydb export` and `polydb import` do this from the command line.
+- **Permissions:** exporting a database needs read on all of it (a database-level grant); importing needs admin on the target. Exporting a query needs what the query needs. `export security` and `import security` need admin on the server.
 
 ---
 
@@ -1031,7 +1050,7 @@ None.
 12. Sessions (Phase 2, 2026-11-22):
    - **Any error inside a transaction aborts it.** Later statements fail with `txn_aborted` until `rollback`, and `commit` rolls back and reports `txn_aborted` too (protocol.md §6.3). This stops the rest of a script from running as if the failed statement had worked.
    - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.
-   - `create database`, `drop database`, `backup database`, `restore database` and `use` aren't allowed inside a transaction.
+   - `create database`, `drop database`, `backup database`, `restore database`, `export`, `import` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
    - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns. `max_load` caps the bytes of large values a statement may load into memory (types.md §13.1; default 256 MiB, set by the server's `--max-load`; 0 means no limit).
    - `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` on one runs it and reports the rows it changed and the time.

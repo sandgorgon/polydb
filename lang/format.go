@@ -42,6 +42,10 @@ func (f *formatter) w(ss ...string) {
 // or is a keyword.
 func (f *formatter) name(n string) { f.w(quoteName(n)) }
 
+// FormatName writes a name as Rhizome reads it, quoted with backquotes
+// when it isn't a plain identifier.
+func FormatName(n string) string { return quoteName(n) }
+
 func quoteName(n string) string {
 	if value.IsIdentifier(n) && !Keywords[n] {
 		return n
@@ -469,6 +473,46 @@ func (f *formatter) stmt(s Stmt) {
 	case *Analyze:
 		f.w("analyze kind ")
 		f.name(s.Kind)
+	case *Export:
+		f.w("export ")
+		switch s.What {
+		case "database":
+			f.w("database ")
+			f.name(s.Name)
+		case "security":
+			f.w("security")
+			if s.NoPasswords {
+				f.w(" without passwords")
+			}
+		default:
+			f.w("(")
+			f.stmt(s.Query)
+			f.w(")")
+		}
+		if s.Format != "" {
+			f.w(" as ")
+			f.name(s.Format)
+		}
+		if s.Path != nil {
+			f.w(" to ")
+			f.expr(s.Path, 0)
+		}
+	case *Import:
+		f.w("import ")
+		if s.What == "database" {
+			f.w("into database ")
+			f.name(s.Name)
+		} else {
+			f.w("security")
+		}
+		f.w(" from ")
+		f.expr(s.Source, 0)
+		if s.NewIDs {
+			f.w(" with new ids")
+		}
+		if s.Replace {
+			f.w(" replace")
+		}
 	case *Backup:
 		f.w("backup database ")
 		f.name(s.Name)

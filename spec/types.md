@@ -379,6 +379,28 @@ Used inside the storage engine for index keys and sorting.
 - **Long text and bytes:** a value longer than 256 bytes is keyed by its first 256 bytes and the SHA-256 of its content. Keys stay small, and a value in the blob store is keyed without loading it. Two such keys are equal exactly when the values are, and they order correctly against every other key; but two long values with the same first 256 bytes order by hash, not content. Unique constraints and equality lookups are exact. A range or `starts with` lookup whose bound is longer than 256 bytes scans instead of using the index, and reading an index in order (top-N) reads on through values that share their first 256 bytes, so results always follow §11.
 - It can't always be decoded back to the exact original type (for example, `1` and `1.0` encode the same). Indexes therefore point back to the stored value, which keeps the real type.
 
+### 12.3 JSON form
+Used by exports (rhizome.md §4). It is exact: reading it back gives the value that was written.
+
+- **Plain JSON** where JSON has the type: `null`, `true`/`false`, int as a number, text as a string, list as an array, and a map whose keys are all text not starting with `$` as an object.
+- **Every other value** is an object with one key starting with `$` that names its type, plus, for some, plain keys with details:
+
+| Type | Form |
+|---|---|
+| float | `{"$float": 1.5}`, also `"nan"`, `"inf"`, `"-inf"` |
+| bigint, decimal | `{"$bigint": "123…"}`, `{"$decimal": "19.99"}` |
+| bytes, image | `{"$bytes": "<base64>", "media": "image/svg+xml"}`, `{"$image": "<base64>"}` |
+| time, date, duration | `{"$time": "2026-11-21T14:30:00Z"}`, `{"$date": "2026-11-21"}`, `{"$duration": "1h30m"}` |
+| id, ref | `{"$id": "<id>"}`, `{"$ref": "<id>"}` |
+| doc | `{"$doc": "<text>", "format": "invoice"}` |
+| array, set, pair | `{"$array": […]}`, `{"$set": […]}`, `{"$pair": [k, v]}` |
+| other maps | `{"$map": [[k, v], …]}` |
+| record | `{"$record": {"name": v, …}}`, fields in order |
+| queues | `{"$fifo": […], "limit": 10}`, `{"$lifo": …}`, `{"$ring": […], "capacity": 5}`, `{"$priority": [[prio, item], …], "low_first": true, "limit": 0}`, items in pop order |
+| large value in an export | `{"$blob": "<sha256>", "type": "bytes", "len": 123, "media": "…"}`, its content in the export's data records |
+
+- Reading JSON from elsewhere: a number is an int if it is whole and fits in 64 bits, a float otherwise (as for `json` docs), and a whole number beyond 64 bits is an error (write it as `$bigint`).
+
 ---
 
 ## 13. Large values

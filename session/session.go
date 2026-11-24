@@ -377,6 +377,10 @@ func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 	switch st := st.(type) {
 	case *lang.Backup:
 		return r.backup(ctx, st, params)
+	case *lang.Export:
+		return r.export(ctx, st, params)
+	case *lang.Import:
+		return r.importStmt(ctx, st, params)
 	case *lang.Restore:
 		return r.restore(ctx, st, params)
 	case *lang.CreateDatabase:

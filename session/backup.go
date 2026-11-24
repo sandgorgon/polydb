@@ -13,7 +13,9 @@ import (
 // backupPath evaluates a backup or restore statement's path (constants
 // and parameters) and resolves it under the engine's backup directory.
 func (s *Session) backupPath(st lang.Stmt, e lang.Expr, params map[string]value.Value) (string, error) {
-	info, err := lang.Check(&lang.Env{Params: params}, st)
+	// Check the path alone: the statement may hold a query, which needs
+	// a database.
+	info, err := lang.Check(&lang.Env{Params: params}, &lang.Backup{Path: e})
 	if err != nil {
 		return "", err
 	}

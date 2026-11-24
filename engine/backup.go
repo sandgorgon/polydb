@@ -167,6 +167,73 @@ func (e *Engine) BackupPath(p string) (string, error) {
 	return vfs.Join(e.opts.BackupDir, clean), nil
 }
 
+// ExportFile is a file being written in the backup directory: it gets
+// its name only when Commit succeeds.
+type ExportFile struct {
+	fs         vfs.FS
+	f          vfs.File
+	tmp, final string
+	done       bool
+}
+
+// CreateExportFile starts a file for an export at path (from
+// BackupPath), which must not exist yet.
+func (e *Engine) CreateExportFile(p string) (*ExportFile, error) {
+	fs := e.opts.FS
+	if f, err := fs.Open(p); err == nil {
+		f.Close()
+		return nil, errorf(CodeConstraint, "%s already exists", p)
+	}
+	if err := fs.MkdirAll(path.Dir(p)); err != nil {
+		return nil, wrap(CodeInternal, err)
+	}
+	tmp := p + ".partial"
+	f, err := fs.Create(tmp)
+	if err != nil {
+		return nil, wrap(CodeInternal, err)
+	}
+	return &ExportFile{fs: fs, f: f, tmp: tmp, final: p}, nil
+}
+
+func (x *ExportFile) Write(p []byte) (int, error) { return x.f.Write(p) }
+
+// Commit makes the file durable under its name.
+func (x *ExportFile) Commit() error {
+	x.done = true
+	if err := x.f.Sync(); err != nil {
+		x.Abort()
+		return wrap(CodeInternal, err)
+	}
+	if err := x.f.Close(); err != nil {
+		x.fs.Remove(x.tmp)
+		return wrap(CodeInternal, err)
+	}
+	if err := x.fs.Rename(x.tmp, x.final); err != nil {
+		x.fs.Remove(x.tmp)
+		return wrap(CodeInternal, err)
+	}
+	return wrap(CodeInternal, x.fs.SyncDir(path.Dir(x.final)))
+}
+
+// Abort removes an unfinished file.
+func (x *ExportFile) Abort() {
+	x.done = true
+	x.f.Close()
+	x.fs.Remove(x.tmp)
+}
+
+// OpenExportFile opens a file in the backup directory (from BackupPath).
+func (e *Engine) OpenExportFile(p string) (io.ReadCloser, error) {
+	f, err := e.opts.FS.Open(p)
+	if err != nil {
+		return nil, errorf(CodeNotFound, "no file %s", p)
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{io.NewSectionReader(f, 0, 1<<62), f}, nil
+}
+
 // ReadBackup reads the description of the backup in dir. It doesn't
 // check the files; restoring does.
 func ReadBackup(fs vfs.FS, dir string) (*BackupInfo, error) {

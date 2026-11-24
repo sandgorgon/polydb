@@ -228,6 +228,50 @@ func (s *Store) SetPassword(name, password string) error {
 	})
 }
 
+// ImportUser makes a user as an export recorded it: its password
+// credentials (nil: none) and keys. A user that exists keeps its
+// password and keys unless replace is set; created reports whether the
+// user is new.
+func (s *Store) ImportUser(name string, creds *Credentials, keys []Key, replace bool) (created bool, err error) {
+	for _, k := range keys {
+		if !fingerprintRE.MatchString(k.Fingerprint) {
+			return false, errorf("constraint", "user %s: bad key fingerprint %q", name, k.Fingerprint)
+		}
+	}
+	if creds != nil && (len(creds.Salt) == 0 || creds.Iterations < MinIterations || len(creds.StoredKey) == 0 || len(creds.ServerKey) == 0) {
+		return false, errorf("constraint", "user %s: incomplete password credentials", name)
+	}
+	err = s.edit(func() error {
+		u, exists := s.users[name]
+		if exists && !replace {
+			return nil
+		}
+		if !exists {
+			if err := s.newName("user", name); err != nil {
+				return err
+			}
+		}
+		for _, k := range keys {
+			if owner, taken := s.keys[k.Fingerprint]; taken && owner != name {
+				return errorf("constraint", "user %s: key %s… is registered to %s", name, k.Fingerprint[:12], owner)
+			}
+		}
+		if exists {
+			for _, k := range u.Keys {
+				delete(s.keys, k.Fingerprint)
+			}
+		}
+		nu := &User{Name: name, Creds: creds, Keys: slices.Clone(keys)}
+		s.users[name] = nu
+		for _, k := range keys {
+			s.keys[k.Fingerprint] = name
+		}
+		created = !exists
+		return nil
+	})
+	return created, err
+}
+
 var fingerprintRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // AddKey registers a 9auth key fingerprint to a user. A fingerprint

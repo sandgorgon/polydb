@@ -230,6 +230,20 @@ func (c *checker) stmt(s Stmt, sc *scope) error {
 		return nil
 	case *SetSetting:
 		return c.setSetting(s)
+	case *Export:
+		if s.Path != nil {
+			if err := c.constText(s.Path, "an export path"); err != nil {
+				return err
+			}
+		}
+		if s.Query != nil {
+			return c.stmt(s.Query, sc)
+		}
+		return nil
+	case *Import:
+		sc := newScope()
+		sc.noRows = "an import source"
+		return c.write(s.Source, value.TypeAny, sc)
 	case *Backup:
 		return c.constText(s.Path, "a backup path")
 	case *Restore:

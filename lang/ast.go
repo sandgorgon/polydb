@@ -48,6 +48,8 @@ func (*Describe) stmt()       {}
 func (*ShowStmt) stmt()       {}
 func (*Analyze) stmt()        {}
 func (*Backup) stmt()         {}
+func (*Export) stmt()         {}
+func (*Import) stmt()         {}
 func (*Restore) stmt()        {}
 func (*Explain) stmt()        {}
 func (*History) stmt()        {}
@@ -393,6 +395,31 @@ type Restore struct {
 	At
 	Name string
 	Path Expr
+}
+
+// Export is "export database d", "export security [without passwords]"
+// or "export (query)", then "as format" and "to path" when given.
+// Without a path the export is the statement's result, a bytes value.
+type Export struct {
+	At
+	What        string // "database", "security" or "query"
+	Name        string // the database
+	Query       Stmt   // a pipeline
+	NoPasswords bool
+	Format      string // "" for the default
+	Path        Expr   // text; nil: return the export
+}
+
+// Import is "import into database d from source [with new ids]" or
+// "import security from source [replace]". The source is a path (text)
+// or the export itself (bytes, usually an uploaded parameter).
+type Import struct {
+	At
+	What    string // "database" or "security"
+	Name    string
+	Source  Expr
+	NewIDs  bool
+	Replace bool
 }
 
 // Analyze is "analyze kind K": sample the kind's statistics now.

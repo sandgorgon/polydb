@@ -27,6 +27,9 @@ func (tx *Tx) conform(fd *model.FieldDef, v value.Value) (value.Value, error) {
 	if err != nil {
 		return nil, errorf(CodeType, "field %s: %v", fd.Name, err)
 	}
+	if tx.importing {
+		return c, nil
+	}
 	if err := tx.checkRefs(fd.Name, fd.Type, c); err != nil {
 		return nil, err
 	}
