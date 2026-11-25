@@ -751,3 +751,5 @@ func (s *Stmt) Close() error {
 	_, err = st.recv(context.Background())
 	return err
 }
+
+var _ polydb.Uploader = (*Conn)(nil)

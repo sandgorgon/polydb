@@ -1,9 +1,10 @@
-// Package polydb is PolyDB's application interface. The same interfaces
-// are implemented by the network client (package client, which talks to
-// a server) and by an engine embedded in the program (Embed), so an
-// application can switch between the two (spec/protocol.md §13).
+// Package polydb is PolyDB's application interface. A DB runs Rhizome
+// statements either on a database inside this program (Open, OpenMemory)
+// or on a server (package client); both implement the same interfaces,
+// so an application can switch between the two (spec/protocol.md §13).
 //
-//	db, err := client.Dial(ctx, "polydb://ramon@db.example.com/sales", client.WithPassword(pw))
+//	db, err := polydb.Open("./data", nil) // or polydb.OpenMemory(nil)
+//	// or: db, err := client.Dial(ctx, "polydb://ana@db.example.com/sales", client.WithPassword(pw))
 //	rows, err := db.Query(ctx, `find Person p | where p.age > $min | show p.name`, polydb.Params{"min": 30})
 //	for rows.Next() {
 //		var name string
