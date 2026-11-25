@@ -1,0 +1,51 @@
+# systemd unit for PolyDB. Install:
+#
+#   sudo useradd --system --home /var/lib/polydb --shell /usr/sbin/nologin polydb
+#   sudo install -m 755 polydb /usr/local/bin/polydb
+#   sudo install -D -m 640 -g polydb polydb.conf /etc/polydb/polydb.conf
+#   sudo install -m 644 polydb.service /etc/systemd/system/polydb.service
+#   sudo systemctl enable --now polydb
+#   sudo -u polydb POLYDB_ADMIN_PASSWORD=… polydb init --data-dir /var/lib/polydb
+#
+# init sets the admin password; it refuses while the server runs, so stop
+# the service first if it is running (systemctl stop polydb). The polydb
+# OS user is admin over the Unix socket:
+#
+#   sudo -u polydb polydb polydb+unix:///run/polydb/polydb.sock
+
+[Unit]
+Description=PolyDB database server
+Documentation=https://github.com/sandgorgon/polydb
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=polydb
+Group=polydb
+ExecStart=/usr/local/bin/polydb serve --config /etc/polydb/polydb.conf
+Restart=on-failure
+RestartSec=2s
+# Shutdown sends GOAWAY and waits for requests to finish.
+TimeoutStopSec=30s
+StateDirectory=polydb
+StateDirectoryMode=0700
+RuntimeDirectory=polydb
+RuntimeDirectoryMode=0755
+LimitNOFILE=65536
+
+# Hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/polydb /run/polydb
+
+[Install]
+WantedBy=multi-user.target

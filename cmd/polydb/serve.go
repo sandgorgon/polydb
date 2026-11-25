@@ -40,6 +40,25 @@ type serveConfig struct {
 }
 
 func serveCmd(ctx context.Context, args []string, out, errOut io.Writer) int {
+	c, err := parseServe(args, errOut)
+	if err != nil {
+		if err != flag.ErrHelp {
+			fmt.Fprintln(errOut, "polydb serve:", err)
+		}
+		return 2
+	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := serve(ctx, c, out, errOut, nil); err != nil {
+		fmt.Fprintln(errOut, "polydb serve:", err)
+		return 1
+	}
+	return 0
+}
+
+// parseServe reads serve's settings: a configuration file if --config
+// names one, then the flags.
+func parseServe(args []string, errOut io.Writer) (serveConfig, error) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(errOut)
 	c := serveConfig{}
@@ -51,31 +70,33 @@ func serveCmd(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.StringVar(&c.tlsKey, "tls-key", "", "key file for CA mode")
 	fs.StringVar(&c.durability, "durability", "durable", "when commits are acknowledged: durable (on stable storage) or relaxed (written; synced in the background, for bulk loads)")
 	fs.BoolVar(&c.compression, "compression", false, "allow deflate compression")
-	fs.Int64Var(&c.inlineLimit, "inline-limit", 0, "largest value sent inline, in bytes (default 16384)")
+	fs.Var(sizeFlag{&c.inlineLimit}, "inline-limit", "largest value sent inline (default 16KiB)")
 	fs.DurationVar(&c.limits.StatementTimeout, "statement-timeout", 0, "how long one statement may run (default no limit); sessions may lower it, only admins raise it")
-	fs.Int64Var(&c.limits.MaxMemory, "max-memory", 0, "bytes one statement may hold, rows and loaded large values (default 1 GiB; -1 for no limit); sessions may lower it with set max_memory")
+	fs.Var(sizeFlag{&c.limits.MaxMemory}, "max-memory", "how much one statement may hold, rows and loaded large values (default 1GiB; -1 for no limit); sessions may lower it with set max_memory")
 	fs.IntVar(&c.limits.MaxConnections, "max-connections", 0, "connections the server accepts at once (default 1000; server admins may go past it)")
 	fs.IntVar(&c.limits.MaxUserConnections, "max-user-connections", 0, "connections one user may have (default 100)")
 	fs.IntVar(&c.limits.MaxTransactions, "max-transactions", 0, "explicit transactions one session may have open (default 16)")
-	fs.Int64Var(&c.limits.MaxUpload, "max-upload", 0, "bytes of the largest upload (default 4 GiB)")
-	fs.Int64Var(&c.limits.UploadQuota, "upload-quota", 0, "bytes of uploads one user may hold before statements use them (default 16 GiB)")
+	fs.Var(sizeFlag{&c.limits.MaxUpload}, "max-upload", "the largest upload (default 4GiB)")
+	fs.Var(sizeFlag{&c.limits.UploadQuota}, "upload-quota", "uploads one user may hold before statements use them (default 16GiB)")
 	fs.StringVar(&c.backupDir, "backup-dir", "", "directory that backup and restore statements write and read (default: <data-dir>/backups)")
 	fs.DurationVar(&c.slowQuery, "slow-query", engine.DefaultSlowQuery, "log statements that take at least this long, with their plan (0 for no log)")
 	fs.BoolVar(&c.verbose, "v", false, "log connections")
+	fs.String("config", "", "a file of settings, one per line as `key = value` with the flags' names; flags given here override it")
+	if path, ok := configArg(args); ok {
+		if err := loadConfig(fs, path); err != nil {
+			return c, err
+		}
+	}
 	if err := fs.Parse(args); err != nil {
-		return 2
+		if err == flag.ErrHelp {
+			return c, err
+		}
+		return c, errors.New("see polydb serve -h")
 	}
 	if fs.NArg() > 0 {
-		fmt.Fprintln(errOut, "polydb serve: unexpected arguments:", fs.Args())
-		return 2
+		return c, fmt.Errorf("unexpected arguments: %v", fs.Args())
 	}
-	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	if err := serve(ctx, c, out, errOut, nil); err != nil {
-		fmt.Fprintln(errOut, "polydb serve:", err)
-		return 1
-	}
-	return 0
+	return c, nil
 }
 
 // serve runs the server until ctx ends. ready, if set, receives the

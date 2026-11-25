@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"github.com/sandgorgon/polydb/version"
 	"net"
 	"net/url"
 	"strconv"
@@ -22,7 +23,7 @@ import (
 )
 
 // Version is this client's version, sent in HELLO.
-const Version = "0.3.0-dev"
+var Version = version.String()
 
 // Option configures Dial.
 type Option func(*options)

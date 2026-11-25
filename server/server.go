@@ -22,11 +22,12 @@ import (
 	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/session"
 	"github.com/sandgorgon/polydb/value"
+	"github.com/sandgorgon/polydb/version"
 	"github.com/sandgorgon/polydb/wire"
 )
 
-// Version is the server's version, sent in HELLO_OK.
-const Version = "0.3.0-dev"
+// Version is this server's version, sent in HELLO_OK.
+var Version = version.String()
 
 // Config configures a server. Zero values take the defaults of
 // spec/protocol.md.
