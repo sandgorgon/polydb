@@ -283,6 +283,11 @@ func (f *formatter) stmt(s Stmt) {
 			f.w(" set")
 			f.relOption(s.SetOption)
 		}
+	case *AlterDatabase:
+		f.w("alter database ")
+		f.name(s.Name)
+		f.w(" set ")
+		f.assigns(s.Assigns)
 	case *AlterUser:
 		f.w("alter user ")
 		f.name(s.Name)
@@ -336,28 +341,7 @@ func (f *formatter) stmt(s Stmt) {
 			switch a := a.(type) {
 			case *SetAction:
 				f.w(" set ")
-				for i, as := range a.Assigns {
-					if i > 0 {
-						f.w(", ")
-					}
-					if as.Target.Meta {
-						f.w("::", metaName(as.Target.Name))
-					} else {
-						f.name(as.Target.Name)
-					}
-					for _, st := range as.Target.Steps {
-						if st.Index != nil {
-							f.w("[")
-							f.expr(st.Index, 0)
-							f.w("]")
-						} else {
-							f.w(".")
-							f.name(st.Field)
-						}
-					}
-					f.w(" ", as.Op, " ")
-					f.expr(as.Value, precOr)
-				}
+				f.assigns(a.Assigns)
 			case *UnsetAction:
 				f.w(" unset ")
 				f.names(a.Names)
@@ -548,6 +532,36 @@ func (f *formatter) stmt(s Stmt) {
 	case *History:
 		f.w("history ")
 		f.fieldRef(s.Field)
+	}
+}
+
+// assigns writes "a = 1, ::labels ++= {…}". The database's doc is a
+// keyword, written as is.
+func (f *formatter) assigns(as []*Assign) {
+	for i, as := range as {
+		if i > 0 {
+			f.w(", ")
+		}
+		switch {
+		case as.Target.Meta:
+			f.w("::", metaName(as.Target.Name))
+		case as.Target.Name == "doc":
+			f.w("doc")
+		default:
+			f.name(as.Target.Name)
+		}
+		for _, st := range as.Target.Steps {
+			if st.Index != nil {
+				f.w("[")
+				f.expr(st.Index, 0)
+				f.w("]")
+			} else {
+				f.w(".")
+				f.name(st.Field)
+			}
+		}
+		f.w(" ", as.Op, " ")
+		f.expr(as.Value, precOr)
 	}
 }
 
@@ -881,6 +895,8 @@ func (f *formatter) expr(e Expr, min int) {
 	case *MetaExpr:
 		f.expr(e.X, precPostfix)
 		f.w("::", metaName(e.Name))
+	case *DBMetaExpr:
+		f.w("database::", metaName(e.Name))
 	case *IndexExpr:
 		f.expr(e.X, precPostfix)
 		f.w("[")

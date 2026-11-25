@@ -36,6 +36,15 @@ and who knows whom.
 `2` is an int and `2.0` is a float. PolyDB doesn't mix them silently:
 `2 + 2.0` is an error that suggests `cast(2 as float)`.
 
+## A database to work in
+
+A server holds many databases. Make one for the tour and switch to it:
+
+```rhizome
+create database company;
+use company;
+```
+
 ## Defining kinds
 
 ```rhizome
@@ -343,6 +352,37 @@ find Person p | follow p ~works_at r~> Company c | show p.name, r::type, r::id;
 
 Metadata can't be indexed, so a query that filters on it reads every
 entity of the kind. If you filter on something often, make it a field.
+
+### The database's own metadata
+
+A database has metadata too: its `::name`, when it was created and by
+whom (`::created`, `::owner`), and a `doc` note, `::labels` and
+`::props` that its administrators can set with `alter database`:
+
+```rhizome
+alter database company set doc = "The tour's example company",
+  ::labels ++= {"example"},
+  ::props.schema_version = 1;
+
+describe database company;
+```
+
+Queries read it as `database::…`. A common use is recording which
+version of your application's data layout a database has, so the
+application knows which upgrade steps to run:
+
+```rhizome
+alter database company set ::props.schema_version = 2;
+
+find Person p
+  | where database::props.schema_version >= 2
+  | limit 1
+  | show database::name, database::props.schema_version;
+```
+
+`show databases` lists every database with its owner, creation time,
+labels and doc. Backups keep a database's metadata, and exports carry
+its doc, labels and props.
 
 ## Grouping and counting
 

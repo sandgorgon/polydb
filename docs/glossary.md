@@ -80,8 +80,10 @@ already found (for example, "works at the same company").
 **Metadata.** Facts about an entity rather than its content. PolyDB
 keeps the ID, kind, created and updated times, version and owner; you
 can set **labels** (a set of tags) and **props** (a map of extra facts)
-on any entity. Read with `::` (`p::created`, `p::props.source`). See
-the [tour](rhizome-tour.md#metadata).
+on any entity. Databases have metadata too (`database::owner`,
+`database::props.schema_version`), set with `alter database`. Read with
+`::` (`p::created`, `p::props.source`). See the
+[tour](rhizome-tour.md#metadata).
 
 **Null.** "No value". A `?` after a type (`int?`) allows it.
 

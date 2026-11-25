@@ -81,7 +81,7 @@ func open(dir string, opts *Options) (*Embedded, error) {
 		return nil, convertErr(err, -1)
 	}
 	if _, err := eng.Database(o.Database); err != nil {
-		if _, err := eng.CreateDatabase(o.Database); err != nil {
+		if _, err := eng.CreateDatabaseAs(o.Database, security.AdminUser); err != nil {
 			eng.Close()
 			return nil, convertErr(err, -1)
 		}

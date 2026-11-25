@@ -66,8 +66,19 @@ func ExportDatabase(ctx context.Context, db *engine.DB, w io.Writer, format Form
 	defer tx.Rollback()
 	cat := tx.Catalog()
 	created, _ := value.NewTime(time.Now())
+	meta, err := tx.DatabaseMeta()
+	if err != nil {
+		return nil, err
+	}
+	var doc value.Value
+	if meta.Doc != "" {
+		doc = value.MustText(meta.Doc)
+	}
+	// The header carries the database's doc, labels and props; its owner
+	// and creation time belong to the database the import goes into.
 	if err := rw.write(rec(pair{"polydb", value.MustText("database")}, pair{"format", value.Int(exportFormat)},
-		pair{"database", value.MustText(db.Name())}, pair{"created", created})); err != nil {
+		pair{"database", value.MustText(db.Name())}, pair{"created", created},
+		pair{"doc", doc}, pair{"labels", meta.Labels}, pair{"props", meta.Props})); err != nil {
 		return nil, err
 	}
 	for _, s := range definitions(cat) {

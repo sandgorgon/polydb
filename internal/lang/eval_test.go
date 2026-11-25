@@ -21,6 +21,10 @@ func (g *fakeGraph) Field(id value.ID, name string) (value.Value, bool, error) {
 	return v, ok, nil
 }
 
+func (g *fakeGraph) DatabaseMeta(name string) (value.Value, error) {
+	return value.Null, nil
+}
+
 func (g *fakeGraph) FieldMeta(id value.ID, field, name string) (value.Value, bool, error) {
 	if _, ok := g.fields[id][field]; !ok {
 		return value.Null, false, nil

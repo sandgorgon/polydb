@@ -406,8 +406,14 @@ func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 		if err := s.needAdmin(st, "create database"); err != nil {
 			return nil, err
 		}
-		_, err := s.eng.CreateDatabase(st.Name)
+		_, err := s.eng.CreateDatabaseAs(st.Name, s.user)
 		return &query.Result{}, fail(st, err)
+	case *lang.AlterDatabase:
+		return r.alterDatabase(st, params)
+	case *lang.Describe:
+		if st.What == "database" {
+			return s.describeDatabase(st)
+		}
 	case *lang.DropDatabase:
 		if err := r.noTx(st, "drop database"); err != nil {
 			return nil, err
@@ -444,13 +450,7 @@ func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 		return &query.Result{}, nil
 	case *lang.ShowStmt:
 		if st.What == "databases" {
-			res := &query.Result{Columns: []query.Column{textCol("name")}}
-			for _, n := range s.eng.Databases() {
-				if s.eng.Security().CanSee(s.user, n) {
-					res.Rows = append(res.Rows, []any{value.MustText(n)})
-				}
-			}
-			return res, nil
+			return s.showDatabases(st)
 		}
 		switch st.What {
 		case "slow":

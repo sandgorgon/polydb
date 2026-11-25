@@ -230,6 +230,8 @@ func (c *checker) stmt(s Stmt, sc *scope) error {
 		return nil
 	case *SetSetting:
 		return c.setSetting(s)
+	case *AlterDatabase:
+		return c.alterDatabase(s)
 	case *Rebuild:
 		return nil
 	case *Export:
@@ -320,6 +322,40 @@ func (c *checker) constText(e Expr, what string) error {
 	return c.write(e, value.TypeText, sc)
 }
 
+// alterDatabase checks "alter database d set …": doc = text (or null to
+// remove it), ::labels = ++= --= a set of text, ::props = ++= a map with
+// text keys or --= a set of keys, and ::props.key = a value.
+func (c *checker) alterDatabase(s *AlterDatabase) error {
+	sc := newScope()
+	sc.noRows = "database metadata"
+	textSet := value.SetOf(value.TypeText)
+	props := value.MapOf(value.TypeText, value.TypeAny)
+	for _, a := range s.Assigns {
+		t := a.Target
+		var dst *value.Type
+		switch {
+		case !t.Meta && t.Name == "doc" && len(t.Steps) == 0 && a.Op == "=":
+			dst = value.OptionalOf(value.TypeText)
+		case t.Meta && t.Name == "labels" && len(t.Steps) == 0 && (a.Op == "=" || a.Op == "++=" || a.Op == "--="):
+			dst = textSet
+		case t.Meta && t.Name == "props" && len(t.Steps) == 0 && (a.Op == "=" || a.Op == "++="):
+			dst = props
+		case t.Meta && t.Name == "props" && len(t.Steps) == 0 && a.Op == "--=":
+			dst = textSet
+		case t.Meta && t.Name == "props" && len(t.Steps) == 1 && t.Steps[0].Index == nil && a.Op == "=":
+			dst = value.TypeAny
+		case t.Meta && (t.Name == "name" || t.Name == "created" || t.Name == "owner"):
+			return errAt(a.P, "constraint", "::%s is read-only; only doc, ::labels and ::props can be changed", t.Name)
+		default:
+			return errAt(a.P, "syntax", "alter database sets doc = text, ::labels (=, ++= or --= a set of text), ::props (=, ++= a map, --= a set of keys) or ::props.key = a value")
+		}
+		if err := c.write(a.Value, dst, sc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *checker) setSetting(s *SetSetting) error {
 	t, ok := settings[s.Name]
 	if !ok {
@@ -334,6 +370,9 @@ func (c *checker) describe(s *Describe) error {
 	if s.Target != nil {
 		_, err := c.target(s.Target, nil)
 		return err
+	}
+	if s.What == "database" {
+		return nil // the session finds it
 	}
 	cat, err := c.cat()
 	if err != nil {

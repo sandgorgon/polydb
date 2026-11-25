@@ -29,6 +29,7 @@ func (*DefineIndex) stmt()    {}
 func (*AlterKind) stmt()      {}
 func (*AlterRelation) stmt()  {}
 func (*AlterUser) stmt()      {}
+func (*AlterDatabase) stmt()  {}
 func (*Drop) stmt()           {}
 func (*Create) stmt()         {}
 func (*Update) stmt()         {}
@@ -178,6 +179,14 @@ type AlterUser struct {
 	AddKey   *string
 	KeyLabel *string
 	DropKey  *string
+}
+
+// AlterDatabase is "alter database name set a, b": it changes the
+// database's doc, ::labels or ::props (spec/rhizome.md §4).
+type AlterDatabase struct {
+	At
+	Name    string
+	Assigns []*Assign
 }
 
 // Drop is "drop kind|relation|format|index|user|role name".
@@ -597,26 +606,27 @@ type Expr interface {
 	expr()
 }
 
-func (*Lit) expr()       {}
-func (*NameRef) expr()   {}
-func (*HandleRef) expr() {}
-func (*ParamRef) expr()  {}
-func (*MetaRef) expr()   {}
-func (*Unary) expr()     {}
-func (*Binary) expr()    {}
-func (*Is) expr()        {}
-func (*Between) expr()   {}
-func (*FieldExpr) expr() {}
-func (*MetaExpr) expr()  {}
-func (*IndexExpr) expr() {}
-func (*DocPath) expr()   {}
-func (*Call) expr()      {}
-func (*If) expr()        {}
-func (*Cast) expr()      {}
-func (*Exists) expr()    {}
-func (*ListLit) expr()   {}
-func (*SetLit) expr()    {}
-func (*MapLit) expr()    {}
+func (*Lit) expr()        {}
+func (*NameRef) expr()    {}
+func (*HandleRef) expr()  {}
+func (*ParamRef) expr()   {}
+func (*MetaRef) expr()    {}
+func (*Unary) expr()      {}
+func (*Binary) expr()     {}
+func (*Is) expr()         {}
+func (*Between) expr()    {}
+func (*FieldExpr) expr()  {}
+func (*MetaExpr) expr()   {}
+func (*DBMetaExpr) expr() {}
+func (*IndexExpr) expr()  {}
+func (*DocPath) expr()    {}
+func (*Call) expr()       {}
+func (*If) expr()         {}
+func (*Cast) expr()       {}
+func (*Exists) expr()     {}
+func (*ListLit) expr()    {}
+func (*SetLit) expr()     {}
+func (*MapLit) expr()     {}
 
 // Lit is a literal value, including true, false, null, nan, inf and IDs.
 type Lit struct {
@@ -681,6 +691,12 @@ type Between struct {
 type FieldExpr struct {
 	At
 	X    Expr
+	Name string
+}
+
+// DBMetaExpr is database::name, metadata of the database in use.
+type DBMetaExpr struct {
+	At
 	Name string
 }
 

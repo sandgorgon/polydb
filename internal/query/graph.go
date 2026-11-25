@@ -122,6 +122,35 @@ func (g *graph) Field(id value.ID, name string) (value.Value, bool, error) {
 	return v, true, nil
 }
 
+// DatabaseMeta reads metadata of the transaction's database.
+func (g *graph) DatabaseMeta(name string) (value.Value, error) {
+	if name == "name" {
+		return value.MustText(g.tx.DatabaseName()), nil
+	}
+	m, err := g.tx.DatabaseMeta()
+	if err != nil {
+		return nil, err
+	}
+	switch name {
+	case "created":
+		return m.Created, nil
+	case "owner", "doc":
+		s := m.Owner
+		if name == "doc" {
+			s = m.Doc
+		}
+		if s == "" {
+			return value.Null, nil
+		}
+		return value.NewText(s)
+	case "labels":
+		return m.Labels, nil
+	case "props":
+		return m.Props, nil
+	}
+	return value.Null, nil
+}
+
 func (g *graph) FieldMeta(id value.ID, field, name string) (value.Value, bool, error) {
 	e, ok, err := g.entity(id)
 	if err != nil || !ok {

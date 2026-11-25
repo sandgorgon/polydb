@@ -465,7 +465,7 @@ func (p *parser) statement() (Stmt, error) {
 		return p.grant()
 	case "describe":
 		p.advance()
-		for _, w := range []string{"kind", "relation", "format", "index"} {
+		for _, w := range []string{"kind", "relation", "format", "index", "database"} {
 			if p.accept(w) {
 				n, err := p.name("a " + w + " name")
 				return &Describe{At: at, What: w, Name: n}, err
@@ -965,6 +965,34 @@ func (p *parser) alter(at At) (Stmt, error) {
 			return nil, p.errExpected("add, drop, alter, rename or set")
 		}
 		return a, err
+	case p.accept("database"):
+		a := &AlterDatabase{At: at}
+		var err error
+		if a.Name, err = p.name("a database name"); err != nil {
+			return nil, err
+		}
+		if err := p.expect("set"); err != nil {
+			return nil, err
+		}
+		for {
+			var as *Assign
+			if p.tok().Is("doc") { // a keyword, so not a name assign reads
+				as = &Assign{At: p.at(), Target: &LValue{Name: "doc"}, Op: "="}
+				p.advance()
+				if err := p.expect("="); err != nil {
+					return nil, err
+				}
+				if as.Value, err = p.expr(); err != nil {
+					return nil, err
+				}
+			} else if as, err = p.assign(); err != nil {
+				return nil, err
+			}
+			a.Assigns = append(a.Assigns, as)
+			if !p.accept(",") {
+				return a, nil
+			}
+		}
 	case p.accept("user"):
 		a := &AlterUser{At: at}
 		var err error
@@ -1000,7 +1028,7 @@ func (p *parser) alter(at At) (Stmt, error) {
 		}
 		return a, err
 	}
-	return nil, p.errExpected("kind, relation or user")
+	return nil, p.errExpected("kind, relation, database or user")
 }
 
 func (p *parser) grant() (Stmt, error) {

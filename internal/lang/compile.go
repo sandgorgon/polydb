@@ -90,6 +90,8 @@ func (catalogGraph) FieldMeta(value.ID, string, string) (value.Value, bool, erro
 
 func (catalogGraph) Meta(value.ID, string) (value.Value, error) { return nil, errNoGraph }
 
+func (catalogGraph) DatabaseMeta(string) (value.Value, error) { return nil, errNoGraph }
+
 func (catalogGraph) Degree(value.ID, string, string) (int, error) { return 0, errNoGraph }
 
 func (g catalogGraph) Format(name string) (value.Format, bool) {

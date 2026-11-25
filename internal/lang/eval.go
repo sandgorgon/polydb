@@ -26,6 +26,8 @@ type Graph interface {
 	Degree(id value.ID, typ, dir string) (int, error)
 	// Format looks up a document format by name.
 	Format(name string) (value.Format, bool)
+	// DatabaseMeta reads metadata of the database in use (database::name).
+	DatabaseMeta(name string) (value.Value, error)
 }
 
 // Row holds a pipeline row's variables. Entities are bound as refs,
@@ -197,6 +199,11 @@ func (ev *Evaluator) eval(e Expr, f *Frame) (value.Value, error) {
 		return ev.member(e, x, e.Name)
 	case *MetaExpr:
 		return ev.metaExpr(e, f)
+	case *DBMetaExpr:
+		if ev.Graph == nil {
+			return nil, runErr(e, "type", "database::%s needs a database in use", e.Name)
+		}
+		return ev.Graph.DatabaseMeta(e.Name)
 	case *IndexExpr:
 		x, err := ev.Eval(e.X, f)
 		if err != nil {

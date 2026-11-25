@@ -110,6 +110,38 @@ err := rows.Scan(&age)
 A script with several queries returns several result sets: read one
 with `Next`, then move on with `rows.NextResultSet()`.
 
+## Checking your data's version
+
+An application that changes its kinds over time can keep a version
+number in the database's metadata and check it on startup (this uses
+the `value` package, `github.com/sandgorgon/polydb/value`; the package
+example `ExampleOpenMemory_schemaVersion` is the same code, tested):
+
+```go
+rows, err := db.Query(ctx, `describe database main`, nil)
+if err != nil {
+	return err
+}
+version := int64(0)
+for rows.Next() {
+	var item string
+	var val any
+	if err := rows.Scan(&item, &val); err != nil {
+		return err
+	}
+	if item == "props" {
+		if v, ok := val.(value.Map).Get(value.MustText("schema_version")); ok {
+			version = int64(v.(value.Int))
+		}
+	}
+}
+rows.Close()
+if version < 2 {
+	// …run the changes for version 2, then:
+	_, err = db.Exec(ctx, `alter database main set ::props.schema_version = 2`, nil)
+}
+```
+
 ## Transactions
 
 ```go
@@ -210,7 +242,7 @@ cleanly. Data that was committed is safe even if the program crashes;
 The package's examples (`go doc github.com/sandgorgon/polydb`, or
 [example_test.go](../example_test.go)) are complete programs, checked
 by PolyDB's tests: a first query, data on disk, relations, a
-transaction, and a large value in and out.
+transaction, a large value in and out, and checking the data's version.
 
 ## Where next
 

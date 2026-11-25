@@ -96,6 +96,9 @@ func (im *importer) run() error {
 	if im.st.Definitions, err = applyDefinitions(im.ctx, im.db, defs); err != nil {
 		return err
 	}
+	if err := im.mergeMeta(head); err != nil {
+		return err
+	}
 	for {
 		if err := im.ctx.Err(); err != nil {
 			return err
@@ -572,4 +575,50 @@ func remapRefs(v value.Value, id func(value.ID) value.ID) (value.Value, error) {
 		return value.NewQueueOf(&value.Type{Code: x.Code(), N: x.Limit(), LowFirst: x.LowFirst()}, vs, prios)
 	}
 	return v, nil
+}
+
+// mergeMeta merges the export's database doc, labels and props into the
+// target's metadata: the doc replaces the target's when the export has
+// one, labels are added, and props are merged with the export's values
+// winning. Owner and creation time stay the target's.
+func (im *importer) mergeMeta(head value.Map) error {
+	d := ""
+	if t, ok := field(head, "doc").(value.Text); ok {
+		d = t.Go()
+	}
+	labels, _ := field(head, "labels").(value.Set)
+	props, _ := field(head, "props").(value.Map)
+	if d == "" && labels.Len() == 0 && props.Len() == 0 {
+		return nil
+	}
+	return im.db.Update(func(tx *engine.Tx) error {
+		m, err := tx.DatabaseMeta()
+		if err != nil {
+			return err
+		}
+		if d != "" {
+			m.Doc = d
+		}
+		if labels.Len() > 0 {
+			if m.Labels, err = value.NewSet(append(m.Labels.Values(), labels.Values()...)...); err != nil {
+				return err
+			}
+		}
+		if props.Len() > 0 {
+			merged := map[string]value.Value{}
+			for _, p := range []value.Map{m.Props, props} {
+				for k, v := range p.All() {
+					t, ok := k.(value.Text)
+					if !ok {
+						return fmt.Errorf("database props have text keys, not %s", k.Code())
+					}
+					merged[t.Go()] = v
+				}
+			}
+			if m.Props, err = value.MapOfText(merged); err != nil {
+				return err
+			}
+		}
+		return tx.SetDatabaseMeta(m)
+	})
 }

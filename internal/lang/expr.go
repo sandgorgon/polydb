@@ -279,6 +279,13 @@ func (p *parser) primary() (Expr, error) {
 		return &NameRef{at, t.Text}, nil
 	case Keyword:
 		switch t.Text {
+		case "database":
+			p.advance()
+			if err := p.expect("::"); err != nil {
+				return nil, err
+			}
+			n, err := p.metaName()
+			return &DBMetaExpr{at, n}, err
 		case "true", "false":
 			p.advance()
 			return &Lit{at, value.Bool(t.Text == "true")}, nil

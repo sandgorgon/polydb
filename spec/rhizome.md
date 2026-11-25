@@ -102,6 +102,7 @@ Reserved now for future features (inference rules, kind reuse and others), so th
 | `p::id`, `p::kind`, `p::created`, `p::updated`, `p::version`, `p::labels`, `p::owner` | entity metadata |
 | `p::props.source` | a custom metadata property |
 | `r.since`, `r::type`, `r::from`, `r::to` | relation property and metadata |
+| `database::name`, `database::created`, `database::owner`, `database::doc`, `database::labels`, `database::props.x` | metadata of the database in use (§4) |
 
 `p.name` gives the field's *value*. To use the field itself as a graph node, for example to relate it, write the field path in a relation position (`relate p.address ~located_in~> c`). The parser knows from context that a node is meant.
 
@@ -111,7 +112,7 @@ Reserved now for future features (inference rules, kind reuse and others), so th
 
 | Group | Statements |
 |---|---|
-| Databases and session | `create database`, `drop database`, `use`, `set`, `show databases`, `backup database`, `restore database`, `export`, `import` |
+| Databases and session | `create database`, `alter database`, `drop database`, `use`, `set`, `show databases`, `describe database`, `backup database`, `restore database`, `export`, `import` |
 | Definitions | `define kind / relation / format / index`, `alter …`, `drop …` |
 | Data | `create`, `update`, `delete`, `relate`, `unrelate`, `push`, `pop` |
 | Queries | pipelines starting with `find` |
@@ -129,7 +130,11 @@ Each statement ends with `;`.
 create database sales;
 use sales;
 drop database sales;             // needs admin; asks for confirmation in the CLI
-show databases;
+show databases;                  // with each one's owner, creation time, labels and doc
+describe database sales;         // all of its metadata
+
+alter database sales set doc = "Orders for the EU shop", ::labels ++= {"prod"};
+alter database sales set ::props.schema_version = 4;   // needs admin on sales
 
 set timeout = 30s;               // session settings
 set max_rows = 10000;
@@ -151,6 +156,12 @@ import security from "security.jsonl" replace;
 
 Queries can't span databases in v1.
 
+**Database metadata.** Like an entity (§2.1), a database has metadata. PolyDB keeps its `::name`, `::created` (the time of `create database`) and `::owner` (the user who created it). Admins of the database may set a `doc` note, `::labels` (a set of text) and `::props` (a map with text keys), for facts about the data as a whole: what it holds, `prod` or `test`, or the version of an application's data layout.
+
+- `alter database d set …` takes one or more of: `doc = <text>` (`null` removes it); `::labels` with `=`, `++=` or `--=` and a set of text; `::props` with `=` or `++=` and a map, or `--=` and a set of keys; `::props.key = <value>`. Values are constants or parameters. It needs `admin` on d, isn't allowed inside a transaction, and `::name`, `::created` and `::owner` are read-only (`constraint`).
+- Queries read the database in use's metadata as `database::name`, `database::created`, `database::owner`, `database::doc`, `database::labels` and `database::props` (`database::props.key` for one prop), anywhere an expression goes; a database made before metadata existed has null `::created` and `::owner`. `describe database d` lists it all, and `show databases` adds each database's owner, creation time, labels and doc. Reading needs some permission on the database, like `use`.
+- The metadata is stored in the database, so a backup carries all of it and a restored database keeps its owner and creation time. An export carries the doc, labels and props; `import` merges them into the target: the export's doc replaces the target's when it has one, labels are added, and props are merged with the export's values winning. The target keeps its own owner and creation time.
+
 **Limits.** A server bounds what one statement, connection or user may use, so that a heavy query or client can't starve the others (`polydb serve` flags or its configuration file; `polydb.Options` for an embedded database):
 
 | Limit | Default | Enforced |
@@ -170,7 +181,7 @@ Going over a limit fails the statement, upload or login with `limit` (or `permis
 **Export and import.** An export is a portable copy, read and written a record at a time, so neither side holds it in memory:
 
 - **Formats:** `jsonl` (JSON Lines, the default: one record per line, values in their JSON form, types.md §12.3) and `native` (the binary value encoding, smaller and faster). Large values are written once each, in pieces, before the first entity using them.
-- **A database export** holds its definitions (as `define` statements, run on import like any other), then every entity (ID, kind, metadata, fields, the definitions of fields it added itself) and every relation, as of one snapshot. History versions aren't exported: a backup keeps them.
+- **A database export** holds the database's doc, labels and props (merged on import, see Database metadata above), its definitions (as `define` statements, run on import like any other), then every entity (ID, kind, metadata, fields, the definitions of fields it added itself) and every relation, as of one snapshot. History versions aren't exported: a backup keeps them.
 - **`import into database d`** creates the definitions d lacks; ones it has must be the same, or the import fails naming the difference before writing anything. IDs are kept, and one that exists is an error; `with new ids` gives every entity, field and relation a new ID and rewrites the refs pointing at them (plain `id` values are kept), which copies data into a database that has it. An export may only hold definitions, entities and relations: any other statement in it is refused. Entities and relations are written in batches of transactions; an import that fails keeps the batches before the failure, and says how far it got. Ref targets aren't checked, since they may come later in the export.
 - **`export (query)`** writes a query's result: `jsonl` and `native` as rows (whole entities and relations as maps), `csv` with a header and plain cells (text as is, numbers, times and IDs in their usual forms, bytes in base64, collections as JSON), and `dot` (Graphviz) or `graph` (JSON: `{"nodes": […], "edges": […]}`) with the result's entities as nodes, labelled by kind and a `name`, `title` or `label` field, and as edges the relations in the result and those between its nodes. A graph names large values without their content.
 - **`export security`** holds every user (with password credentials: salted PBKDF2 hashes, never the passwords, but still worth guessing at, so the file is a secret; `without passwords` leaves them out), key fingerprints, roles and memberships, and grants, with kinds by name so they apply to restored or imported databases. **`import security`** creates the users and roles that don't exist and adds memberships and grants; a user that exists keeps its password and keys unless `replace` is given; grants on databases or kinds that don't exist are skipped and counted.
@@ -703,6 +714,7 @@ show users;  show roles;  show grants for ramon;  show keys for ramon;
 describe @alice;                    // all fields with types, docs, IDs; relations in and out; metadata
 describe kind Person;               // schema, docs, indexes, entity count
 describe relation knows;
+describe database sales;            // name, owner, created, doc, labels, props
 describe #01JD...;                  // whatever the ID belongs to
 show kinds;  show relations;  show formats;  show indexes;
 show stats;                         // database size, counts per kind and relation type
@@ -859,7 +871,7 @@ base_type      = "bool" | "int" | "bigint" | "float"
                | "union" "<" type { "|" type } ">" ;
 
 (* ----- Changing and dropping definitions ----- *)
-alter_stmt     = "alter" ( alter_kind | alter_relation | alter_user ) ;
+alter_stmt     = "alter" ( alter_kind | alter_relation | alter_user | alter_database ) ;
 alter_kind     = "kind" ident ( "add" field_def
                               | "drop" ident
                               | "alter" field_def
@@ -873,6 +885,9 @@ alter_relation = "relation" ident ( "add" field_def
 alter_user     = "user" ident ( "password" expr
                               | "add" "key" text_lit [ "as" text_lit ]
                               | "drop" "key" text_lit ) ;
+alter_database = "database" ident "set" db_assign { "," db_assign } ;
+db_assign      = "doc" "=" expr
+               | "::" ident [ "." ident ] assign_op expr ;   (* ::labels, ::props, ::props.key *)
 drop_stmt      = "drop" ( "kind" | "relation" | "format" | "index" | "user" | "role" ) ident ;
 
 (* ----- Data ----- *)
@@ -954,7 +969,7 @@ perm           = "read" | "write" | "relate" | "define" | "admin" ;
 scope          = "server" | "database" ident | "kind" [ ident "." ] ident ;
 
 (* ----- Introspection ----- *)
-introspect_stmt = "describe" ( target | ( "kind" | "relation" | "format" | "index" ) ident )
+introspect_stmt = "describe" ( target | ( "kind" | "relation" | "format" | "index" | "database" ) ident )
                 | "show" show_what
                 | "explain" [ "analyze" ] statement
                 | "history" field_ref
@@ -997,6 +1012,7 @@ doc_step       = ident | text_lit | "[" expr "]"
 primary        = literal
                | ident | handle | param | id_lit
                | "::" ident                            (* metadata of the update target *)
+               | "database" "::" meta_name             (* metadata of the database in use *)
                | ident "(" [ expr { "," expr } ] ")"   (* function or aggregate call *)
                | "if" "(" expr "," expr "," expr ")"
                | "cast" "(" expr "as" type ")"
@@ -1099,3 +1115,4 @@ None.
    - Introspection results are tables with a `section` column where they mix kinds of rows: `describe kind` lists the kind, its fields and its indexes; `describe @x` lists metadata, fields and relations in and out.
 14. Query planning (Phase 5, 2026-11-23): plans never change results or row order (§7.5). An index answers a condition only when every entity the condition passes is sure to be in it. Rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen. Estimates come from counting probes and, since Phase 6, sampled statistics.
 15. Statistics (Phase 6, 2026-11-24): `analyze` is a contextual word, so existing names stay valid. `analyze kind K` needs read permission on K, samples committed data in its own transaction (so it works inside a transaction too), and returns the same table as `show stats kind K`. That table is exact for kinds no larger than the sample; a kind not yet sampled is sampled for the display without storing the result.
+16. Database metadata (Phase 7, 2026-11-25): stored in the database's own store under one meta key, so backups carry it. `alter database` writes it in its own transaction and needs `admin` on the database; `doc` is a keyword, so the statement reads `doc = …` itself. `database::x` in a default or check is an error at run time, like other reads beyond the entity's own fields. An `as of` query reads the current metadata: it has no history.

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/sandgorgon/polydb"
+	"github.com/sandgorgon/polydb/value"
 )
 
 // A database in memory: define a kind, add entities, query them.
@@ -187,4 +188,43 @@ func ExampleEmbedded_Upload() {
 		fmt.Println(n, "characters,", read, "bytes read back")
 	}
 	// Output: 2200000 characters, 2200000 bytes read back
+}
+
+// An application keeps the version of its data layout in the database's
+// metadata, and upgrades older data when it starts.
+func ExampleOpenMemory_schemaVersion() {
+	ctx := context.Background()
+	db, _ := polydb.OpenMemory(nil)
+	defer db.Close()
+
+	version := func() int64 {
+		rows, err := db.Query(ctx, `describe database main`, nil)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var item string
+			var val any
+			if err := rows.Scan(&item, &val); err != nil {
+				log.Fatal(err)
+			}
+			if item == "props" {
+				if v, ok := val.(value.Map).Get(value.MustText("schema_version")); ok {
+					return int64(v.(value.Int))
+				}
+			}
+		}
+		return 0
+	}
+
+	fmt.Println("found version", version())
+	if version() < 1 {
+		db.Exec(ctx, `define kind Note { text: text };
+			alter database main set ::props.schema_version = 1`, nil)
+	}
+	fmt.Println("now version", version())
+	// Output:
+	// found version 0
+	// now version 1
 }

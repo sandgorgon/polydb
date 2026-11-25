@@ -32,6 +32,14 @@ create database shop;
 use shop;
 ```
 
+A database records who created it and when, and its administrators can
+give it a description, labels such as `prod`, and facts of their own,
+such as the version of the application's data layout:
+
+```rhizome
+alter database shop set doc = "Our online shop", ::labels ++= {"prod"};
+```
+
 PolyDB can also run **inside your own Go program**, with no server at
 all ([Using PolyDB from Go](embedding.md)).
 

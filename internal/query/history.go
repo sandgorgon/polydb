@@ -94,6 +94,9 @@ func (p *pastGraph) Field(id value.ID, name string) (value.Value, bool, error) {
 	return p.a.Field(id, name)
 }
 
+// DatabaseMeta is the database's current metadata: it has no history.
+func (p *pastGraph) DatabaseMeta(name string) (value.Value, error) { return p.g.DatabaseMeta(name) }
+
 func (p *pastGraph) FieldMeta(id value.ID, field, name string) (value.Value, bool, error) {
 	if _, ok, err := p.entity(id); err != nil || !ok {
 		return value.Null, false, err

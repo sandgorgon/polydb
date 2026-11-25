@@ -122,6 +122,21 @@ streamed in and out, never loaded whole, unless a query works on their
 content (`upper(p.text)`), which counts against the statement's memory
 limit.
 
+### How does my application know which version of its data a database has?
+
+Keep the version in the database's metadata, and read it when the
+application starts:
+
+```rhizome norun
+alter database shop set ::props.schema_version = 3;
+describe database shop;
+```
+
+`describe database` lists the props, and any query can read
+`database::props.schema_version`. When the application finds an older
+version, it runs its upgrade steps and then sets the new number. An
+administrator of the database must run the `alter`.
+
 ### Can a query use two databases?
 
 Not in version 1. Each session works in one database at a time.

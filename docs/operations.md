@@ -136,6 +136,25 @@ show keys for ana;
 A user without `read` on a kind doesn't see its entities at all, and
 gets a `permission` error naming it directly.
 
+## Describing databases
+
+A server soon holds several databases. Their metadata says what each
+one is: PolyDB records who created it and when, and admins of a
+database can add a note, labels and facts of their own:
+
+```rhizome
+alter database shop set doc = "Orders for the EU shop",
+  ::labels ++= {"prod", "eu"},
+  ::props ++= {team: "web", contact: "web-team@example.com"};
+
+show databases;
+describe database shop;
+```
+
+Only admins of the database (or of the server) can change it; anyone
+who can use the database can read it. Backups keep it, and exports
+carry the note, labels and props.
+
 ## Backups
 
 A backup copies one database, as of one moment, into a directory, while
@@ -210,6 +229,7 @@ administrator can raise them. `show limits` lists them all.
 
 | Statement | Shows |
 |---|---|
+| `show databases` | the databases you can use, with their owner, creation time, labels and note |
 | `show sessions` | who is connected, and what they're running (admin) |
 | `show slow queries` | recent statements that took longer than `slow-query`, with how they ran (admin) |
 | `show stats` | the size of a database: entities and relations by kind |

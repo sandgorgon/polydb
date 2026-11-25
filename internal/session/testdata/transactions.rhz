@@ -64,8 +64,8 @@ find Temp t;
 // Session statements.
 create database other;
 show databases;
-// => "other"
-// => "test"
+// => "other" | "admin" | t"2026-11-22T12:00:00Z" | {} | null
+// => "test" | "admin" | t"2026-11-22T12:00:00Z" | {} | null
 begin;
 use other;
 // error constraint: isn't allowed inside a transaction
@@ -80,7 +80,7 @@ use nope;
 use test;
 drop database other;
 show databases;
-// => "test"
+// => "test" | "admin" | t"2026-11-22T12:00:00Z" | {} | null
 
 set max_rows = 1;
 find Account x;

@@ -29,6 +29,15 @@ var (
 		"type":     value.TypeText,
 		"declared": value.TypeBool,
 	}
+	// dbMeta is database::name (spec/rhizome.md §4, Database metadata).
+	dbMeta = map[string]*value.Type{
+		"name":    value.TypeText,
+		"created": value.OptionalOf(value.TypeTime), // null for databases from before metadata
+		"owner":   value.OptionalOf(value.TypeText),
+		"doc":     value.OptionalOf(value.TypeText),
+		"labels":  value.SetOf(value.TypeText),
+		"props":   value.MapOf(value.TypeText, value.TypeAny),
+	}
 	relMeta = map[string]*value.Type{
 		"id":   value.TypeID,
 		"type": value.TypeText,
@@ -132,6 +141,11 @@ func (c *checker) expr1(e Expr, sc *scope) (Static, error) {
 		return c.member(e.P, x, e.Name)
 	case *MetaExpr:
 		return c.metaExpr(e, sc)
+	case *DBMetaExpr:
+		if t, ok := dbMeta[e.Name]; ok {
+			return valueOf(t), nil
+		}
+		return Static{}, errAt(e.P, "not_found", "databases have no metadata ::%s%s", e.Name, didYouMean(e.Name, slices.Collect(maps.Keys(dbMeta))))
 	case *IndexExpr:
 		x, err := c.expr(e.X, sc)
 		if err != nil {

@@ -50,7 +50,7 @@ alter user ramon add key "short";
 // ramon: read on the database, write on Order.
 // as ramon
 show databases;
-// => "test"
+// => "test" | "admin" | t"2026-11-22T12:00:00Z" | {} | null
 use hr;
 // error permission: you don't have permission on database hr
 find o | sort o::kind | show o::kind;
