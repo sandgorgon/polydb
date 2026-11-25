@@ -407,7 +407,7 @@ Used by exports (rhizome.md §4). It is exact: reading it back gives the value t
 
 - **Byte strings, text and images** over **16 KiB** go to the blob store. They're split into 1 MiB chunks, and each chunk is addressed by its SHA-256 hash, so identical content is stored only once. The field holds a blob reference (tag 0x22). Only whole field values (and their history versions) are stored this way; a large value inside a collection, a record, metadata or relation properties stays inline.
 - **Collections and queues** over **1,000 elements** (or 64 KiB encoded) are stored element by element in the key-value store instead of as one blob. Pushing to a queue, adding to a set or changing one map entry then doesn't rewrite the whole collection. (Not implemented yet: deferred until after v1.0, see plan.md.)
-- The blob threshold is an engine setting (`engine.Options.BlobThreshold`, at least 4 KiB), the same for every database.
+- The blob threshold is an engine setting (16 KiB by default, at least 4 KiB), the same for every database.
 - None of this is visible to queries.
 
 ### 13.1 The blob store

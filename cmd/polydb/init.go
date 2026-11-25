@@ -10,8 +10,8 @@ import (
 	"os"
 
 	auth9 "github.com/sandgorgon/9auth"
-	"github.com/sandgorgon/polydb/engine"
-	"github.com/sandgorgon/polydb/security"
+	"github.com/sandgorgon/polydb/internal/engine"
+	"github.com/sandgorgon/polydb/internal/security"
 )
 
 // initConfig is what init needs, parsed from flags.

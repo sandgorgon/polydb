@@ -18,9 +18,10 @@ import (
 	auth9 "github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/polydb"
 	"github.com/sandgorgon/polydb/client"
-	"github.com/sandgorgon/polydb/engine"
-	"github.com/sandgorgon/polydb/security"
-	"github.com/sandgorgon/polydb/server"
+	"github.com/sandgorgon/polydb/internal/engine"
+	"github.com/sandgorgon/polydb/internal/hook"
+	"github.com/sandgorgon/polydb/internal/security"
+	"github.com/sandgorgon/polydb/internal/server"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -99,10 +100,11 @@ func implementations(t *testing.T) map[string]polydb.DB {
 	if _, err := admin.Exec(ctx, `create database shop`, nil); err != nil {
 		t.Fatal(err)
 	}
-	emb, err := polydb.Embed(ctx, ts.eng, security.AdminUser, "shop")
+	e, err := hook.Embed(ctx, ts.eng, security.AdminUser, "shop")
 	if err != nil {
 		t.Fatal(err)
 	}
+	emb := e.(polydb.DB)
 	t.Cleanup(func() { emb.Close() })
 	return map[string]polydb.DB{"embedded": emb, "client": ts.dial(t, "/shop")}
 }
@@ -345,7 +347,7 @@ func TestTrustAndLogins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("key login: %v", err)
 	}
-	if c := db.(*client.Conn); c.User() != "admin" {
+	if c := db; c.User() != "admin" {
 		t.Errorf("key login user %s", c.User())
 	}
 	db.Close()
@@ -503,11 +505,6 @@ func TestUploads(t *testing.T) {
 	if _, err := c.Upload(ctx, strings.NewReader("x"), "list", ""); polydb.CodeOf(err) != "type" {
 		t.Fatalf("upload of a list: %v", err)
 	}
-	// A token the server doesn't know.
-	fake := polydb.NewLeasedBlob("bytes", 1, "", []byte("nope"), nil)
-	if _, err := db.Exec(ctx, `create F { data: $d }`, polydb.Params{"d": fake}); polydb.CodeOf(err) != "lease_expired" {
-		t.Fatalf("unknown token: %v", err)
-	}
 	// A reader that fails cancels the upload; the connection carries on.
 	if _, err := c.Upload(ctx, io.MultiReader(bytes.NewReader(data[:1<<20]), iotest.ErrReader(errors.New("disk gone"))), "bytes", ""); err == nil {
 		t.Fatal("failed reader uploaded")
@@ -527,7 +524,7 @@ func TestUploads(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = udb.(*client.Conn).Upload(ctx, strings.NewReader("abc"), "bytes", "")
+		_, err = udb.Upload(ctx, strings.NewReader("abc"), "bytes", "")
 		if polydb.CodeOf(err) != want {
 			t.Errorf("%s uploading: %v", user, err)
 		}

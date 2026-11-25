@@ -25,7 +25,7 @@ for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
 	dir=$out/$name
 	mkdir -p "$dir"
 	CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
-		-ldflags "-s -w -X github.com/sandgorgon/polydb/version.Version=$version" \
+		-ldflags "-s -w -X github.com/sandgorgon/polydb/internal/version.Version=$version" \
 		-o "$dir/polydb" ./cmd/polydb
 	cp packaging/polydb.conf packaging/polydb.service "$dir/"
 	for f in README.md LICENSE CHANGELOG.md; do

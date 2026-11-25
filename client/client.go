@@ -9,7 +9,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"github.com/sandgorgon/polydb/version"
+	"github.com/sandgorgon/polydb/internal/version"
 	"net"
 	"net/url"
 	"strconv"
@@ -18,12 +18,9 @@ import (
 
 	auth9 "github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/polydb"
-	"github.com/sandgorgon/polydb/authn"
-	"github.com/sandgorgon/polydb/wire"
+	"github.com/sandgorgon/polydb/internal/authn"
+	"github.com/sandgorgon/polydb/internal/wire"
 )
-
-// Version is this client's version, sent in HELLO.
-var Version = version.String()
 
 // Option configures Dial.
 type Option func(*options)
@@ -96,11 +93,27 @@ func WithInlineLimit(n int64) Option { return func(o *options) { o.inlineLimit =
 // WithCompression asks for deflate compression of messages.
 func WithCompression() Option { return func(o *options) { o.compression = true } }
 
-// WithTrace calls f for every message sent ("send") and received
-// ("recv"), for debugging. Passwords and keys travel inside AUTH
-// messages; f should redact them.
-func WithTrace(f func(dir string, stream uint32, m wire.Message)) Option {
-	return func(o *options) { o.trace = f }
+// WithTrace calls f with a description of every protocol message sent
+// ("send") and received ("recv"), for debugging. Login secrets are left
+// out. The descriptions' form may change between releases.
+func WithTrace(f func(dir string, stream uint32, msg string)) Option {
+	return func(o *options) {
+		o.trace = func(dir string, stream uint32, m wire.Message) { f(dir, stream, traceText(m)) }
+	}
+}
+
+// traceText describes a message, without login secrets.
+func traceText(m wire.Message) string {
+	switch x := m.(type) {
+	case *wire.Auth:
+		return fmt.Sprintf("Auth {Mechanism:%s User:%s Data:<redacted>}", x.Mechanism, x.User)
+	case *wire.AuthContinue:
+		return "AuthContinue {Data:<redacted>}"
+	case *wire.AuthOK:
+		return fmt.Sprintf("AuthOK {SessionID:%s User:%s Database:%s Data:<redacted>}", x.SessionID, x.User, x.Database)
+	}
+	name := strings.TrimPrefix(fmt.Sprintf("%T", m), "*wire.")
+	return fmt.Sprintf("%s %+v", name, m)
 }
 
 // Target is a parsed connection URL.
@@ -153,8 +166,8 @@ func ParseURL(raw string) (Target, error) {
 	return t, nil
 }
 
-// Dial connects to a server and logs in.
-func Dial(ctx context.Context, rawURL string, opts ...Option) (polydb.DB, error) {
+// Dial connects to a server and logs in. The *Conn is a polydb.DB.
+func Dial(ctx context.Context, rawURL string, opts ...Option) (*Conn, error) {
 	t, err := ParseURL(rawURL)
 	if err != nil {
 		return nil, err
@@ -289,7 +302,7 @@ func handshake(nc net.Conn, t Target, o *options, tlsState *tls.ConnectionState,
 		features = append(features, "deflate")
 	}
 	hello := &wire.Hello{Versions: map[int]int{wire.Major: wire.Minor}, Features: features, ClientName: "polydb-go",
-		ClientVersion: Version, Database: t.Database, User: t.User, InlineLimit: o.inlineLimit}
+		ClientVersion: version.String(), Database: t.Database, User: t.User, InlineLimit: o.inlineLimit}
 	if err := c.send(0, hello, false); err != nil {
 		return nil, err
 	}

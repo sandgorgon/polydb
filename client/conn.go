@@ -8,8 +8,8 @@ import (
 	"sync"
 
 	"github.com/sandgorgon/polydb"
+	"github.com/sandgorgon/polydb/internal/wire"
 	"github.com/sandgorgon/polydb/value"
-	"github.com/sandgorgon/polydb/wire"
 )
 
 // Conn is a connection to a server. It implements polydb.DB and is safe
@@ -297,7 +297,7 @@ func (c *Conn) Query(ctx context.Context, text string, params polydb.Params) (po
 }
 
 func (c *Conn) query(ctx context.Context, text string, params polydb.Params, txn *value.ID) (*Rows, error) {
-	vals, blobs, err := polydb.SplitParams(params)
+	vals, blobs, err := splitParams(params)
 	if err != nil {
 		return nil, &polydb.Error{Code: "type", Message: err.Error(), StatementIndex: -1}
 	}
@@ -499,7 +499,7 @@ func (c *Conn) cell(v any) any {
 	switch x := v.(type) {
 	case *wire.Entity:
 		e := &polydb.Entity{ID: x.ID, Kind: x.Kind,
-			Meta: polydb.MetaOf(x.Meta.Created, x.Meta.Updated, x.Meta.Version, x.Meta.Labels, x.Meta.Owner, x.Meta.Props)}
+			Meta: meta(x.Meta)}
 		for _, f := range x.Fields {
 			pf := &polydb.Field{ID: f.ID, Name: f.Name, Type: f.Type, Doc: f.Doc, Declared: f.Declared}
 			if f.Value != nil {
@@ -509,7 +509,7 @@ func (c *Conn) cell(v any) any {
 		}
 		return e
 	case *wire.Relation:
-		return &polydb.Relation{ID: x.ID, Type: x.Type, From: x.From, To: x.To, Props: polydb.PropsOf(x.Props)}
+		return &polydb.Relation{ID: x.ID, Type: x.Type, From: x.From, To: x.To, Props: props(x.Props)}
 	case *wire.Path:
 		p := &polydb.Path{}
 		for _, n := range x.Nodes {
@@ -526,9 +526,64 @@ func (c *Conn) cell(v any) any {
 }
 
 func (c *Conn) blob(ref *wire.BlobRef) *polydb.Blob {
-	return polydb.NewLeasedBlob(ref.Type, ref.Length, ref.MediaType, ref.Token, func(ctx context.Context, off, n int64) ([]byte, error) {
-		return c.readBlob(ctx, ref, off, n)
-	})
+	return polydb.NewBlob(ref.Type, ref.Length, ref.MediaType, &leased{c: c, ref: ref})
+}
+
+// leased reads a blob the server holds under a lease. Passed back as a
+// parameter, such a blob sends only its token.
+type leased struct {
+	c   *Conn
+	ref *wire.BlobRef
+}
+
+func (l *leased) ReadBlob(ctx context.Context, off, n int64) ([]byte, error) {
+	return l.c.readBlob(ctx, l.ref, off, n)
+}
+
+// splitParams is polydb.ParamValues, except that blobs with a lease
+// (read from results, or uploaded) go as their tokens, so their content
+// isn't sent again.
+func splitParams(p polydb.Params) (vals map[string]value.Value, tokens map[string][]byte, err error) {
+	rest := polydb.Params{}
+	for k, v := range p {
+		if b, ok := v.(*polydb.Blob); ok {
+			if l, ok := b.Source().(*leased); ok {
+				if tokens == nil {
+					tokens = map[string][]byte{}
+				}
+				tokens[k] = l.ref.Token
+				continue
+			}
+		}
+		rest[k] = v
+	}
+	vals, err = polydb.ParamValues(rest)
+	return vals, tokens, err
+}
+
+// meta converts an entity's metadata.
+func meta(m wire.Meta) polydb.Meta {
+	out := polydb.Meta{Created: m.Created.Go(), Updated: m.Updated.Go(), Version: m.Version, Owner: m.Owner, Props: props(m.Props)}
+	for _, l := range m.Labels.Values() {
+		if t, ok := l.(value.Text); ok {
+			out.Labels = append(out.Labels, t.Go())
+		}
+	}
+	return out
+}
+
+// props converts a map with text keys.
+func props(m value.Map) map[string]value.Value {
+	if m.Len() == 0 {
+		return nil
+	}
+	out := map[string]value.Value{}
+	for k, v := range m.All() {
+		if t, ok := k.(value.Text); ok {
+			out[t.Go()] = v
+		}
+	}
+	return out
 }
 
 // uploadPiece is the most content one BLOB_WRITE carries.
@@ -708,7 +763,7 @@ func (s *Stmt) prepare(ctx context.Context) error {
 }
 
 func (s *Stmt) execute(ctx context.Context, params polydb.Params) (*Rows, error) {
-	vals, blobs, err := polydb.SplitParams(params)
+	vals, blobs, err := splitParams(params)
 	if err != nil {
 		return nil, &polydb.Error{Code: "type", Message: err.Error(), StatementIndex: -1}
 	}

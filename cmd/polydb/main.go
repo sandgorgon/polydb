@@ -16,7 +16,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/sandgorgon/polydb/version"
+	"github.com/sandgorgon/polydb/internal/version"
 	"io"
 	"os"
 	"os/user"

@@ -7,16 +7,23 @@ import (
 	"io"
 	"sync"
 
-	"github.com/sandgorgon/polydb/engine"
-	"github.com/sandgorgon/polydb/lang"
-	"github.com/sandgorgon/polydb/query"
-	"github.com/sandgorgon/polydb/session"
+	"github.com/sandgorgon/polydb/internal/engine"
+	"github.com/sandgorgon/polydb/internal/hook"
+	"github.com/sandgorgon/polydb/internal/lang"
+	"github.com/sandgorgon/polydb/internal/query"
+	"github.com/sandgorgon/polydb/internal/session"
 	"github.com/sandgorgon/polydb/value"
 )
 
-// Embed returns a DB that runs statements on an engine in this program,
+func init() {
+	hook.Embed = func(ctx context.Context, eng *engine.Engine, user, database string) (any, error) {
+		return embed(ctx, eng, user, database)
+	}
+}
+
+// embed returns a DB that runs statements on an engine in this program,
 // as user (usually security.AdminUser), using database if it isn't "".
-func Embed(ctx context.Context, eng *engine.Engine, user, database string) (DB, error) {
+func embed(ctx context.Context, eng *engine.Engine, user, database string) (DB, error) {
 	db := &embedded{s: session.New(eng, user)}
 	if database != "" {
 		if _, err := db.s.ExecStmt(ctx, &lang.Use{Name: database}, nil); err != nil {
@@ -353,7 +360,7 @@ func lazyBlob(l value.Lazy) *Blob {
 			media = "image/" + format
 		}
 	}
-	b := NewBlob(typ, l.Len(), media, func(ctx context.Context, off, n int64) ([]byte, error) {
+	b := NewBlob(typ, l.Len(), media, BlobFunc(func(ctx context.Context, off, n int64) ([]byte, error) {
 		if off < 0 || n < 0 || off+n > l.Len() {
 			return nil, fmt.Errorf("polydb: blob range %d+%d outside %d bytes", off, n, l.Len())
 		}
@@ -362,7 +369,7 @@ func lazyBlob(l value.Lazy) *Blob {
 			return nil, err
 		}
 		return out, nil
-	})
+	}))
 	b.lazy = &l
 	return b
 }
@@ -391,11 +398,3 @@ func props(m value.Map) map[string]value.Value {
 	}
 	return out
 }
-
-// MetaOf converts wire-level metadata; clients use it.
-func MetaOf(created, updated value.Time, version int64, labels value.Set, owner string, m value.Map) Meta {
-	return meta(created, updated, version, labels, owner, m)
-}
-
-// PropsOf converts a map with text keys; clients use it.
-func PropsOf(m value.Map) map[string]value.Value { return props(m) }

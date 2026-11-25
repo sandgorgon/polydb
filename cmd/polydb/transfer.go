@@ -11,7 +11,7 @@ import (
 
 	"github.com/sandgorgon/polydb"
 	"github.com/sandgorgon/polydb/client"
-	"github.com/sandgorgon/polydb/lang"
+	"github.com/sandgorgon/polydb/internal/lang"
 	"github.com/sandgorgon/polydb/value"
 )
 

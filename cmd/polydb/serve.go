@@ -15,10 +15,10 @@ import (
 	"time"
 
 	auth9 "github.com/sandgorgon/9auth"
-	"github.com/sandgorgon/polydb/engine"
-	"github.com/sandgorgon/polydb/security"
-	"github.com/sandgorgon/polydb/server"
-	"github.com/sandgorgon/polydb/storage/wal"
+	"github.com/sandgorgon/polydb/internal/engine"
+	"github.com/sandgorgon/polydb/internal/security"
+	"github.com/sandgorgon/polydb/internal/server"
+	"github.com/sandgorgon/polydb/internal/storage/wal"
 )
 
 // serveConfig is what serve needs, parsed from flags.

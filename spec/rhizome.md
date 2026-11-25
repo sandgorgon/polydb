@@ -151,7 +151,7 @@ import security from "security.jsonl" replace;
 
 Queries can't span databases in v1.
 
-**Limits.** A server bounds what one statement, connection or user may use, so that a heavy query or client can't starve the others (`polydb serve` flags, `engine.Options.Limits`):
+**Limits.** A server bounds what one statement, connection or user may use, so that a heavy query or client can't starve the others (`polydb serve` flags or its configuration file; `polydb.Options` for an embedded database):
 
 | Limit | Default | Enforced |
 |---|---|---|

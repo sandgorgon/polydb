@@ -6,10 +6,10 @@ import (
 	"io"
 	"time"
 
-	"github.com/sandgorgon/polydb/engine"
-	"github.com/sandgorgon/polydb/security"
-	"github.com/sandgorgon/polydb/storage/lsm"
-	"github.com/sandgorgon/polydb/storage/wal"
+	"github.com/sandgorgon/polydb/internal/engine"
+	"github.com/sandgorgon/polydb/internal/security"
+	"github.com/sandgorgon/polydb/internal/storage/lsm"
+	"github.com/sandgorgon/polydb/internal/storage/wal"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -86,7 +86,7 @@ func open(dir string, opts *Options) (*Embedded, error) {
 			return nil, convertErr(err, -1)
 		}
 	}
-	db, err := Embed(context.Background(), eng, security.AdminUser, o.Database)
+	db, err := embed(context.Background(), eng, security.AdminUser, o.Database)
 	if err != nil {
 		eng.Close()
 		return nil, err
