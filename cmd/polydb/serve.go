@@ -81,7 +81,7 @@ func parseServe(args []string, errOut io.Writer) (serveConfig, error) {
 	fs.StringVar(&c.backupDir, "backup-dir", "", "directory that backup and restore statements write and read (default: <data-dir>/backups)")
 	fs.DurationVar(&c.slowQuery, "slow-query", engine.DefaultSlowQuery, "log statements that take at least this long, with their plan (0 for no log)")
 	fs.BoolVar(&c.verbose, "v", false, "log connections")
-	fs.String("config", "", "a file of settings, one per line as `key = value` with the flags' names; flags given here override it")
+	fs.String("config", "", "a `file` of settings, one per line as key = value with the flags' names; flags given here override it")
 	if path, ok := configArg(args); ok {
 		if err := loadConfig(fs, path); err != nil {
 			return c, err

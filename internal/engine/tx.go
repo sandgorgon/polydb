@@ -2,7 +2,9 @@ package engine
 
 import (
 	"bytes"
+	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/sandgorgon/polydb/internal/blob"
@@ -383,7 +385,7 @@ func (tx *Tx) save(st *entState) error {
 			if cur, ok, err := tx.get([]byte(k)); err != nil {
 				return err
 			} else if ok && !bytes.Equal(cur, id[:]) {
-				return errorf(CodeConstraint, "unique value already used by entity %s", value.ID(cur))
+				return errorf(CodeConstraint, "%s already has this value, in entity %s", uniqueOf(st.kind, k), value.ID(cur))
 			}
 		}
 		tx.t.Set([]byte(k), v)
@@ -566,4 +568,19 @@ func uniqueIndexKey(ix *model.Index, fields map[string]*model.Field) ([]byte, bo
 		}
 	}
 	return keys.Unique(ix.ID, "", vals), true, nil
+}
+
+// uniqueOf names what a unique key belongs to, for errors: a unique
+// field (the key holds its name after the kind's ID) or a unique index.
+func uniqueOf(k *model.Kind, key string) string {
+	const owner = 1 + 16
+	if len(key) > owner {
+		if name, _, ok := strings.Cut(key[owner:], "\x00"); ok && name != "" {
+			if k != nil {
+				return fmt.Sprintf("unique field %s.%s", k.Name, name)
+			}
+			return "unique field " + name
+		}
+	}
+	return "a unique index"
 }

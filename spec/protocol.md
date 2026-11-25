@@ -420,7 +420,7 @@ Flow control stops a fast sender from flooding a slow receiver. It works like HT
 | `tls_required` | non-TLS TCP connection from a non-loopback address |
 | `auth_failed` | login failed (always generic) |
 | `flow_control` | window exceeded |
-| `too_many_connections` | server connection limit reached |
+| `limit` | a connection limit reached: the server's (which admins may pass) or the user's, or too many connections still logging in (rhizome.md §4, Limits) |
 | `shutting_down` | server is stopping (normally sent as GOAWAY instead) |
 | `timeout` | handshake or keepalive timeout |
 

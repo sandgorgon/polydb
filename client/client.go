@@ -1,6 +1,6 @@
 // Package client is the Go client for a PolyDB server (spec/protocol.md
-// §13). Dial returns a polydb.DB, the same interface an embedded engine
-// implements.
+// §13). Dial returns a *Conn, which is a polydb.DB: the same interface
+// an embedded database (polydb.Open) implements.
 package client
 
 import (

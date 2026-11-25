@@ -16,7 +16,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/sandgorgon/polydb/internal/version"
 	"io"
 	"os"
 	"os/user"
@@ -24,6 +23,7 @@ import (
 	"strings"
 
 	auth9 "github.com/sandgorgon/9auth"
+	"github.com/sandgorgon/polydb/internal/version"
 )
 
 func main() {
