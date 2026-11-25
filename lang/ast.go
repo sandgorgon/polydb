@@ -49,6 +49,7 @@ func (*ShowStmt) stmt()       {}
 func (*Analyze) stmt()        {}
 func (*Backup) stmt()         {}
 func (*Export) stmt()         {}
+func (*Rebuild) stmt()        {}
 func (*Import) stmt()         {}
 func (*Restore) stmt()        {}
 func (*Explain) stmt()        {}
@@ -420,6 +421,12 @@ type Import struct {
 	Source  Expr
 	NewIDs  bool
 	Replace bool
+}
+
+// Rebuild is "rebuild index name": build an index again from the data.
+type Rebuild struct {
+	At
+	Index string
 }
 
 // Analyze is "analyze kind K": sample the kind's statistics now.

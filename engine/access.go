@@ -24,6 +24,9 @@ type Access struct {
 // Accesses returns the ordered indexes the planner may use on a kind:
 // its ready value indexes, unique indexes and unique fields.
 func (tx *Tx) Accesses(k *model.Kind) ([]*Access, error) {
+	if _, ok := tx.db.rewriting(k.ID); ok {
+		return nil, nil // an alter is rewriting the kind: its keys may be stale
+	}
 	var out []*Access
 	for i := range k.Fields {
 		if fd := &k.Fields[i]; fd.Unique {

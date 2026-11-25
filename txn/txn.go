@@ -135,11 +135,13 @@ type Txn struct {
 	done     bool
 	err      error // first error from a write call, returned by Commit
 
-	writes map[string]*entry
-	ranges []span // range deletions
-	sorted []string
-	guards []span              // guarded ranges
-	points map[string]struct{} // guarded single keys
+	writes     map[string]*entry
+	ranges     []span   // range deletions
+	sorted     []string // buffered keys, sorted (put)
+	pend       []string // buffered keys added since the last merge
+	pendSorted bool
+	guards     []span              // guarded ranges
+	points     map[string]struct{} // guarded single keys
 }
 
 // Seq returns the sequence number of the snapshot the transaction reads.
@@ -195,9 +197,79 @@ func (t *Txn) fail(err error) {
 func (t *Txn) put(key []byte, e *entry) {
 	k := string(key)
 	if _, ok := t.writes[k]; !ok {
-		t.sorted = nil
+		t.pend = append(t.pend, k)
+		t.pendSorted = false
+		if len(t.pend) > maxPending {
+			t.mergePending()
+		}
 	}
 	t.writes[k] = e
+}
+
+// The buffered keys are kept sorted, in sorted, with the keys added
+// since the last merge in pend: a scan then costs a search and the keys
+// in its range, not a sort of every key the transaction wrote.
+const maxPending = 512
+
+func (t *Txn) sortPending() {
+	if !t.pendSorted {
+		slices.Sort(t.pend)
+		t.pendSorted = true
+	}
+}
+
+// mergePending merges pend into sorted.
+func (t *Txn) mergePending() {
+	if len(t.pend) == 0 {
+		return
+	}
+	t.sortPending()
+	out := make([]string, 0, len(t.sorted)+len(t.pend))
+	i, j := 0, 0
+	for i < len(t.sorted) || j < len(t.pend) {
+		if j == len(t.pend) || (i < len(t.sorted) && t.sorted[i] < t.pend[j]) {
+			out = append(out, t.sorted[i])
+			i++
+		} else {
+			out = append(out, t.pend[j])
+			j++
+		}
+	}
+	t.sorted, t.pend = out, t.pend[:0]
+}
+
+// keysIn returns the buffered keys in [lo, hi) (nil: unbounded), sorted.
+func (t *Txn) keysIn(lo, hi []byte) []string {
+	t.sortPending()
+	span := func(ks []string) []string {
+		a, b := 0, len(ks)
+		if lo != nil {
+			a, _ = slices.BinarySearch(ks, string(lo))
+		}
+		if hi != nil {
+			b, _ = slices.BinarySearch(ks, string(hi))
+		}
+		if a >= b {
+			return nil
+		}
+		return ks[a:b]
+	}
+	s, p := span(t.sorted), span(t.pend)
+	if len(p) == 0 {
+		return s
+	}
+	out := make([]string, 0, len(s)+len(p))
+	i, j := 0, 0
+	for i < len(s) || j < len(p) {
+		if j == len(p) || (i < len(s) && s[i] < p[j]) {
+			out = append(out, s[i])
+			i++
+		} else {
+			out = append(out, p[j])
+			j++
+		}
+	}
+	return out
 }
 
 // Set buffers a write of value to key. Errors (a read-only or finished
@@ -381,12 +453,6 @@ func (t *Txn) conflicts(rec commitRecord) bool {
 }
 
 func (t *Txn) sortedKeys() []string {
-	if t.sorted == nil {
-		t.sorted = make([]string, 0, len(t.writes))
-		for k := range t.writes {
-			t.sorted = append(t.sorted, k)
-		}
-		slices.Sort(t.sorted)
-	}
+	t.mergePending()
 	return t.sorted
 }

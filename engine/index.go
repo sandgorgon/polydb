@@ -145,6 +145,9 @@ type IndexState struct {
 // IndexState reports whether an index is ready, as this transaction sees
 // it.
 func (tx *Tx) IndexState(ix *model.Index) (IndexState, error) {
+	if _, ok := tx.db.rewriting(ix.Kind); ok {
+		return IndexState{}, nil // an alter is rewriting the kind
+	}
 	if ix.Unique {
 		return IndexState{Ready: true}, nil
 	}
@@ -411,4 +414,32 @@ func (db *DB) VerifyIndexes() error {
 		}
 		return nil
 	})
+}
+
+// RebuildIndex builds an index again from the data: its entries are
+// deleted and written anew, at once for a small kind, otherwise in the
+// background (the planner doesn't use it meanwhile). A unique index
+// checks for duplicates as it rebuilds.
+func (tx *Tx) RebuildIndex(name string) error {
+	if err := tx.writable(); err != nil {
+		return err
+	}
+	ix, ok := tx.Catalog().Index(name)
+	if !ok {
+		return errorf(CodeNotFound, "no index %s", name)
+	}
+	if k, ok := tx.Catalog().KindByID(ix.Kind); ok {
+		if err := tx.kindIdle(k); err != nil {
+			return err
+		}
+	}
+	if ix.Unique {
+		p := keys.UniquePrefix(ix.ID, "")
+		tx.t.DeleteRange(p, keys.Range(p).Upper)
+		return tx.fail2(tx.buildUnique(ix))
+	}
+	p := keys.IndexPrefix(ix.ID)
+	tx.t.DeleteRange(p, keys.Range(p).Upper)
+	tx.t.Delete(keys.IndexBuild(ix.ID))
+	return tx.fail2(tx.buildIndex(ix))
 }

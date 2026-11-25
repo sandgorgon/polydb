@@ -473,6 +473,9 @@ func (f *formatter) stmt(s Stmt) {
 	case *Analyze:
 		f.w("analyze kind ")
 		f.name(s.Kind)
+	case *Rebuild:
+		f.w("rebuild index ")
+		f.name(s.Index)
 	case *Export:
 		f.w("export ")
 		switch s.What {

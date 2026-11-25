@@ -264,6 +264,11 @@ func openDB(e *Engine, name string, s storage.Store, bp blobPlace) (*DB, error) 
 	db.cat.Store(cat)
 	db.mgr.OnCommit(db.notify)
 	db.startBuilder()
+	if err := db.loadAlters(); err != nil {
+		db.stopBuilder()
+		return nil, err
+	}
+	db.startAlterer()
 	db.startSweeper(e.opts.HistorySweep)
 	db.startStats(e.opts.StatsRefresh)
 	return db, nil

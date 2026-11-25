@@ -30,6 +30,10 @@ type DB struct {
 	statsQuit, statsDone chan struct{} // the background statistics refresh
 	statChanges          sync.Map      // kind ID → *atomic.Int64: changes since its last sample
 
+	alter          *alterer     // background alters (alter.go)
+	alters         atomic.Int64 // alters running, or about to
+	rewritingKinds sync.Map     // kind ID → *model.Kind: kinds whose entities an alter is rewriting
+
 	blobs   *blob.Store // large values (blob.go)
 	touchMu sync.Mutex
 	touched map[uint32]uint64 // blob segment → store seq of its last append
@@ -109,6 +113,7 @@ func (db *DB) close() error {
 	db.stopStats()
 	db.stopSweeper()
 	db.stopBuilder()
+	db.stopAlterer()
 	db.wmu.Lock()
 	for _, wl := range db.waiters {
 		for _, w := range wl.list {

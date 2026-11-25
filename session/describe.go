@@ -429,6 +429,33 @@ func (s *env) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) 
 			add(r, f.Name, f.Base, f.Doc)
 		}
 		return r, nil
+	case "alters":
+		r := table("kind", "phase", "done", "total", "failed", "rewrite", "started", "finished", "error")
+		alters, err := tx.Alters()
+		if err != nil {
+			return nil, failAt(st, err)
+		}
+		for _, a := range alters {
+			msg := a.Err
+			if len(a.Errors) > 0 {
+				msg = a.Errors[0]
+				if a.Failed > 1 {
+					msg += fmt.Sprintf(" (and %d more)", a.Failed-1)
+				}
+			}
+			started, _ := value.NewTime(a.Started)
+			var finished value.Value
+			if !a.Finished.IsZero() {
+				finished, _ = value.NewTime(a.Finished)
+			}
+			var errText any
+			if msg != "" {
+				errText = msg
+			}
+			add(r, a.Kind, a.Phase, value.Int(a.Done), value.Int(a.Total), value.Int(a.Failed), value.Bool(a.Rewrite),
+				started, finished, errText)
+		}
+		return r, nil
 	case "indexes":
 		r := table("name", "kind", "type", "keys", "status")
 		for _, ix := range cat.Indexes() {

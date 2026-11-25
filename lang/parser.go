@@ -210,7 +210,7 @@ func (p *parser) optDoc(bare bool) (*string, error) {
 // mean" suggestions.
 var statementWords = []string{"create", "drop", "use", "set", "define", "alter", "update", "delete", "relate",
 	"unrelate", "push", "pop", "find", "begin", "commit", "rollback", "grant", "revoke", "describe", "show",
-	"explain", "history", "analyze", "backup", "restore", "export", "import"}
+	"explain", "history", "analyze", "backup", "restore", "export", "import", "rebuild"}
 
 // ===== statements =====
 
@@ -314,6 +314,15 @@ func (p *parser) importStmt() (Stmt, error) {
 
 func (p *parser) statement() (Stmt, error) {
 	t := p.tok()
+	if t.Kind == Ident && !t.Quoted && t.Text == "rebuild" {
+		at := p.at()
+		p.advance()
+		if err := p.expect("index"); err != nil {
+			return nil, err
+		}
+		n, err := p.name("an index name")
+		return &Rebuild{at, n}, err
+	}
 	if t.Kind == Ident && !t.Quoted && t.Text == "export" {
 		return p.export()
 	}
@@ -486,11 +495,11 @@ func (p *parser) statement() (Stmt, error) {
 func (p *parser) show(at At) (Stmt, error) {
 	t := p.tok()
 	if t.Kind != Ident || t.Quoted {
-		return nil, p.errExpected("what to show (databases, kinds, relations, formats, indexes, users, roles, sessions, grants, keys or stats)")
+		return nil, p.errExpected("what to show (databases, kinds, relations, formats, indexes, alters, users, roles, sessions, grants, keys or stats)")
 	}
 	s := &ShowStmt{At: at, What: t.Text}
 	switch t.Text {
-	case "databases", "kinds", "relations", "formats", "indexes", "users", "roles", "sessions":
+	case "databases", "kinds", "relations", "formats", "indexes", "alters", "users", "roles", "sessions":
 		p.advance()
 	case "grants", "keys":
 		p.advance()

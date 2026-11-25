@@ -20,6 +20,8 @@ func (x *executor) definition(s lang.Stmt) (*Result, error) {
 		}
 	case *lang.AlterKind:
 		err = x.alterKind(s)
+	case *lang.Rebuild:
+		err = x.tx.RebuildIndex(s.Index)
 	case *lang.DefineRelation:
 		var d engine.RelationDef
 		if d, err = x.relationDef(s); err == nil {
@@ -59,7 +61,12 @@ func (x *executor) definition(s lang.Stmt) (*Result, error) {
 		return nil, fail(s, err)
 	}
 	x.graph.reset()
-	return &Result{}, nil
+	res := &Result{}
+	if a, ok := s.(*lang.AlterKind); ok && x.tx.AlterStarted() {
+		res.Warnings = append(res.Warnings, &lang.Error{Pos: a.Position(), Code: "background",
+			Msg: "kind " + a.Name + " is large, so it is being altered in the background: writes to it wait until that finishes (show alters)"})
+	}
+	return res, nil
 }
 
 func str(p *string) string {

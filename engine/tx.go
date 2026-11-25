@@ -32,11 +32,13 @@ type Tx struct {
 
 	blobsPut map[[32]byte]bool // blobs stored or reused (blob.go)
 
-	loadLimit    int64 // SetMaxLoad
-	loadLimitSet bool
-	importing    bool       // ImportEntity: ref targets may come later
-	blobSync     []blob.Loc // chunks to sync before committing
-	commitSeq    *uint64    // set to the commit's sequence number
+	loadLimit     int64 // SetMaxLoad
+	loadLimitSet  bool
+	importing     bool       // ImportEntity: ref targets may come later
+	alterJob      bool       // a background alter's own transaction
+	startAlterJob bool       // this transaction starts a background alter
+	blobSync      []blob.Loc // chunks to sync before committing
+	commitSeq     *uint64    // set to the commit's sequence number
 }
 
 // Catalog returns the catalog as this transaction sees it, including its
@@ -82,6 +84,10 @@ func (tx *Tx) Commit() error {
 	if tx.commitSeq != nil {
 		*tx.commitSeq = seq
 	}
+	if tx.startAlterJob {
+		tx.startAlterJob = false
+		tx.db.kickAlterer()
+	}
 	if newCat != nil {
 		tx.db.setCatalog(newCat)
 	}
@@ -95,7 +101,13 @@ func (tx *Tx) Commit() error {
 }
 
 // Rollback discards the transaction. It is safe to call after Commit.
-func (tx *Tx) Rollback() { tx.t.Rollback() }
+func (tx *Tx) Rollback() {
+	if tx.startAlterJob {
+		tx.startAlterJob = false
+		tx.db.alters.Add(-1)
+	}
+	tx.t.Rollback()
+}
 
 // writable checks the transaction may write, and guards the catalog
 // version so a concurrent definition change makes one of the two fail.
@@ -293,6 +305,14 @@ func (tx *Tx) save(st *entState) error {
 	}
 	cat := tx.Catalog()
 	id := st.e.ID
+	if err := tx.checkNotAltering(st.kind); err != nil {
+		return err
+	}
+	if st.origKind != st.kind {
+		if err := tx.checkNotAltering(st.origKind); err != nil {
+			return err
+		}
+	}
 	if !st.deleted {
 		if err := tx.emptyQueues(st); err != nil {
 			return err

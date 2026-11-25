@@ -338,7 +338,7 @@ func errAt(n lang.Node, code, format string, args ...any) *lang.Error {
 func (x *executor) stmt(s lang.Stmt) (*Result, error) {
 	switch s := s.(type) {
 	case *lang.DefineKind, *lang.AlterKind, *lang.DefineRelation, *lang.AlterRelation,
-		*lang.DefineFormat, *lang.DefineIndex, *lang.Drop:
+		*lang.DefineFormat, *lang.DefineIndex, *lang.Drop, *lang.Rebuild:
 		return x.definition(s)
 	case *lang.Create:
 		return x.create(s)

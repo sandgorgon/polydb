@@ -544,6 +544,12 @@ func (tx *Tx) Get(id value.ID) (*Entity, error) {
 	if err != nil {
 		return nil, err
 	}
+	if st.kind != nil && !tx.alterJob {
+		if k, ok := tx.db.rewriting(st.kind.ID); ok {
+			st.kind = k
+			normalize(st, k)
+		}
+	}
 	out := &Entity{Entity: st.e, Kind: st.kind}
 	if st.kind != nil {
 		for _, fd := range st.kind.Fields {
@@ -587,6 +593,17 @@ func (tx *Tx) EntityField(id value.ID, name string) (kind *model.Kind, v value.V
 	}
 	if v, err = tx.lazy(f.Value); err != nil {
 		return nil, nil, false, err
+	}
+	if kind != nil && !tx.alterJob {
+		if k, ok := tx.db.rewriting(kind.ID); ok {
+			st := &entState{fields: map[string]*model.Field{name: f}}
+			f.Value = v
+			normalize(st, k)
+			if nf, ok := st.fields[name]; ok {
+				return kind, nf.Value, true, nil
+			}
+			return kind, nil, true, nil
+		}
 	}
 	return kind, v, true, nil
 }

@@ -225,6 +225,23 @@ drop kind Person;                // fails while entities of this kind exist
 ```
 An `alter` that existing data doesn't satisfy (for example adding a required field without a default) fails, with a count of the entities that don't fit.
 
+**How an alter runs.** It does only the work the change needs:
+
+- **At once, touching no entity**, when stored data stays valid: docs, renames, history settings, defaults, adding an optional field without a default to a closed kind, removing a check or `unique` (its keys go with it), making a field optional, switching to extensible.
+- **Checking every entity** when the change adds a rule: a new or changed check, `unique` (which also writes its keys), making a field required, switching to closed. Entities aren't rewritten.
+- **Rewriting every entity** when their records change: a type that converts values (types.md §10.1), a dropped field, a new field with a default or a required one, a field some entities may hold themselves (any new field of an extensible kind), a change of `on delete`.
+
+A kind of up to 1,000 entities is checked and rewritten in the altering statement, all or nothing. A larger one is altered **in the background**, and the statement returns at once with a `background` warning:
+
+1. Writes to the kind stop: creating, changing or deleting its entities fails with a `constraint` error saying it is being altered, and a write that began before the alter can't commit after it. Reads go on, and other kinds aren't affected.
+2. Every entity is checked against the new definition, in batches, while reads still see the old one. If any doesn't fit, the alter fails: nothing changes and writes resume.
+3. The new definition becomes current, and entities are rewritten in batches; until it reaches one, a read shows it through the new definition (dropped fields hidden, values converted). The kind's indexes aren't used meanwhile.
+4. Writes resume.
+
+`show alters` lists each kind's latest background alter: its phase (`checking`, `rewriting`, `done`, `failed`), progress, whether it rewrites, when it started and finished, and the first error with a count of the others. A kind being altered can't be altered, dropped or indexed again until it finishes. An alter that a restart interrupts resumes where it was.
+
+**Rebuilding an index:** `rebuild index person_age;` deletes an index's entries and builds them again from the data: at once for a small kind, otherwise in the background, like a new index, which queries don't use until it is ready. A unique index checks for duplicates as it rebuilds. It needs `define` permission on the kind.
+
 ### 5.2 Relation types (optional)
 
 Relations can be created with any type name, no definition needed. Defining a relation type adds rules and docs:

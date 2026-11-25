@@ -230,6 +230,8 @@ func (c *checker) stmt(s Stmt, sc *scope) error {
 		return nil
 	case *SetSetting:
 		return c.setSetting(s)
+	case *Rebuild:
+		return nil
 	case *Export:
 		if s.Path != nil {
 			if err := c.constText(s.Path, "an export path"); err != nil {
