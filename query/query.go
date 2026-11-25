@@ -62,6 +62,10 @@ type Context struct {
 	// Planned, if set, receives how a planned source ran: its plan with
 	// the rows each variable bound, for explain analyze.
 	Planned func(*SourcePlan)
+	// PlanIfSlower, if set, reports the plan to Planned only when running
+	// the source took at least this long (the slow-query log), so fast
+	// statements don't pay for describing it.
+	PlanIfSlower time.Duration
 	// NoPlanner runs pipelines as written, scanning every kind, without
 	// the planner (tests compare the two).
 	NoPlanner bool
@@ -152,7 +156,7 @@ func Exec(ctx *Context, s lang.Stmt) (*Result, error) {
 }
 
 func newExecutor(ctx *Context, info *lang.Info) *executor {
-	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
+	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now(), began: time.Now()}
 	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}, hidden: map[value.ID]bool{}, access: ctx.Access}
 	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, LookupHandle: x.handleValue, Now: x.now,
 		MaxLoad: ctx.Settings.MaxLoad}
@@ -210,6 +214,7 @@ type executor struct {
 	ev    *lang.Evaluator
 	now   time.Time
 	ticks int
+	began time.Time // when the statement started running
 }
 
 // can reports whether the user may do p on entities of kind.

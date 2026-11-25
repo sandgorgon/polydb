@@ -183,6 +183,7 @@ func (s *env) analyze(qc *query.Context, pl *lang.Pipeline) (*query.Result, erro
 		}
 	}
 	traced.Planned = func(sp *query.SourcePlan) { planned = sp }
+	traced.PlanIfSlower = 0 // explain analyze always reports the plan
 	began := time.Now()
 	res, err := query.Exec(&traced, pl)
 	if err != nil {

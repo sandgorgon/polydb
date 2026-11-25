@@ -74,6 +74,11 @@ type Options struct {
 	// Dir, the statements are refused). DB.Backup and RestoreDatabase
 	// take any path.
 	BackupDir string
+	// SlowQuery is how long a statement takes to go in the slow-query
+	// log (default DefaultSlowQuery; negative: no log). OnSlowQuery, if
+	// set, receives each one.
+	SlowQuery   time.Duration
+	OnSlowQuery func(SlowQuery)
 	// MaxLoad is how many bytes of large values one statement may load
 	// into memory, for functions and operators that need their content:
 	// the default of sessions' max_load setting (default DefaultMaxLoad,
@@ -96,6 +101,9 @@ type Engine struct {
 	mu     sync.RWMutex
 	dbs    map[string]*DB
 	closed bool
+
+	slowMu sync.Mutex
+	slow   []SlowQuery // the latest slow statements, oldest first
 }
 
 // Security returns the engine's system store: users, roles, grants and
@@ -133,6 +141,9 @@ func Open(opts Options) (*Engine, error) {
 	opts.BlobThreshold = max(opts.BlobThreshold, minBlobThreshold)
 	if opts.BackupDir == "" && opts.Dir != "" {
 		opts.BackupDir = vfs.Join(opts.Dir, "backups")
+	}
+	if opts.SlowQuery == 0 {
+		opts.SlowQuery = DefaultSlowQuery
 	}
 	if opts.MaxLoad == 0 {
 		opts.MaxLoad = DefaultMaxLoad

@@ -696,7 +696,11 @@ analyze kind Person;                // sample Person's statistics now (the datab
 show sessions;                      // admin: who is connected and what's running
 explain find Person p | where p.age > 30;            // how each variable is found, estimates, steps, warnings
 explain analyze find Person p | where p.age > 30;    // runs it; shows actual counts and timings
+show alters;                        // background alters of kinds (§5.1)
+show slow queries;                  // admin: the latest statements over the slow-query threshold
 ```
+
+**Slow-query log.** A statement that takes at least the server's threshold (`polydb serve --slow-query`, default 1 s; 0 turns it off) is logged: the server writes it to its log, and keeps the latest 256 for `show slow queries` (newest first). An entry holds when it finished, how long it took, the user and database, the statement's text (parameters by name, never their values; passwords hidden; cut at 4 KiB), the rows returned and affected, the error if it failed, and for a query, how its source ran: each variable's access path with the rows it bound, as in `explain analyze`. The plan is described only for statements that turn out slow, so the log costs fast statements nothing. A `pop … wait`, which waits by design, isn't logged. Statements can hold literal values, so only server admins see them.
 
 ---
 

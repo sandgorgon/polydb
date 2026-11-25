@@ -34,6 +34,7 @@ type serveConfig struct {
 	inlineLimit int64
 	maxLoad     int64
 	backupDir   string
+	slowQuery   time.Duration
 	verbose     bool
 	iterations  int
 }
@@ -53,6 +54,7 @@ func serveCmd(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.Int64Var(&c.inlineLimit, "inline-limit", 0, "largest value sent inline, in bytes (default 16384)")
 	fs.Int64Var(&c.maxLoad, "max-load", 0, "bytes of large values one statement may load into memory, by default (default 268435456; -1 for no limit; sessions change it with set max_load)")
 	fs.StringVar(&c.backupDir, "backup-dir", "", "directory that backup and restore statements write and read (default: <data-dir>/backups)")
+	fs.DurationVar(&c.slowQuery, "slow-query", engine.DefaultSlowQuery, "log statements that take at least this long, with their plan (0 for no log)")
 	fs.BoolVar(&c.verbose, "v", false, "log connections")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -90,7 +92,11 @@ func serve(ctx context.Context, c serveConfig, out, errOut io.Writer, ready func
 		return fmt.Errorf("--durability is durable or relaxed, not %q", c.durability)
 	}
 	eng, err := engine.Open(engine.Options{Dir: c.dataDir, Durability: durability, PasswordIterations: c.iterations,
-		MaxLoad: c.maxLoad, BackupDir: c.backupDir})
+		MaxLoad: c.maxLoad, BackupDir: c.backupDir, SlowQuery: slowThreshold(c.slowQuery),
+		OnSlowQuery: func(q engine.SlowQuery) {
+			logger.Warn("slow query", "duration", q.Duration, "user", q.User, "database", q.Database,
+				"statement", q.Statement, "rows", q.Rows, "affected", q.Affected, "plan", q.Plan, "error", q.Err)
+		}})
 	if err != nil {
 		return err
 	}
@@ -182,4 +188,13 @@ func serve(ctx context.Context, c serveConfig, out, errOut io.Writer, ready func
 		os.Remove(unixAddr)
 	}
 	return nil
+}
+
+// slowThreshold turns --slow-query into the engine option: 0 turns the
+// log off.
+func slowThreshold(d time.Duration) time.Duration {
+	if d <= 0 {
+		return -1
+	}
+	return d
 }

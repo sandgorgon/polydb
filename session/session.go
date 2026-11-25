@@ -256,6 +256,7 @@ type Request struct {
 	// caller that sends or reads them a piece at a time (query.Context).
 	LazyResults bool
 	closed      bool
+	plan        *query.SourcePlan // the last statement's, when it was slow
 }
 
 // Request starts a request in transaction txn (nil for none). A
@@ -317,7 +318,14 @@ func (r *Request) Exec(ctx context.Context, st lang.Stmt, params map[string]valu
 			return nil, sessionErr(st, "txn_aborted", "the transaction failed earlier (%v); roll it back to continue", t.aborted)
 		}
 	}
+	r.plan = nil
+	began := time.Now()
 	res, err := r.exec(ctx, st, params)
+	if slow := r.s.eng.SlowQueryThreshold(); slow > 0 {
+		if d := time.Since(began); d >= slow && !waits(st) {
+			r.noteSlow(st, d, res, err)
+		}
+	}
 	if err != nil && r.txn != nil {
 		// Any error inside an explicit transaction aborts it, so that the
 		// statements after it can't run as if it had worked.
@@ -437,6 +445,8 @@ func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 			return res, nil
 		}
 		switch st.What {
+		case "slow":
+			return s.showSlow(st)
 		case "users", "roles", "grants", "keys", "sessions":
 			return r.env(nil).showSecurity(st)
 		}
@@ -623,6 +633,9 @@ func (r *Request) inTx(ctx context.Context, st lang.Stmt, params map[string]valu
 		Interrupt:   func() error { return interrupted(ctx, settings.Timeout) },
 		Access:      e.access(),
 		LazyResults: r.LazyResults,
+	}
+	if slow := s.eng.SlowQueryThreshold(); slow > 0 {
+		qc.Planned, qc.PlanIfSlower = func(sp *query.SourcePlan) { r.plan = sp }, slow
 	}
 	if auto && !noWait {
 		qc.Wait = func(id value.ID, field string, wait time.Duration) (value.Value, error) {

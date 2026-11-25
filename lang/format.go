@@ -528,6 +528,9 @@ func (f *formatter) stmt(s Stmt) {
 		f.expr(s.Path, 0)
 	case *ShowStmt:
 		f.w("show ", s.What)
+		if s.What == "slow" {
+			f.w(" queries")
+		}
 		if s.For != "" {
 			if s.What == "stats" {
 				f.w(" kind ")
