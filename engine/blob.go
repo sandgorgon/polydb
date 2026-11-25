@@ -67,8 +67,6 @@ const (
 	// rewriteLive is the share of a sealed segment that must still be live
 	// for it to be kept as it is.
 	rewriteLive = 0.5
-	// DefaultMaxLoad is Options.MaxLoad's default.
-	DefaultMaxLoad = 256 << 20
 )
 
 // blobSegKey is the retire mark of a blob segment: the collector sets it
@@ -93,16 +91,16 @@ func openBlobs(e *Engine, p blobPlace) (*blob.Store, error) {
 
 func (db *DB) blobThreshold() int { return db.eng.opts.BlobThreshold }
 
-// SetMaxLoad sets how many bytes of large values each check and default
-// expression the transaction evaluates may load: the running statement's
-// limit (0: none). It starts at the engine's Options.MaxLoad.
-func (tx *Tx) SetMaxLoad(n int64) { tx.loadLimit, tx.loadLimitSet = n, true }
+// SetMaxMemory sets how many bytes each check and default expression the
+// transaction evaluates may hold: the running statement's limit (0:
+// none). It starts at the engine's Limits.MaxMemory.
+func (tx *Tx) SetMaxMemory(n int64) { tx.loadLimit, tx.loadLimitSet = n, true }
 
-func (tx *Tx) maxLoad() int64 {
+func (tx *Tx) maxMemory() int64 {
 	if tx.loadLimitSet {
 		return tx.loadLimit
 	}
-	return tx.db.eng.opts.MaxLoad
+	return max(tx.db.eng.opts.Limits.MaxMemory, 0)
 }
 
 // storeValue returns what a stored record of entity's field holds for v:

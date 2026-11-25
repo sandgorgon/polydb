@@ -32,7 +32,7 @@ type Tx struct {
 
 	blobsPut map[[32]byte]bool // blobs stored or reused (blob.go)
 
-	loadLimit     int64 // SetMaxLoad
+	loadLimit     int64 // SetMaxMemory
 	loadLimitSet  bool
 	importing     bool       // ImportEntity: ref targets may come later
 	alterJob      bool       // a background alter's own transaction

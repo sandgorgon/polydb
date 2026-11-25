@@ -104,3 +104,35 @@ func orEmpty(s string) any {
 	}
 	return s
 }
+
+// showLimits runs show limits: this session's settings, and the
+// server's limits they live within.
+func (s *Session) showLimits() *query.Result {
+	set := s.Settings()
+	lim := s.eng.Limits()
+	r := table("limit", "value", "applies to")
+	none := func(n int64) any {
+		if n <= 0 {
+			return "none"
+		}
+		return value.Int(n)
+	}
+	dur := func(d time.Duration) any {
+		if d <= 0 {
+			return "none"
+		}
+		return value.Duration(d)
+	}
+	add(r, "timeout", dur(set.Timeout), "each statement of this session")
+	add(r, "max_memory", none(set.MaxMemory), "each statement of this session, bytes")
+	add(r, "max_rows", none(int64(set.MaxRows)), "each result of this session")
+	add(r, "max_depth", set.MaxDepth, "open-ended patterns of this session")
+	add(r, "server statement timeout", dur(lim.StatementTimeout), "the most a session may set without admin")
+	add(r, "server max_memory", none(lim.MaxMemory), "the most a session may set without admin, bytes")
+	add(r, "max connections", none(int64(lim.MaxConnections)), "the server (admins may go past it)")
+	add(r, "max connections per user", none(int64(lim.MaxUserConnections)), "each user")
+	add(r, "max transactions", none(int64(lim.MaxTransactions)), "open at once in a session")
+	add(r, "max upload", none(lim.MaxUpload), "one upload, bytes")
+	add(r, "upload quota", none(lim.UploadQuota), "uploads waiting to be used, per user, bytes")
+	return r
+}

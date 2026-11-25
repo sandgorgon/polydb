@@ -32,7 +32,7 @@ type serveConfig struct {
 	durability  string
 	compression bool
 	inlineLimit int64
-	maxLoad     int64
+	limits      engine.Limits
 	backupDir   string
 	slowQuery   time.Duration
 	verbose     bool
@@ -52,7 +52,13 @@ func serveCmd(ctx context.Context, args []string, out, errOut io.Writer) int {
 	fs.StringVar(&c.durability, "durability", "durable", "when commits are acknowledged: durable (on stable storage) or relaxed (written; synced in the background, for bulk loads)")
 	fs.BoolVar(&c.compression, "compression", false, "allow deflate compression")
 	fs.Int64Var(&c.inlineLimit, "inline-limit", 0, "largest value sent inline, in bytes (default 16384)")
-	fs.Int64Var(&c.maxLoad, "max-load", 0, "bytes of large values one statement may load into memory, by default (default 268435456; -1 for no limit; sessions change it with set max_load)")
+	fs.DurationVar(&c.limits.StatementTimeout, "statement-timeout", 0, "how long one statement may run (default no limit); sessions may lower it, only admins raise it")
+	fs.Int64Var(&c.limits.MaxMemory, "max-memory", 0, "bytes one statement may hold, rows and loaded large values (default 1 GiB; -1 for no limit); sessions may lower it with set max_memory")
+	fs.IntVar(&c.limits.MaxConnections, "max-connections", 0, "connections the server accepts at once (default 1000; server admins may go past it)")
+	fs.IntVar(&c.limits.MaxUserConnections, "max-user-connections", 0, "connections one user may have (default 100)")
+	fs.IntVar(&c.limits.MaxTransactions, "max-transactions", 0, "explicit transactions one session may have open (default 16)")
+	fs.Int64Var(&c.limits.MaxUpload, "max-upload", 0, "bytes of the largest upload (default 4 GiB)")
+	fs.Int64Var(&c.limits.UploadQuota, "upload-quota", 0, "bytes of uploads one user may hold before statements use them (default 16 GiB)")
 	fs.StringVar(&c.backupDir, "backup-dir", "", "directory that backup and restore statements write and read (default: <data-dir>/backups)")
 	fs.DurationVar(&c.slowQuery, "slow-query", engine.DefaultSlowQuery, "log statements that take at least this long, with their plan (0 for no log)")
 	fs.BoolVar(&c.verbose, "v", false, "log connections")
@@ -92,7 +98,7 @@ func serve(ctx context.Context, c serveConfig, out, errOut io.Writer, ready func
 		return fmt.Errorf("--durability is durable or relaxed, not %q", c.durability)
 	}
 	eng, err := engine.Open(engine.Options{Dir: c.dataDir, Durability: durability, PasswordIterations: c.iterations,
-		MaxLoad: c.maxLoad, BackupDir: c.backupDir, SlowQuery: slowThreshold(c.slowQuery),
+		Limits: c.limits, BackupDir: c.backupDir, SlowQuery: slowThreshold(c.slowQuery),
 		OnSlowQuery: func(q engine.SlowQuery) {
 			logger.Warn("slow query", "duration", q.Duration, "user", q.User, "database", q.Database,
 				"statement", q.Statement, "rows", q.Rows, "affected", q.Affected, "plan", q.Plan, "error", q.Err)

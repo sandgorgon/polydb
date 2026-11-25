@@ -79,12 +79,9 @@ type Options struct {
 	// set, receives each one.
 	SlowQuery   time.Duration
 	OnSlowQuery func(SlowQuery)
-	// MaxLoad is how many bytes of large values one statement may load
-	// into memory, for functions and operators that need their content:
-	// the default of sessions' max_load setting (default DefaultMaxLoad,
-	// negative no limit). Passing large values along (showing, storing,
-	// len, =) loads nothing.
-	MaxLoad int64
+	// Limits bound what statements, connections and uploads may use
+	// (spec/rhizome.md §4, Limits).
+	Limits Limits
 	// PasswordIterations is the PBKDF2 iteration count for new passwords
 	// (default security.DefaultIterations, at least security.MinIterations).
 	PasswordIterations int
@@ -110,9 +107,8 @@ type Engine struct {
 // keys.
 func (e *Engine) Security() *security.Store { return e.sec }
 
-// MaxLoad returns how many bytes of large values a statement may load,
-// or a negative number for no limit (Options.MaxLoad).
-func (e *Engine) MaxLoad() int64 { return e.opts.MaxLoad }
+// Limits returns the engine's limits, with defaults filled in.
+func (e *Engine) Limits() Limits { return e.opts.Limits }
 
 // Open returns an engine: a new, empty one in memory, or the one kept in
 // opts.Dir (created if needed).
@@ -145,9 +141,7 @@ func Open(opts Options) (*Engine, error) {
 	if opts.SlowQuery == 0 {
 		opts.SlowQuery = DefaultSlowQuery
 	}
-	if opts.MaxLoad == 0 {
-		opts.MaxLoad = DefaultMaxLoad
-	}
+	opts.Limits.defaults()
 	e := &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{},
 		sec: security.New(opts.PasswordIterations)}
 	if opts.Dir != "" {

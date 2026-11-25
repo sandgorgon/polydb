@@ -17,7 +17,7 @@ import (
 // texts (a 100 KiB body, a 300 KiB one) and a small one.
 func lazySession(t *testing.T, maxLoad int64) *Session {
 	t.Helper()
-	eng, err := engine.Open(engine.Options{MaxLoad: maxLoad, HistorySweep: -1, StatsRefresh: -1})
+	eng, err := engine.Open(engine.Options{Limits: engine.Limits{MaxMemory: maxLoad}, HistorySweep: -1, StatsRefresh: -1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,22 +192,22 @@ func rowsText(res *query.Result) string {
 	return strings.Join(rows, "; ")
 }
 
-// set max_load changes the session's limit; 0 lifts it.
-func TestMaxLoadSetting(t *testing.T) {
+// set max_memory changes the session's limit; 0 lifts it.
+func TestMaxMemorySetting(t *testing.T) {
 	s := lazySession(t, -1)
 	ctx := context.Background()
 	q := `find F f | where f.name = "a" | show len(upper(f.body))`
 	if _, err := s.Exec(ctx, q, nil); err != nil {
 		t.Fatalf("no limit: %v", err)
 	}
-	if _, err := s.Exec(ctx, `set max_load = 1000; `+q, nil); execCode(err) != "limit" {
-		t.Fatalf("max_load 1000: %v", err)
+	if _, err := s.Exec(ctx, `set max_memory = 1000; `+q, nil); execCode(err) != "limit" {
+		t.Fatalf("max_memory 1000: %v", err)
 	}
-	if _, err := s.Exec(ctx, `set max_load = 0; `+q, nil); err != nil {
-		t.Fatalf("max_load 0: %v", err)
+	if _, err := s.Exec(ctx, `set max_memory = 0; `+q, nil); err != nil {
+		t.Fatalf("max_memory 0: %v", err)
 	}
-	if _, err := s.Exec(ctx, `set max_load = -1`, nil); execCode(err) != "constraint" {
-		t.Fatalf("negative max_load: %v", err)
+	if _, err := s.Exec(ctx, `set max_memory = -1`, nil); execCode(err) != "constraint" {
+		t.Fatalf("negative max_memory: %v", err)
 	}
 }
 
@@ -249,7 +249,7 @@ func TestLargeValueIndexes(t *testing.T) {
 	}
 
 	// Comparing long values loads them (until streaming comparisons).
-	if _, err := s.Exec(ctx, `set max_load = 0`, nil); err != nil {
+	if _, err := s.Exec(ctx, `set max_memory = 0`, nil); err != nil {
 		t.Fatal(err)
 	}
 	params := map[string]value.Value{"pb": value.MustText(p + "b")}
@@ -295,16 +295,19 @@ func TestCheckLoadLimit(t *testing.T) {
 	if _, err := s.Exec(ctx, copyBig, nil); execCode(err) != "limit" {
 		t.Fatalf("check over the limit: %v", err)
 	}
-	if _, err := s.Exec(ctx, `set max_load = 0; `+copyBig, nil); err != nil {
+	if _, err := s.Exec(ctx, `set max_memory = 0; `+copyBig, nil); err != nil {
 		t.Fatalf("check without a limit: %v", err)
 	}
 }
 
 // Comparing, searching and cutting large values reads them a piece at a
-// time: with a 1000-byte limit every query gives what loading gives.
+// time: with a limit smaller than any of them every query gives what
+// loading gives.
 func TestLazyStreaming(t *testing.T) {
 	ctx := context.Background()
-	small, unlimited := lazySession(t, 1000), lazySession(t, -1)
+	// The limit fits the rows but not one of the large values (the
+	// smallest is 40 KiB): every query must stream them.
+	small, unlimited := lazySession(t, 32<<10), lazySession(t, -1)
 	// More texts: ones sharing a long start, bytes, and one past several
 	// pieces with a word across a piece boundary.
 	extra := map[string]value.Value{
@@ -343,7 +346,7 @@ func TestLazyStreaming(t *testing.T) {
 		}
 		got, err := small.Exec(ctx, q, nil)
 		if err != nil {
-			t.Errorf("%s with a 1000-byte limit: %v", q, err)
+			t.Errorf("%s with a 32 KiB limit: %v", q, err)
 			continue
 		}
 		if a, b := rowsText(got[len(got)-1]), rowsText(want[len(want)-1]); a != b {

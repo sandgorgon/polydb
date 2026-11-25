@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -18,6 +19,7 @@ import (
 	auth9 "github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/polydb/authn"
 	"github.com/sandgorgon/polydb/engine"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/session"
 	"github.com/sandgorgon/polydb/value"
 	"github.com/sandgorgon/polydb/wire"
@@ -128,12 +130,14 @@ type Server struct {
 	leases *leases
 	ids    *value.IDGenerator
 
-	mu        sync.Mutex
-	listeners map[net.Listener]bool
-	conns     map[*conn]bool
-	shutdown  bool
-	wg        sync.WaitGroup
-	done      chan struct{}
+	mu          sync.Mutex
+	listeners   map[net.Listener]bool
+	conns       map[*conn]bool
+	userConns   map[string]int // logged-in connections per user
+	handshaking int            // connections not logged in yet
+	shutdown    bool
+	wg          sync.WaitGroup
+	done        chan struct{}
 }
 
 // New returns a server.
@@ -150,6 +154,7 @@ func New(cfg Config) (*Server, error) {
 		ids:       value.NewIDGenerator(0),
 		listeners: map[net.Listener]bool{},
 		conns:     map[*conn]bool{},
+		userConns: map[string]int{},
 		done:      make(chan struct{}),
 	}
 	s.auth = &authn.ServerConfig{
@@ -282,4 +287,35 @@ func (s *Server) directory() []session.Info {
 func isLoopback(addr net.Addr) bool {
 	tcp, ok := addr.(*net.TCPAddr)
 	return ok && tcp.IP.IsLoopback()
+}
+
+// admitUser counts a logged-in connection of user against the
+// connection limits (engine.Limits): the server's, which server admins
+// may go past so they can always get in, and the user's own.
+func (s *Server) admitUser(user string) error {
+	lim := s.cfg.Engine.Limits()
+	admin := s.cfg.Engine.Security().Allowed(user, security.Admin, "", value.ID{})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !admin && lim.MaxConnections > 0 && len(s.conns) >= lim.MaxConnections {
+		return &wire.ConnError{Code: "limit", Msg: fmt.Sprintf("the server has %d connections, its limit", len(s.conns))}
+	}
+	if lim.MaxUserConnections > 0 && s.userConns[user] >= lim.MaxUserConnections {
+		return &wire.ConnError{Code: "limit", Msg: fmt.Sprintf("%s has %d connections, the limit per user", user, s.userConns[user])}
+	}
+	s.userConns[user]++
+	return nil
+}
+
+// releaseUser undoes admitUser when a logged-in connection ends.
+func (s *Server) releaseUser(c *conn) {
+	if c.sess == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	u := c.sess.User()
+	if s.userConns[u]--; s.userConns[u] <= 0 {
+		delete(s.userConns, u)
+	}
 }

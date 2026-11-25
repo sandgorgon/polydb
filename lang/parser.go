@@ -495,11 +495,11 @@ func (p *parser) statement() (Stmt, error) {
 func (p *parser) show(at At) (Stmt, error) {
 	t := p.tok()
 	if t.Kind != Ident || t.Quoted {
-		return nil, p.errExpected("what to show (databases, kinds, relations, formats, indexes, alters, users, roles, sessions, grants, keys, slow queries or stats)")
+		return nil, p.errExpected("what to show (databases, kinds, relations, formats, indexes, alters, users, roles, sessions, grants, keys, limits, slow queries or stats)")
 	}
 	s := &ShowStmt{At: at, What: t.Text}
 	switch t.Text {
-	case "databases", "kinds", "relations", "formats", "indexes", "alters", "users", "roles", "sessions":
+	case "databases", "kinds", "relations", "formats", "indexes", "alters", "users", "roles", "sessions", "limits":
 		p.advance()
 	case "slow":
 		p.advance()

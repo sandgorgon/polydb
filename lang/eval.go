@@ -58,14 +58,12 @@ type Evaluator struct {
 	// LookupHandle, if set, finds handles missing from Handles.
 	LookupHandle func(name string) (value.Value, bool)
 	Now          time.Time
-	// MaxLoad is how many bytes of large values (value.Lazy) the
-	// statement may load for functions and operators that need their
-	// content; zero or negative means no limit.
-	MaxLoad int64
+	// Budget is the statement's working memory, which loading large
+	// values (value.Lazy) counts against; nil means no limit.
+	Budget *Budget
 
-	loaded     map[value.BlobRef]value.Value // lazy values loaded so far
-	loadedSize int64
-	prefixes   map[value.BlobRef][]byte // starts of lazy values (Order)
+	loaded   map[value.BlobRef]value.Value // lazy values loaded so far
+	prefixes map[value.BlobRef][]byte      // starts of lazy values (Order)
 
 	regexps map[string]*regexp.Regexp
 	queries map[string]*fulltext.Query // search() queries
@@ -121,7 +119,7 @@ func (ev *Evaluator) EvalLazy(e Expr, f *Frame) (value.Value, error) {
 }
 
 // Load returns v with a lazy value's content loaded, counting it against
-// MaxLoad. A value loaded once is kept for the statement.
+// the Budget. A value loaded once is kept for the statement.
 func (ev *Evaluator) Load(n Node, v value.Value) (value.Value, error) {
 	l, ok := v.(value.Lazy)
 	if !ok {
@@ -130,8 +128,8 @@ func (ev *Evaluator) Load(n Node, v value.Value) (value.Value, error) {
 	if c, ok := ev.loaded[l.Ref]; ok {
 		return c, nil
 	}
-	if ev.MaxLoad > 0 && ev.loadedSize+l.Ref.Len > ev.MaxLoad {
-		return nil, runErr(n, "limit", "loading %s would take the statement over its limit of %d bytes for large values", l, ev.MaxLoad)
+	if err := ev.Budget.Load(l.Ref.Len); err != nil {
+		return nil, runErr(n, "limit", "loading %s: %v", l, err)
 	}
 	c, err := l.Load()
 	if err != nil {
@@ -141,7 +139,6 @@ func (ev *Evaluator) Load(n Node, v value.Value) (value.Value, error) {
 		ev.loaded = map[value.BlobRef]value.Value{}
 	}
 	ev.loaded[l.Ref] = c
-	ev.loadedSize += l.Ref.Len
 	return c, nil
 }
 

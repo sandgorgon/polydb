@@ -239,7 +239,14 @@ type testServer struct {
 
 func startServer(t *testing.T, cfg Config, network string) *testServer {
 	t.Helper()
-	eng, err := engine.Open(engine.Options{PasswordIterations: security.MinIterations})
+	return startServerOpts(t, cfg, network, engine.Options{})
+}
+
+// startServerOpts is startServer with an engine opened with opts.
+func startServerOpts(t *testing.T, cfg Config, network string, opts engine.Options) *testServer {
+	t.Helper()
+	opts.PasswordIterations = security.MinIterations
+	eng, err := engine.Open(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,5 +690,37 @@ func TestLeasesFromBlobStore(t *testing.T) {
 	ts.srv.leases.close()
 	if _, ok := ts.srv.leases.get(stored.Token); ok {
 		t.Fatal("lease survived close")
+	}
+}
+
+// Connections are limited per user and in total, past which only server
+// admins get in; request options can't raise a statement's limits past
+// the server's.
+func TestConnectionAndRequestLimits(t *testing.T) {
+	ts := startServerOpts(t, Config{}, "tls", engine.Options{Limits: engine.Limits{
+		MaxConnections: 3, MaxUserConnections: 2, MaxMemory: 1 << 20}})
+	a := admin(t, ts)
+	a.mustQuery(`create database d; create user u password "pw"; grant read on database d to u`)
+	u1, err := dial(t, ts.addr, dialOpts{user: "u", password: "pw"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dial(t, ts.addr, dialOpts{user: "u", password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dial(t, ts.addr, dialOpts{user: "u", password: "pw"}); err == nil || !strings.Contains(err.Error(), "limit") {
+		t.Errorf("a third connection for one user: %v", err)
+	}
+	// The server is now full (admin and u twice); admins still get in.
+	if _, err := dial(t, ts.addr, dialOpts{user: "admin", password: "secret"}); err != nil {
+		t.Errorf("an admin past the connection limit: %v", err)
+	}
+	_, ch := u1.open(&wire.Query{Text: `use d`, Options: map[string]value.Value{"max_memory": value.Int(0)}})
+	if _, e, _ := collect(t, ch); e == nil || e.Code != "permission" {
+		t.Errorf("lifting max_memory by a request option: %v", e)
+	}
+	_, ch = u1.open(&wire.Query{Text: `use d`, Options: map[string]value.Value{"max_memory": value.Int(1000)}})
+	if _, e, _ := collect(t, ch); e != nil {
+		t.Errorf("lowering max_memory by a request option: %v", e)
 	}
 }

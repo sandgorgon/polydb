@@ -108,7 +108,26 @@ func (s *Server) handle(nc net.Conn) {
 		c.connError("version_mismatch", "the server speaks protocol 1.0")
 		return
 	}
-	if err := c.handshake(info, log); err != nil {
+	// Connections still logging in are bounded too, so a flood of them
+	// can't use up the server before any user is known.
+	lim := s.cfg.Engine.Limits()
+	s.mu.Lock()
+	if lim.MaxConnections > 0 && s.handshaking >= lim.MaxConnections {
+		s.mu.Unlock()
+		log.Warn("refused a connection: too many logging in")
+		c.connError("limit", "the server has too many connections logging in; try again shortly")
+		return
+	}
+	s.handshaking++
+	s.mu.Unlock()
+	err = c.handshake(info, log)
+	s.mu.Lock()
+	s.handshaking--
+	s.mu.Unlock()
+	if c.sess != nil { // admitted (admitUser), even if the handshake failed after
+		defer s.releaseUser(c)
+	}
+	if err != nil {
 		var ce *wire.ConnError
 		if errors.As(err, &ce) {
 			c.connError(ce.Code, ce.Msg)
@@ -195,6 +214,9 @@ func (c *conn) handshake(info authn.ConnInfo, log interface{ Info(string, ...any
 	user, final, err := s.auth.Serve(c.ctx, &loginTransport{c}, info, first)
 	if err != nil {
 		return &wire.ConnError{Code: "auth_failed", Msg: "login failed"}
+	}
+	if err := s.admitUser(user); err != nil {
+		return err
 	}
 	c.sess = session.New(s.cfg.Engine, user)
 	c.sess.Directory = s.directory

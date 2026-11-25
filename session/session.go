@@ -21,6 +21,7 @@ import (
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/query"
+	"github.com/sandgorgon/polydb/security"
 	"github.com/sandgorgon/polydb/value"
 )
 
@@ -72,7 +73,9 @@ type Txn struct {
 // security.AdminUser. No database is in use until "use".
 func New(eng *engine.Engine, user string) *Session {
 	settings := query.DefaultSettings
-	settings.MaxLoad = max(eng.MaxLoad(), 0)
+	lim := eng.Limits()
+	settings.MaxMemory = engine.Of(lim.MaxMemory)
+	settings.Timeout = max(lim.StatementTimeout, 0)
 	return &Session{eng: eng, user: user, ids: value.NewIDGenerator(0), handles: map[string]query.Handle{},
 		settings: settings, txns: map[value.ID]*Txn{}, prepared: map[int64]lang.Stmt{}}
 }
@@ -320,6 +323,11 @@ func (r *Request) Exec(ctx context.Context, st lang.Stmt, params map[string]valu
 	}
 	r.plan = nil
 	began := time.Now()
+	if t := r.settings().Timeout; t > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, t)
+		defer cancel()
+	}
 	res, err := r.exec(ctx, st, params)
 	if slow := r.s.eng.SlowQueryThreshold(); slow > 0 {
 		if d := time.Since(began); d >= slow && !waits(st) {
@@ -447,6 +455,8 @@ func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 		switch st.What {
 		case "slow":
 			return s.showSlow(st)
+		case "limits":
+			return s.showLimits(), nil
 		case "users", "roles", "grants", "keys", "sessions":
 			return r.env(nil).showSecurity(st)
 		}
@@ -459,6 +469,12 @@ func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 		db, err := r.db(st)
 		if err != nil {
 			return nil, err
+		}
+		s.mu.Lock()
+		open := len(s.txns)
+		s.mu.Unlock()
+		if max := s.eng.Limits().MaxTransactions; max > 0 && open >= max {
+			return nil, sessionErr(st, "limit", "this session has %d transactions open, its limit: commit or roll back one first", open)
 		}
 		t := &Txn{ID: s.ids.New(), db: db, tx: db.Begin(engine.TxOptions{ReadOnly: st.ReadOnly, User: s.user}),
 			handles: map[string]query.Handle{}, busy: true, used: time.Now()}
@@ -571,13 +587,23 @@ func (s *Session) set(st *lang.SetSetting, params map[string]value.Value) (*quer
 		if d < 0 {
 			return nil, sessionErr(st, "constraint", "timeout can't be negative; 0s means no timeout")
 		}
+		next := s.settings
+		next.Timeout = time.Duration(d)
+		if err := s.allowLocked(st, next); err != nil {
+			return nil, err
+		}
 		s.settings.Timeout = time.Duration(d)
-	case "max_load":
+	case "max_memory":
 		n, _ := v.(value.Int)
 		if n < 0 {
-			return nil, sessionErr(st, "constraint", "max_load can't be negative; 0 means no limit")
+			return nil, sessionErr(st, "constraint", "max_memory can't be negative; 0 means no limit")
 		}
-		s.settings.MaxLoad = int64(n)
+		next := s.settings
+		next.MaxMemory = int64(n)
+		if err := s.allowLocked(st, next); err != nil {
+			return nil, err
+		}
+		s.settings.MaxMemory = int64(n)
 	case "max_rows", "max_depth":
 		n, _ := v.(value.Int)
 		if n < 0 || st.Name == "max_depth" && n == 0 {
@@ -716,4 +742,41 @@ func (e *env) run(ctx context.Context, qc *query.Context, st lang.Stmt) (*query.
 		return e.explain(ctx, qc, st)
 	}
 	return query.Exec(qc, st)
+}
+
+// settings returns the settings the request's statements run with.
+func (r *Request) settings() query.Settings {
+	if r.Settings != nil {
+		return *r.Settings
+	}
+	return r.s.Settings()
+}
+
+// Allow checks settings a request asks for (QUERY options) against the
+// server's limits: only a server admin may go past them.
+func (s *Session) Allow(set query.Settings) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.allowLocked(nil, set)
+}
+
+// allowLocked is Allow with s.mu held; st, if set, positions the error.
+func (s *Session) allowLocked(st lang.Node, set query.Settings) error {
+	if s.eng.Security().Allowed(s.user, security.Admin, "", value.ID{}) {
+		return nil
+	}
+	lim := s.eng.Limits()
+	deny := func(format string, args ...any) error {
+		if st == nil {
+			return &lang.Error{Code: "permission", Msg: fmt.Sprintf(format, args...)}
+		}
+		return sessionErr(st, "permission", format, args...)
+	}
+	if m := engine.Of(lim.MaxMemory); m > 0 && (set.MaxMemory == 0 || set.MaxMemory > m) {
+		return deny("max_memory above the server's limit of %d bytes needs admin permission on the server", m)
+	}
+	if t := lim.StatementTimeout; t > 0 && (set.Timeout == 0 || set.Timeout > t) {
+		return deny("a timeout above the server's limit of %s needs admin permission on the server", t)
+	}
+	return nil
 }

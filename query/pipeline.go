@@ -78,6 +78,9 @@ func (x *executor) pipeline(pl *lang.Pipeline) ([]prow, []string, int, bool, err
 	}
 	began := time.Now()
 	rows, names, consumed, err := x.source(pl)
+	if err == nil {
+		err = x.hold(pl, rows)
+	}
 	if err != nil {
 		return nil, nil, 0, false, err
 	}
@@ -159,6 +162,9 @@ func (x *executor) pipeline(pl *lang.Pipeline) ([]prow, []string, int, bool, err
 			if pop, ok := st.Stmt.(*lang.Pop); ok && pop.As != "" {
 				names = appendNew(names, pop.As)
 			}
+		}
+		if err == nil {
+			err = x.hold(st, rows)
 		}
 		if err != nil {
 			return nil, nil, 0, false, err
@@ -634,10 +640,17 @@ func (x *executor) dataStep(st *lang.DataStep, rows []prow) ([]prow, int, bool, 
 
 func (x *executor) follow(st *lang.Follow, rows []prow) ([]prow, error) {
 	var out []prow
+	var over error
 	for _, r := range rows {
 		err := x.matchPattern(st, r, func(nr prow) {
+			if over == nil {
+				over = x.bindRow(st, len(nr.vars))
+			}
 			out = append(out, nr)
 		})
+		if err == nil {
+			err = over
+		}
 		if err != nil {
 			return nil, err
 		}

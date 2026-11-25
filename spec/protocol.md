@@ -264,7 +264,7 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 1 | text | text | one or more Rhizome statements |
 | 2 | params | `map<text, any>` | values for `$name` parameters |
 | 3 | txn | id? | run inside this transaction (see below) |
-| 4 | options | `map<text, any>` | per-request settings: `timeout`, `max_rows`, `max_load`, `explain` |
+| 4 | options | `map<text, any>` | per-request settings: `timeout`, `max_rows`, `max_memory`, `explain`; a request can't raise a limit past the server's without admin permission (rhizome.md §4, Limits) |
 | 5 | blob_params | `map<text, bytes>` | parameters whose values are blob references: name → lease token (from BLOB_STORED or a result); §7 |
 
 **PREPARE**: `text` (one statement). The reply is PREPARED: `statement_id` (int), `param_types` (`map<text, text>`, type expressions) and `columns` (as in RESULT_HEADER, if known in advance).
@@ -362,7 +362,7 @@ Values larger than `inline_value_limit` (bytes, text, image data) are sent as **
 - **BLOB_STORED** answers the last piece: 1 `ref`, a blob reference (§6.5) with a lease token, valid for the lease time. BLOB_READ reads it like any other.
 - The server checks an upload as a value of its type while storing it: text is normalized to NFC and must be valid UTF-8, and an image must start with a supported format's header. BLOB_STORED's `hash` and `length` are those of the stored (normalized) content.
 - A request passes the reference in `blob_params`. The statement gets the stored content without the server reading it back, and fails with `type` if the upload wasn't a valid value of its type. A blob reference from a result can be passed the same way, so a large value can be copied without sending it back.
-- An upload needs a database in use (`not_found` otherwise) and write permission somewhere in it: a write or admin grant on the server, the database or one of its kinds (`permission` otherwise). Storing the upload in a field is checked against that field's kind like any write; text is limited to 64 MiB, bytes and images to 4 GiB (`limit`). A client that stops sending sends CANCEL; what the server stored of it becomes garbage for the collector. Content that no statement uses within the lease time is removed by the blob store's collector.
+- An upload needs a database in use (`not_found` otherwise) and write permission somewhere in it: a write or admin grant on the server, the database or one of its kinds (`permission` otherwise). Storing the upload in a field is checked against that field's kind like any write; text is limited to 64 MiB, bytes and images to 4 GiB, and every upload to the server's upload size and the user's upload quota (`limit`; rhizome.md §4, Limits). A client that stops sending sends CANCEL; what the server stored of it becomes garbage for the collector. Content that no statement uses within the lease time is removed by the blob store's collector.
 - The Go client's `(*client.Conn).Upload(ctx, r, type, mediaType)` returns a `*polydb.Blob` to pass as a parameter; blobs from results are passed by token too.
 
 ---

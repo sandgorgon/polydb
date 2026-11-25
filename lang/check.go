@@ -306,10 +306,10 @@ func (c *checker) stmt(s Stmt, sc *scope) error {
 
 // settings are the session settings "set" accepts, with their types.
 var settings = map[string]*value.Type{
-	"timeout":   value.TypeDuration,
-	"max_rows":  value.TypeInt,
-	"max_depth": value.TypeInt,
-	"max_load":  value.TypeInt,
+	"timeout":    value.TypeDuration,
+	"max_rows":   value.TypeInt,
+	"max_depth":  value.TypeInt,
+	"max_memory": value.TypeInt,
 }
 
 // constText checks an expression that must be text from constants and

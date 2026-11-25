@@ -133,7 +133,8 @@ show databases;
 
 set timeout = 30s;               // session settings
 set max_rows = 10000;
-set max_load = 1073741824;       // bytes of large values a statement may load
+set max_memory = 1073741824;     // bytes a statement may hold: its rows and loaded large values
+show limits;                     // this session's settings and the server's limits
 
 backup database sales to "nightly/mon";      // while it runs; needs admin on sales
 restore database sales_copy from "nightly/mon";  // creates sales_copy; needs admin
@@ -149,6 +150,20 @@ import security from "security.jsonl" replace;
 ```
 
 Queries can't span databases in v1.
+
+**Limits.** A server bounds what one statement, connection or user may use, so that a heavy query or client can't starve the others (`polydb serve` flags, `engine.Options.Limits`):
+
+| Limit | Default | Enforced |
+|---|---|---|
+| statement time (`--statement-timeout`) | none | the session's `timeout` starts at it; a session may lower it, only a server admin raise it or set `0s` |
+| statement memory (`--max-memory`) | 1 GiB | the session's `max_memory` starts at it, with the same rule. It counts the rows a statement's steps hold (for `sort`, `group by`, `distinct`, its result, and as a source binds them, so a runaway cross product stops early) and the large values it loads (types.md §13.1) |
+| connections (`--max-connections`) | 1,000 | logged-in connections; server admins may go past it so they can always get in. Connections still logging in are bounded the same way |
+| connections per user (`--max-user-connections`) | 100 | each user |
+| open transactions (`--max-transactions`) | 16 | per session |
+| upload size (`--max-upload`) | 4 GiB | each upload (protocol.md §7) |
+| upload quota (`--upload-quota`) | 16 GiB | the bytes of a user's uploads not yet expired, used or not |
+
+Going over a limit fails the statement, upload or login with `limit` (or `permission`, for a session trying to raise one); a request option (protocol.md §6) follows the same rules as `set`. `show limits` lists this session's settings and the server's limits. A negative value given to the server means no limit.
 
 **Backups.** `backup database` writes the database as of one commit to a directory, while it keeps taking reads and writes: the key-value store's latest data written as compacted files, the blob segments copied, and a `BACKUP` file listing every file with its SHA-256, written last. History versions are data, so they are in the backup; users, roles and grants are server-wide and aren't. It returns the path, keys, files and bytes. `restore database` creates a new database from a backup, checking every file as it copies it; it never replaces an existing database (drop it first, or restore under another name and switch). Paths are directories relative to the server's backup directory (`polydb serve --backup-dir`, default `<data-dir>/backups`); a backup's directory must not exist yet. On a stopped server, `polydb restore [--database name] dir` does the same from any directory. Embedded programs call `DB.Backup` and `Engine.RestoreDatabase` with any path.
 
@@ -1073,7 +1088,7 @@ None.
    - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.
    - `create database`, `drop database`, `backup database`, `restore database`, `export`, `import` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
-   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns. `max_load` caps the bytes of large values a statement may load into memory (types.md §13.1; default 256 MiB, set by the server's `--max-load`; 0 means no limit).
+   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns. `max_memory` caps the bytes a statement may hold (see Limits below).
    - `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` on one runs it and reports the rows it changed and the time.
    - `explain` on a query (Phase 5) shows the plan as a table with the columns `step`, `detail` and `estimate`:
      - a `find` row per variable, in the order they're bound. It says how the variable is found (`scan kind Person`, `lookup for p = @ann`, `index person_age for p.age > 30`, `text index …`, or `…, for each p` when it uses an earlier variable) and the estimated entities (`n per row` for those).

@@ -100,7 +100,7 @@ func toError(err error, index int) *wire.Error {
 	return we
 }
 
-// settings applies a request's options (timeout, max_rows, max_load) to the
+// settings applies a request's options (timeout, max_rows, max_memory) to the
 // session's settings.
 func (c *conn) settings(opts map[string]value.Value) (*query.Settings, error) {
 	if len(opts) == 0 {
@@ -121,13 +121,16 @@ func (c *conn) settings(opts map[string]value.Value) (*query.Settings, error) {
 				return nil, &wire.Error{Code: "type", Message: "the max_rows option is an int ≥ 0", StatementIndex: -1}
 			}
 			s.MaxRows = int(n)
-		case "max_load":
+		case "max_memory":
 			n, ok := v.(value.Int)
 			if !ok || n < 0 {
-				return nil, &wire.Error{Code: "type", Message: "the max_load option is an int ≥ 0 (bytes; 0 for no limit)", StatementIndex: -1}
+				return nil, &wire.Error{Code: "type", Message: "the max_memory option is an int ≥ 0 (bytes; 0 for no limit)", StatementIndex: -1}
 			}
-			s.MaxLoad = int64(n)
+			s.MaxMemory = int64(n)
 		}
+	}
+	if err := c.sess.Allow(s); err != nil {
+		return nil, toError(err, -1)
 	}
 	return &s, nil
 }
@@ -378,10 +381,10 @@ func (c *conn) serveUpload(st *stream, first *wire.BlobWrite, content io.Reader)
 	fail := func(code, msg string) {
 		c.send(st, &wire.Error{Code: code, Message: msg, StatementIndex: -1}, true)
 	}
-	limit := int64(value.MaxBytesLen)
+	limit := min(int64(value.MaxBytesLen), engine.Of(c.srv.cfg.Engine.Limits().MaxUpload))
 	switch first.ValueType {
 	case "text":
-		limit = value.MaxTextBytes
+		limit = min(limit, value.MaxTextBytes)
 	case "bytes", "image":
 	default:
 		fail("type", "an upload is a text, bytes or image value")
@@ -397,16 +400,31 @@ func (c *conn) serveUpload(st *stream, first *wire.BlobWrite, content io.Reader)
 		return
 	}
 	of := map[string]value.Code{"text": value.CodeText, "bytes": value.CodeBytes, "image": value.CodeImage}[first.ValueType]
+	user := c.sess.User()
+	quota := engine.Of(c.srv.cfg.Engine.Limits().UploadQuota)
+	byQuota := false
+	if quota > 0 {
+		left := quota - c.srv.leases.pending(user)
+		if left <= 0 {
+			fail("limit", fmt.Sprintf("%s's uploads waiting to be used reach the quota of %d bytes; use them, or wait for them to expire", user, quota))
+			return
+		}
+		byQuota = left < limit
+		limit = min(limit, left)
+	}
 	u, err := db.StoreUpload(content, of, limit, c.srv.cfg.LeaseTime)
 	if err != nil {
 		if st.ctx.Err() != nil {
 			return // cancelled, or the connection is gone
 		}
-		code := "internal"
+		code, msg := "internal", err.Error()
 		if engine.CodeOf(err) == engine.CodeConstraint {
 			code = "limit"
+			if byQuota {
+				msg = fmt.Sprintf("the upload would take %s's uploads waiting to be used past the quota of %d bytes", user, quota)
+			}
 		}
-		fail(code, err.Error())
+		fail(code, msg)
 		return
 	}
 	media := first.MediaType
@@ -416,7 +434,7 @@ func (c *conn) serveUpload(st *stream, first *wire.BlobWrite, content io.Reader)
 	case "image":
 		media = ""
 	}
-	le := &lease{typ: first.ValueType, media: media, size: u.Len, hash: u.Hash, db: db, upload: u}
+	le := &lease{typ: first.ValueType, media: media, size: u.Len, hash: u.Hash, db: db, upload: u, user: user}
 	ref := &wire.BlobRef{Type: first.ValueType, Hash: u.Hash[:], Length: u.Len, MediaType: media, Token: c.srv.leases.add(le)}
 	c.send(st, &wire.BlobStored{Ref: ref}, true)
 }
@@ -514,9 +532,10 @@ func (c *conn) blobRead(st *stream, m *wire.BlobRead) error {
 // the database's blob store holds their content, read from there; and
 // uploads.
 type leases struct {
-	mu  sync.Mutex
-	ttl time.Duration
-	m   map[string]*lease
+	mu      sync.Mutex
+	ttl     time.Duration
+	m       map[string]*lease
+	uploads map[string]int64 // user → bytes of live upload leases
 }
 
 type lease struct {
@@ -529,6 +548,7 @@ type lease struct {
 	reader *engine.BlobReader // in a blob store, or
 	db     *engine.DB         // an upload to db
 	upload *engine.Upload
+	user   string // an upload's user, whose quota it counts against
 }
 
 // read returns n bytes from offset off.
@@ -581,8 +601,34 @@ func (l *leases) add(le *lease) []byte {
 	le.expires = time.Now().Add(l.ttl)
 	l.mu.Lock()
 	l.m[string(tok)] = le
+	if le.upload != nil {
+		if l.uploads == nil {
+			l.uploads = map[string]int64{}
+		}
+		l.uploads[le.user] += le.size
+	}
 	l.mu.Unlock()
 	return tok
+}
+
+// pending returns the bytes of user's uploads that haven't expired.
+func (l *leases) pending(user string) int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.uploads[user]
+}
+
+// drop forgets a lease. l.mu must be held.
+func (l *leases) drop(k string, le *lease) {
+	delete(l.m, k)
+	if le.reader != nil {
+		le.reader.Close()
+	}
+	if le.upload != nil {
+		if l.uploads[le.user] -= le.size; l.uploads[le.user] <= 0 {
+			delete(l.uploads, le.user)
+		}
+	}
 }
 
 func (l *leases) get(tok []byte) (*lease, bool) {
@@ -600,10 +646,7 @@ func (l *leases) expire() {
 	defer l.mu.Unlock()
 	for k, le := range l.m {
 		if time.Now().After(le.expires) {
-			delete(l.m, k)
-			if le.reader != nil {
-				le.reader.Close()
-			}
+			l.drop(k, le)
 		}
 	}
 }
@@ -613,9 +656,6 @@ func (l *leases) close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	for k, le := range l.m {
-		delete(l.m, k)
-		if le.reader != nil {
-			le.reader.Close()
-		}
+		l.drop(k, le)
 	}
 }

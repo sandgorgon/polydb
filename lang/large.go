@@ -289,7 +289,7 @@ func streamContains(n Node, l value.Lazy, pat string) (bool, error) {
 
 // substrLarge cuts n characters (all when n < 0) from a lazy text from
 // character start, reading only up to the end of the cut. The result is
-// counted against MaxLoad.
+// counted against the budget.
 func (ev *Evaluator) substrLarge(e Node, l value.Lazy, start, n int64) (value.Value, error) {
 	var out []byte
 	buf := make([]byte, pieceSize)
@@ -322,11 +322,10 @@ func (ev *Evaluator) substrLarge(e Node, l value.Lazy, start, n int64) (value.Va
 	return built(value.NewText(string(out)))
 }
 
-// charge counts n bytes against MaxLoad.
+// charge counts n bytes against the budget.
 func (ev *Evaluator) charge(e Node, n int64) error {
-	if ev.MaxLoad > 0 && ev.loadedSize+n > ev.MaxLoad {
-		return runErr(e, "limit", "the statement would go over its limit of %d bytes for large values", ev.MaxLoad)
+	if err := ev.Budget.Load(n); err != nil {
+		return runErr(e, "limit", "%v", err)
 	}
-	ev.loadedSize += n
 	return nil
 }

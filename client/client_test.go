@@ -592,3 +592,32 @@ func TestLargeValuesShared(t *testing.T) {
 		})
 	}
 }
+
+// Uploads are limited in size, and each user's uploads waiting to be used
+// in total.
+func TestUploadLimits(t *testing.T) {
+	ctx := context.Background()
+	ts := startServerWith(t, engine.Options{Limits: engine.Limits{MaxUpload: 100 << 10, UploadQuota: 250 << 10}})
+	db := ts.dial(t, "")
+	if _, err := db.Exec(ctx, `create database d; use d`, nil); err != nil {
+		t.Fatal(err)
+	}
+	c := db.(*client.Conn)
+	piece := bytes.Repeat([]byte("x"), 90<<10)
+	if _, err := c.Upload(ctx, bytes.NewReader(make([]byte, 120<<10)), "bytes", ""); polydb.CodeOf(err) != "limit" {
+		t.Errorf("an upload past the maximum: %v", err)
+	}
+	for i := range 2 {
+		if _, err := c.Upload(ctx, bytes.NewReader(piece), "bytes", ""); err != nil {
+			t.Fatalf("upload %d: %v", i, err)
+		}
+	}
+	// 180 KiB held: the next 90 KiB goes past the 250 KiB quota.
+	if _, err := c.Upload(ctx, bytes.NewReader(piece), "bytes", ""); polydb.CodeOf(err) != "limit" {
+		t.Errorf("an upload past the quota: %v", err)
+	}
+	// The connection still works.
+	if _, err := db.Exec(ctx, `show databases`, nil); err != nil {
+		t.Fatal(err)
+	}
+}

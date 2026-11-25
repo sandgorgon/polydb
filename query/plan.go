@@ -1200,6 +1200,9 @@ func (x *executor) bindLevel(pl *lang.Pipeline, lv *level, r srow, id value.ID) 
 		vars[k] = v
 	}
 	vars[lv.kv.Var] = value.Ref{Target: id}
+	if err := x.bindRow(pl, len(vars)); err != nil {
+		return srow{}, false, err
+	}
 	ids := slices.Clone(r.ids)
 	ids[lv.pos] = id
 	nr := srow{vars: vars, ids: ids, dirty: r.dirty}
