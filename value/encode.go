@@ -40,8 +40,9 @@ const (
 	tagRing     = 0x5A
 	tagPriority = 0x5B
 	tagRecord   = 0x60
-	// 0x22 (blob reference) and 0x70 (collection reference) are used by the
-	// storage layer for out-of-line values (Phase 6); 0x61 is reserved.
+	tagBlobRef  = 0x22 // BlobRef, in stored records only
+	// 0x70 (collection reference) is for the storage layer's out-of-line
+	// collections; 0x61 is reserved.
 )
 
 // canonicalNaN is the bit pattern every NaN is stored as.
@@ -77,6 +78,8 @@ func Encode(v Value) []byte { return AppendValue(nil, v) }
 //	priority            direction byte (0 high, 1 low), uvarint max, uvarint count,
 //	                    then (zigzag priority, element) in pop order
 //	record              uvarint count, then (str name, value) in declared order
+//	blob reference      code byte (text, bytes or image), 32 bytes SHA-256,
+//	                    uvarint length, str media type
 //
 // A value held in an any or union field is encoded as itself: every
 // encoding already carries its type.
@@ -114,6 +117,12 @@ func AppendValue(dst []byte, v Value) []byte {
 		return append(append(dst, tagID), x[:]...)
 	case Ref:
 		return append(append(dst, tagRef), x.Target[:]...)
+	case Lazy:
+		return AppendValue(dst, x.Ref)
+	case BlobRef:
+		dst = append(append(dst, tagBlobRef, byte(x.Of)), x.Hash[:]...)
+		dst = binary.AppendUvarint(dst, uint64(x.Len))
+		return appendStr(dst, x.Media)
 	case Image:
 		dst = appendStr(append(dst, tagImage), x.format)
 		dst = binary.AppendUvarint(dst, uint64(x.width))
@@ -195,11 +204,22 @@ func appendSeq(dst []byte, elems []Value) []byte {
 }
 
 // Decode decodes a value that fills all of b.
-func Decode(b []byte) (Value, error) {
-	v, n, err := DecodeValue(b)
+//
+// It rejects blob references, which only stored records hold: see
+// DecodeStored.
+func Decode(b []byte) (Value, error) { return decodeAll(b, false) }
+
+// DecodeStored is Decode for the engine's own records, which may hold
+// blob references.
+func DecodeStored(b []byte) (Value, error) { return decodeAll(b, true) }
+
+func decodeAll(b []byte, stored bool) (Value, error) {
+	d := decoder{b: b, stored: stored}
+	v, err := d.value(1)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode at byte %d: %w", d.pos, err)
 	}
+	n := d.pos
 	if n != len(b) {
 		return nil, fmt.Errorf("decode: %d extra bytes after value", len(b)-n)
 	}
@@ -213,6 +233,29 @@ func Decode(b []byte) (Value, error) {
 // Docs are checked for valid NFC text but not re-validated against their
 // format, which may be a derived format defined in a database's catalog;
 // writes validate docs before they are stored.
+// DecodeListHead decodes only the first n elements of an encoded list
+// (fewer if it is shorter), for reading a record's leading fields without
+// decoding the rest.
+func DecodeListHead(b []byte, n int) ([]Value, error) {
+	d := decoder{b: b}
+	tag, err := d.byte()
+	if err != nil {
+		return nil, err
+	}
+	if tag != tagList {
+		return nil, fmt.Errorf("decode: not a list (tag %#x)", tag)
+	}
+	count, err := d.count()
+	if err != nil {
+		return nil, err
+	}
+	vs, err := d.values(min(n, count), 2)
+	if err != nil {
+		return nil, fmt.Errorf("decode at byte %d: %w", d.pos, err)
+	}
+	return vs, nil
+}
+
 func DecodeValue(b []byte) (Value, int, error) {
 	d := decoder{b: b}
 	v, err := d.value(1)
@@ -223,8 +266,9 @@ func DecodeValue(b []byte) (Value, int, error) {
 }
 
 type decoder struct {
-	b   []byte
-	pos int
+	b      []byte
+	pos    int
+	stored bool // blob references allowed
 }
 
 var errShort = errors.New("unexpected end of data")
@@ -470,6 +514,11 @@ func (d *decoder) value(depth int) (Value, error) {
 		return id, nil
 	case tagImage:
 		return d.image()
+	case tagBlobRef:
+		if !d.stored {
+			return nil, errors.New("blob reference outside a stored record")
+		}
+		return d.blobRef()
 	case tagDoc:
 		format, err := d.text(MaxNameLen * utf8.UTFMax)
 		if err != nil {
@@ -647,4 +696,32 @@ func (d *decoder) queue(tag byte, depth int) (Value, error) {
 		}
 	}
 	return q, nil
+}
+
+func (d *decoder) blobRef() (Value, error) {
+	of, err := d.byte()
+	if err != nil {
+		return nil, err
+	}
+	if c := Code(of); c != CodeText && c != CodeBytes && c != CodeImage {
+		return nil, fmt.Errorf("blob reference to a %s", c)
+	}
+	h, err := d.take(32)
+	if err != nil {
+		return nil, err
+	}
+	n, err := d.uvarint()
+	if err != nil {
+		return nil, err
+	}
+	if n > MaxBytesLen {
+		return nil, fmt.Errorf("blob reference of %d bytes", n)
+	}
+	mt, err := d.str(MaxTextBytes)
+	if err != nil {
+		return nil, err
+	}
+	r := BlobRef{Of: Code(of), Len: int64(n), Media: string(mt)}
+	copy(r.Hash[:], h)
+	return r, nil
 }

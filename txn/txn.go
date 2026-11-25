@@ -19,6 +19,8 @@ package txn
 import (
 	"bytes"
 	"errors"
+	"maps"
+	"math"
 	"slices"
 	"sync"
 
@@ -43,9 +45,6 @@ func (s span) overlaps(o span) bool {
 	return (s.hi == nil || bytes.Compare(o.lo, s.hi) < 0) && (o.hi == nil || bytes.Compare(s.lo, o.hi) < 0)
 }
 
-// pointSpan is the range holding exactly key k.
-func pointSpan(k []byte) span { return span{k, append(slices.Clip(k), 0)} }
-
 // commitRecord is what a committed transaction wrote.
 type commitRecord struct {
 	seq    uint64
@@ -60,12 +59,13 @@ type Manager struct {
 	mu     sync.Mutex
 	log    []commitRecord  // commits that active transactions may conflict with
 	active map[*Txn]uint64 // read-write transactions and their start seq
+	open   map[*Txn]uint64 // every open transaction and its snapshot's seq
 	hook   func(seq uint64, keys [][]byte)
 }
 
 // NewManager returns a transaction manager for s.
 func NewManager(s storage.Store) *Manager {
-	return &Manager{store: s, active: map[*Txn]uint64{}}
+	return &Manager{store: s, active: map[*Txn]uint64{}, open: map[*Txn]uint64{}}
 }
 
 // Store returns the underlying store.
@@ -88,13 +88,28 @@ func (m *Manager) Begin(readOnly bool) *Txn {
 	if !readOnly {
 		m.active[t] = t.snap.Seq()
 	}
+	m.open[t] = t.snap.Seq()
 	return t
+}
+
+// Oldest returns the sequence number of the oldest snapshot an open
+// transaction reads, or math.MaxUint64 if none is open. Data that only
+// snapshots older than this could read can be removed.
+func (m *Manager) Oldest() uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	oldest := uint64(math.MaxUint64)
+	for _, s := range m.open {
+		oldest = min(oldest, s)
+	}
+	return oldest
 }
 
 // finish removes t from the active set and drops log records no active
 // transaction can conflict with. m.mu must be held.
 func (m *Manager) finish(t *Txn) {
 	delete(m.active, t)
+	delete(m.open, t)
 	oldest := m.store.Seq()
 	for _, s := range m.active {
 		oldest = min(oldest, s)
@@ -120,10 +135,13 @@ type Txn struct {
 	done     bool
 	err      error // first error from a write call, returned by Commit
 
-	writes map[string]*entry
-	ranges []span // range deletions
-	sorted []string
-	guards []span
+	writes     map[string]*entry
+	ranges     []span   // range deletions
+	sorted     []string // buffered keys, sorted (put)
+	pend       []string // buffered keys added since the last merge
+	pendSorted bool
+	guards     []span              // guarded ranges
+	points     map[string]struct{} // guarded single keys
 }
 
 // Seq returns the sequence number of the snapshot the transaction reads.
@@ -179,9 +197,79 @@ func (t *Txn) fail(err error) {
 func (t *Txn) put(key []byte, e *entry) {
 	k := string(key)
 	if _, ok := t.writes[k]; !ok {
-		t.sorted = nil
+		t.pend = append(t.pend, k)
+		t.pendSorted = false
+		if len(t.pend) > maxPending {
+			t.mergePending()
+		}
 	}
 	t.writes[k] = e
+}
+
+// The buffered keys are kept sorted, in sorted, with the keys added
+// since the last merge in pend: a scan then costs a search and the keys
+// in its range, not a sort of every key the transaction wrote.
+const maxPending = 512
+
+func (t *Txn) sortPending() {
+	if !t.pendSorted {
+		slices.Sort(t.pend)
+		t.pendSorted = true
+	}
+}
+
+// mergePending merges pend into sorted.
+func (t *Txn) mergePending() {
+	if len(t.pend) == 0 {
+		return
+	}
+	t.sortPending()
+	out := make([]string, 0, len(t.sorted)+len(t.pend))
+	i, j := 0, 0
+	for i < len(t.sorted) || j < len(t.pend) {
+		if j == len(t.pend) || (i < len(t.sorted) && t.sorted[i] < t.pend[j]) {
+			out = append(out, t.sorted[i])
+			i++
+		} else {
+			out = append(out, t.pend[j])
+			j++
+		}
+	}
+	t.sorted, t.pend = out, t.pend[:0]
+}
+
+// keysIn returns the buffered keys in [lo, hi) (nil: unbounded), sorted.
+func (t *Txn) keysIn(lo, hi []byte) []string {
+	t.sortPending()
+	span := func(ks []string) []string {
+		a, b := 0, len(ks)
+		if lo != nil {
+			a, _ = slices.BinarySearch(ks, string(lo))
+		}
+		if hi != nil {
+			b, _ = slices.BinarySearch(ks, string(hi))
+		}
+		if a >= b {
+			return nil
+		}
+		return ks[a:b]
+	}
+	s, p := span(t.sorted), span(t.pend)
+	if len(p) == 0 {
+		return s
+	}
+	out := make([]string, 0, len(s)+len(p))
+	i, j := 0, 0
+	for i < len(s) || j < len(p) {
+		if j == len(p) || (i < len(s) && s[i] < p[j]) {
+			out = append(out, s[i])
+			i++
+		} else {
+			out = append(out, p[j])
+			j++
+		}
+	}
+	return out
 }
 
 // Set buffers a write of value to key. Errors (a read-only or finished
@@ -233,7 +321,10 @@ func (t *Txn) Guard(lo, hi []byte) {
 // GuardKey guards a single key.
 func (t *Txn) GuardKey(key []byte) {
 	if !t.readOnly {
-		t.guards = append(t.guards, pointSpan(bytes.Clone(key)))
+		if t.points == nil {
+			t.points = map[string]struct{}{}
+		}
+		t.points[string(key)] = struct{}{}
 	}
 }
 
@@ -322,28 +413,39 @@ func (t *Txn) Commit() (uint64, error) {
 	return seq, nil
 }
 
-// conflicts reports whether rec wrote anything t wrote or guarded.
+// conflicts reports whether rec wrote anything t wrote or guarded. Its
+// cost is linear in what rec wrote, plus a binary search per range, so
+// big transactions committing side by side stay cheap.
 func (t *Txn) conflicts(rec commitRecord) bool {
-	mine := append(slices.Clip(t.guards), t.ranges...)
 	for _, k := range rec.keys {
 		if _, ok := t.writes[string(k)]; ok {
 			return true
 		}
-		for _, s := range mine {
-			if s.has(k) {
-				return true
-			}
+		if _, ok := t.points[string(k)]; ok {
+			return true
 		}
 	}
-	for _, r := range rec.ranges {
-		for _, s := range mine {
+	// rec.keys are sorted: find the first at or after each range's start.
+	for _, s := range slices.Concat(t.guards, t.ranges) {
+		i, _ := slices.BinarySearchFunc(rec.keys, s.lo, bytes.Compare)
+		if i < len(rec.keys) && s.has(rec.keys[i]) {
+			return true
+		}
+		for _, r := range rec.ranges {
 			if s.overlaps(r) {
 				return true
 			}
 		}
-		for k := range t.writes {
-			if r.has([]byte(k)) {
-				return true
+	}
+	if len(rec.ranges) > 0 {
+		writes := t.sortedKeys()
+		points := slices.Sorted(maps.Keys(t.points))
+		for _, r := range rec.ranges {
+			for _, ks := range [][]string{writes, points} {
+				i, _ := slices.BinarySearchFunc(ks, r.lo, func(k string, lo []byte) int { return bytes.Compare([]byte(k), lo) })
+				if i < len(ks) && r.has([]byte(ks[i])) {
+					return true
+				}
 			}
 		}
 	}
@@ -351,12 +453,6 @@ func (t *Txn) conflicts(rec commitRecord) bool {
 }
 
 func (t *Txn) sortedKeys() []string {
-	if t.sorted == nil {
-		t.sorted = make([]string, 0, len(t.writes))
-		for k := range t.writes {
-			t.sorted = append(t.sorted, k)
-		}
-		slices.Sort(t.sorted)
-	}
+	t.mergePending()
 	return t.sorted
 }

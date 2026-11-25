@@ -643,3 +643,45 @@ func TestPermissionsOverProtocol(t *testing.T) {
 		t.Errorf("show sessions: %v", e)
 	}
 }
+
+// A client that has seen a stream end may open another at once, even
+// with one stream allowed: the server frees the place before the
+// stream's last message.
+func TestStreamPlaceFreedBeforeEnd(t *testing.T) {
+	ts := startServer(t, Config{MaxStreams: 1}, "tls")
+	c := admin(t, ts)
+	c.mustQuery(`create database d; use d; define kind W { n: int }; create W { n: 1 }`)
+	for i := range 300 {
+		if _, e := c.query(`find W w | show w.n`, nil, nil); e != nil {
+			t.Fatalf("request %d: %v", i, e)
+		}
+	}
+}
+
+// TestLeasesFromBlobStore checks that a lease on a value the blob store
+// holds reads it from there instead of keeping it, and that a computed
+// value is kept in memory.
+func TestLeasesFromBlobStore(t *testing.T) {
+	ts := startServer(t, Config{}, "tls")
+	c := admin(t, ts)
+	long := strings.Repeat("0123456789", 3000) // over the 16 KiB blob threshold
+	c.mustQuery(`create database d; use d; define kind Doc { body: text }; create Doc { body: "` + long + `" }`)
+	res := c.mustQuery(`find Doc x | show x.body, x.body ++ "!"`)
+	stored, computed := res[0].rows[0][0].(*wire.BlobRef), res[0].rows[0][1].(*wire.BlobRef)
+	le, ok := ts.srv.leases.get(stored.Token)
+	if !ok || le.reader == nil || le.data != nil {
+		t.Fatalf("stored value's lease: reader %v, %d bytes in memory", le.reader != nil, len(le.data))
+	}
+	if le, _ := ts.srv.leases.get(computed.Token); le.reader != nil || len(le.data) != len(long)+1 {
+		t.Fatal("computed value's lease isn't in memory")
+	}
+	_, ch := c.open(&wire.BlobRead{Ref: stored, Offset: 29_990})
+	_, e, other := collect(t, ch)
+	if e != nil || len(other) != 1 || string(other[0].(*wire.BlobData).Data) != long[29_990:] {
+		t.Fatalf("read: %v %v", other, e)
+	}
+	ts.srv.leases.close()
+	if _, ok := ts.srv.leases.get(stored.Token); ok {
+		t.Fatal("lease survived close")
+	}
+}

@@ -8,6 +8,7 @@ import (
 	_ "image/gif" // register decoders for image.DecodeConfig
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
@@ -28,17 +29,36 @@ type Image struct {
 // NewImage checks that data is a png, jpeg, gif, webp, bmp or tiff file and
 // returns it as an Image holding a copy of data. Only the header is decoded.
 func NewImage(data []byte) (Image, error) {
+	return newImage(bytes.Clone(data))
+}
+
+// newImage is NewImage without the copy.
+func newImage(data []byte) (Image, error) {
 	if len(data) > MaxBytesLen {
 		return Image{}, fmt.Errorf("image longer than %d bytes", MaxBytesLen)
 	}
-	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	c, err := imageConfig(bytes.NewReader(data))
 	if err != nil {
-		return Image{}, fmt.Errorf("not a supported image (png, jpeg, gif, webp, bmp or tiff): %v", err)
+		return Image{}, err
+	}
+	return Image{c.format, c.width, c.height, data}, nil
+}
+
+type imageInfo struct {
+	format        string
+	width, height int
+}
+
+// imageConfig reads an image's header.
+func imageConfig(r io.Reader) (imageInfo, error) {
+	cfg, format, err := image.DecodeConfig(r)
+	if err != nil {
+		return imageInfo{}, fmt.Errorf("not a supported image (png, jpeg, gif, webp, bmp or tiff): %v", err)
 	}
 	if !imageFormats[format] {
-		return Image{}, fmt.Errorf("unsupported image format %q", format)
+		return imageInfo{}, fmt.Errorf("unsupported image format %q", format)
 	}
-	return Image{format, cfg.Width, cfg.Height, bytes.Clone(data)}, nil
+	return imageInfo{format, cfg.Width, cfg.Height}, nil
 }
 
 func (Image) Code() Code { return CodeImage }

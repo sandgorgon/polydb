@@ -6,14 +6,36 @@ import (
 
 	"github.com/sandgorgon/polydb/engine"
 	"github.com/sandgorgon/polydb/lang"
+	"github.com/sandgorgon/polydb/storage/lsm"
 	"github.com/sandgorgon/polydb/value"
 )
 
 // BenchmarkQueries times common query shapes on 20,000 people and 2,000
 // orders, with the planner and, for single kinds, without it (joins
-// without it take minutes).
+// without it take minutes), in memory and on disk (a 4 MiB memtable, so
+// the data is in tables, read through the block cache).
 func BenchmarkQueries(b *testing.B) {
+	for _, disk := range []bool{false, true} {
+		name := "memory"
+		if disk {
+			name = "disk"
+		}
+		b.Run(name, func(b *testing.B) { benchQueries(b, disk) })
+	}
+}
+
+func benchQueries(b *testing.B, disk bool) {
 	s := newSession(b)
+	if disk {
+		eng, err := engine.Open(engine.Options{Dir: b.TempDir(), Storage: lsm.Options{MemtableSize: 4 << 20}})
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Cleanup(func() { eng.Close() })
+		if s.db, err = eng.CreateDatabase("test"); err != nil {
+			b.Fatal(err)
+		}
+	}
 	s.run(`
 define kind P { email: text unique, age: int, city: text, bio: text };
 define index p_age on P(age);

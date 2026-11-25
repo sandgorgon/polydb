@@ -210,12 +210,157 @@ func (p *parser) optDoc(bare bool) (*string, error) {
 // mean" suggestions.
 var statementWords = []string{"create", "drop", "use", "set", "define", "alter", "update", "delete", "relate",
 	"unrelate", "push", "pop", "find", "begin", "commit", "rollback", "grant", "revoke", "describe", "show",
-	"explain", "history"}
+	"explain", "history", "analyze", "backup", "restore", "export", "import", "rebuild"}
 
 // ===== statements =====
 
+// export parses "export database d | security [without passwords] |
+// (query) [as format] [to path]".
+func (p *parser) export() (Stmt, error) {
+	s := &Export{At: p.at()}
+	p.advance()
+	switch {
+	case p.accept("database"):
+		s.What = "database"
+		n, err := p.name("a database name")
+		if err != nil {
+			return nil, err
+		}
+		s.Name = n
+	case p.acceptWord("security"):
+		s.What = "security"
+		if p.acceptWord("without") {
+			if err := p.expectWord("passwords"); err != nil {
+				return nil, err
+			}
+			s.NoPasswords = true
+		}
+	case p.accept("("):
+		s.What = "query"
+		q, err := p.statement()
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := q.(*Pipeline); !ok {
+			return nil, syntaxErr(s.P, "export ( … ) takes a query")
+		}
+		s.Query = q
+		if err := p.expect(")"); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, p.errExpected("database, security or a query in parentheses")
+	}
+	if p.accept("as") {
+		f, err := p.name("an export format")
+		if err != nil {
+			return nil, err
+		}
+		s.Format = f
+	}
+	if p.accept("to") {
+		e, err := p.expr()
+		if err != nil {
+			return nil, err
+		}
+		s.Path = e
+	}
+	return s, nil
+}
+
+// importStmt parses "import into database d from source [with new ids]"
+// and "import security from source [replace]".
+func (p *parser) importStmt() (Stmt, error) {
+	s := &Import{At: p.at()}
+	p.advance()
+	switch {
+	case p.acceptWord("into"):
+		if err := p.expect("database"); err != nil {
+			return nil, err
+		}
+		s.What = "database"
+		n, err := p.name("a database name")
+		if err != nil {
+			return nil, err
+		}
+		s.Name = n
+	case p.acceptWord("security"):
+		s.What = "security"
+	default:
+		return nil, p.errExpected("into database or security")
+	}
+	if err := p.expect("from"); err != nil {
+		return nil, err
+	}
+	e, err := p.expr()
+	if err != nil {
+		return nil, err
+	}
+	s.Source = e
+	switch {
+	case s.What == "database" && p.accept("with"):
+		if err := p.expectWord("new"); err != nil {
+			return nil, err
+		}
+		if err := p.expectWord("ids"); err != nil {
+			return nil, err
+		}
+		s.NewIDs = true
+	case s.What == "security" && p.acceptWord("replace"):
+		s.Replace = true
+	}
+	return s, nil
+}
+
 func (p *parser) statement() (Stmt, error) {
 	t := p.tok()
+	if t.Kind == Ident && !t.Quoted && t.Text == "rebuild" {
+		at := p.at()
+		p.advance()
+		if err := p.expect("index"); err != nil {
+			return nil, err
+		}
+		n, err := p.name("an index name")
+		return &Rebuild{at, n}, err
+	}
+	if t.Kind == Ident && !t.Quoted && t.Text == "export" {
+		return p.export()
+	}
+	if t.Kind == Ident && !t.Quoted && t.Text == "import" {
+		return p.importStmt()
+	}
+	if t.Kind == Ident && !t.Quoted && (t.Text == "backup" || t.Text == "restore") {
+		at := p.at()
+		p.advance()
+		if !p.accept("database") {
+			return nil, p.errExpected("database")
+		}
+		n, err := p.name("a database name")
+		if err != nil {
+			return nil, err
+		}
+		if t.Text == "backup" {
+			if err := p.expect("to"); err != nil {
+				return nil, err
+			}
+			path, err := p.expr()
+			return &Backup{at, n, path}, err
+		}
+		if err := p.expect("from"); err != nil {
+			return nil, err
+		}
+		path, err := p.expr()
+		return &Restore{at, n, path}, err
+	}
+	if t.Kind == Ident && !t.Quoted && t.Text == "analyze" {
+		at := p.at()
+		p.advance()
+		if !p.accept("kind") {
+			return nil, p.errExpected("kind")
+		}
+		n, err := p.name("a kind name")
+		return &Analyze{At: at, Kind: n}, err
+	}
 	if t.Kind != Keyword {
 		if t.Kind == Ident && !t.Quoted {
 			if Keywords[strings.ToLower(t.Text)] {
@@ -350,12 +495,17 @@ func (p *parser) statement() (Stmt, error) {
 func (p *parser) show(at At) (Stmt, error) {
 	t := p.tok()
 	if t.Kind != Ident || t.Quoted {
-		return nil, p.errExpected("what to show (databases, kinds, relations, formats, indexes, users, roles, sessions, grants, keys or stats)")
+		return nil, p.errExpected("what to show (databases, kinds, relations, formats, indexes, alters, users, roles, sessions, grants, keys, slow queries or stats)")
 	}
 	s := &ShowStmt{At: at, What: t.Text}
 	switch t.Text {
-	case "databases", "kinds", "relations", "formats", "indexes", "users", "roles", "sessions":
+	case "databases", "kinds", "relations", "formats", "indexes", "alters", "users", "roles", "sessions":
 		p.advance()
+	case "slow":
+		p.advance()
+		if err := p.expectWord("queries"); err != nil {
+			return nil, err
+		}
 	case "grants", "keys":
 		p.advance()
 		if p.accept("for") {

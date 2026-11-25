@@ -111,13 +111,13 @@ Reserved now for future features (inference rules, kind reuse and others), so th
 
 | Group | Statements |
 |---|---|
-| Databases and session | `create database`, `drop database`, `use`, `set`, `show databases` |
+| Databases and session | `create database`, `drop database`, `use`, `set`, `show databases`, `backup database`, `restore database`, `export`, `import` |
 | Definitions | `define kind / relation / format / index`, `alter …`, `drop …` |
 | Data | `create`, `update`, `delete`, `relate`, `unrelate`, `push`, `pop` |
 | Queries | pipelines starting with `find` |
 | Transactions | `begin`, `commit`, `rollback` |
 | Security | `create user / role`, `alter user`, `drop user / role`, `grant`, `revoke` |
-| Introspection | `describe`, `explain`, `show …`, `history` |
+| Introspection | `describe`, `explain`, `show …`, `history`, `analyze kind` |
 
 Each statement ends with `;`.
 
@@ -133,9 +133,34 @@ show databases;
 
 set timeout = 30s;               // session settings
 set max_rows = 10000;
+set max_load = 1073741824;       // bytes of large values a statement may load
+
+backup database sales to "nightly/mon";      // while it runs; needs admin on sales
+restore database sales_copy from "nightly/mon";  // creates sales_copy; needs admin
+
+export database sales to "sales.jsonl";          // or without "to": returned as a bytes value
+export database sales as native;
+import into database sales2 from "sales.jsonl";  // or from $file, an uploaded export
+import into database sales from $file with new ids;
+export (find Person p ~knows~> Person f) as dot; // also jsonl, native, csv, graph
+export security to "security.jsonl";             // users, roles, grants, password hashes
+export security without passwords;
+import security from "security.jsonl" replace;
 ```
 
 Queries can't span databases in v1.
+
+**Backups.** `backup database` writes the database as of one commit to a directory, while it keeps taking reads and writes: the key-value store's latest data written as compacted files, the blob segments copied, and a `BACKUP` file listing every file with its SHA-256, written last. History versions are data, so they are in the backup; users, roles and grants are server-wide and aren't. It returns the path, keys, files and bytes. `restore database` creates a new database from a backup, checking every file as it copies it; it never replaces an existing database (drop it first, or restore under another name and switch). Paths are directories relative to the server's backup directory (`polydb serve --backup-dir`, default `<data-dir>/backups`); a backup's directory must not exist yet. On a stopped server, `polydb restore [--database name] dir` does the same from any directory. Embedded programs call `DB.Backup` and `Engine.RestoreDatabase` with any path.
+
+**Export and import.** An export is a portable copy, read and written a record at a time, so neither side holds it in memory:
+
+- **Formats:** `jsonl` (JSON Lines, the default: one record per line, values in their JSON form, types.md §12.3) and `native` (the binary value encoding, smaller and faster). Large values are written once each, in pieces, before the first entity using them.
+- **A database export** holds its definitions (as `define` statements, run on import like any other), then every entity (ID, kind, metadata, fields, the definitions of fields it added itself) and every relation, as of one snapshot. History versions aren't exported: a backup keeps them.
+- **`import into database d`** creates the definitions d lacks; ones it has must be the same, or the import fails naming the difference before writing anything. IDs are kept, and one that exists is an error; `with new ids` gives every entity, field and relation a new ID and rewrites the refs pointing at them (plain `id` values are kept), which copies data into a database that has it. An export may only hold definitions, entities and relations: any other statement in it is refused. Entities and relations are written in batches of transactions; an import that fails keeps the batches before the failure, and says how far it got. Ref targets aren't checked, since they may come later in the export.
+- **`export (query)`** writes a query's result: `jsonl` and `native` as rows (whole entities and relations as maps), `csv` with a header and plain cells (text as is, numbers, times and IDs in their usual forms, bytes in base64, collections as JSON), and `dot` (Graphviz) or `graph` (JSON: `{"nodes": […], "edges": […]}`) with the result's entities as nodes, labelled by kind and a `name`, `title` or `label` field, and as edges the relations in the result and those between its nodes. A graph names large values without their content.
+- **`export security`** holds every user (with password credentials: salted PBKDF2 hashes, never the passwords, but still worth guessing at, so the file is a secret; `without passwords` leaves them out), key fingerprints, roles and memberships, and grants, with kinds by name so they apply to restored or imported databases. **`import security`** creates the users and roles that don't exist and adds memberships and grants; a user that exists keeps its password and keys unless `replace` is given; grants on databases or kinds that don't exist are skipped and counted.
+- **Where:** `to "path"` writes a file in the backup directory, which must not exist yet; without it the export is the statement's result, a bytes value the client downloads in pieces (a security export comes from memory, the others from the database's blob store). `from` takes a path there, or the export itself, usually a parameter uploaded with `Conn.Upload`. `polydb export` and `polydb import` do this from the command line.
+- **Permissions:** exporting a database needs read on all of it (a database-level grant); importing needs admin on the target. Exporting a query needs what the query needs. `export security` and `import security` need admin on the server.
 
 ---
 
@@ -199,6 +224,23 @@ alter kind Person rename to Human;
 drop kind Person;                // fails while entities of this kind exist
 ```
 An `alter` that existing data doesn't satisfy (for example adding a required field without a default) fails, with a count of the entities that don't fit.
+
+**How an alter runs.** It does only the work the change needs:
+
+- **At once, touching no entity**, when stored data stays valid: docs, renames, history settings, defaults, adding an optional field without a default to a closed kind, removing a check or `unique` (its keys go with it), making a field optional, switching to extensible.
+- **Checking every entity** when the change adds a rule: a new or changed check, `unique` (which also writes its keys), making a field required, switching to closed. Entities aren't rewritten.
+- **Rewriting every entity** when their records change: a type that converts values (types.md §10.1), a dropped field, a new field with a default or a required one, a field some entities may hold themselves (any new field of an extensible kind), a change of `on delete`.
+
+A kind of up to 1,000 entities is checked and rewritten in the altering statement, all or nothing. A larger one is altered **in the background**, and the statement returns at once with a `background` warning:
+
+1. Writes to the kind stop: creating, changing or deleting its entities fails with a `constraint` error saying it is being altered, and a write that began before the alter can't commit after it. Reads go on, and other kinds aren't affected.
+2. Every entity is checked against the new definition, in batches, while reads still see the old one. If any doesn't fit, the alter fails: nothing changes and writes resume.
+3. The new definition becomes current, and entities are rewritten in batches; until it reaches one, a read shows it through the new definition (dropped fields hidden, values converted). The kind's indexes aren't used meanwhile.
+4. Writes resume.
+
+`show alters` lists each kind's latest background alter: its phase (`checking`, `rewriting`, `done`, `failed`), progress, whether it rewrites, when it started and finished, and the first error with a count of the others. A kind being altered can't be altered, dropped or indexed again until it finishes. An alter that a restart interrupts resumes where it was.
+
+**Rebuilding an index:** `rebuild index person_age;` deletes an index's entries and builds them again from the data: at once for a small kind, otherwise in the background, like a new index, which queries don't use until it is ready. A unique index checks for duplicates as it rebuilds. It needs `define` permission on the kind.
 
 ### 5.2 Relation types (optional)
 
@@ -472,7 +514,11 @@ A planner chooses how a `find` over kinds finds its rows. Plans change speed, ne
 - **When an index can't answer.** An index holds only entities that have a value, other than null, for every one of its fields. It answers a condition only when every entity the condition lets through is sure to be in it. So `= null` is never answered from an index, and a multi-field index answers a condition on its first fields only when the conditions also constrain its other fields or those fields are required. Indexes still building aren't used.
 - **Joins.** With several variables, the one with the fewest estimated entities is bound first, and the others follow through indexes or lookups that use it, so `find Customer c, Order o | where o.customer = c and c.email = $e` reads one customer and their orders.
 - **`sort … | limit n`.** Right after the where steps, this reads an index in order and stops once it has the rows the limit keeps. It applies when the sort's first key is an indexed field whose values are all in the index, or when sorting descending, where entities without a value come last.
-- **Estimates** come from counting probes: the planner counts a constant index range up to 1000 entries. Statistics may replace this later.
+- **Estimates.**
+  - A constant index range is counted, up to 1000 entries.
+  - A larger range is estimated from the kind's **statistics**, and so is a lookup per row of an earlier variable: the kind's entities divided by the key's distinct values.
+
+  Statistics come from a random sample of up to 10,000 entities per kind. For each field, and each doc path of an index key, they record how many entities have a value or null, an estimate of the distinct values, the most common values and a histogram of the rest. The database samples a kind when it has no statistics yet, and again once about a tenth of it has changed (or at least 50 entities); `analyze kind K` samples one at once. Without statistics, the planner guesses.
 - **Errors.** A row that an index or an earlier condition rules out isn't checked against the other conditions. An error that one of them would have raised on that row, such as comparing an int with text, doesn't happen.
 
 ---
@@ -595,6 +641,12 @@ find Person p as of t"2026-01-01T00:00:00Z" | show p.name, p.salary;
 ```
 - In an `as of` query, fields without history return an error if read. That's better than silently returning today's value for a past date.
 - Entities that didn't exist yet at that time aren't returned. Deleted entities whose kind has history are returned as they were.
+- **Retention.** With `keep d`, a version stays until it has been replaced for longer than `d`. A field's current version stays however old it is. Writing a field prunes its own old versions. A background sweep, hourly by default, prunes the rest:
+  - fields that are no longer written;
+  - fields whose history was turned off, whose versions nothing can read;
+  - deleted entities, once they've been deleted for longer than any of their kind's fields keeps history.
+
+  The sweep never changes what `history` or an `as of` read within the retention returns. After each sweep, the blob store's collector frees the large values that only the removed versions referenced (types.md §13.1).
 
 ---
 
@@ -639,11 +691,16 @@ describe relation knows;
 describe #01JD...;                  // whatever the ID belongs to
 show kinds;  show relations;  show formats;  show indexes;
 show stats;                         // database size, counts per kind and relation type
-show stats kind Person;             // value distributions used by the planner
+show stats kind Person;             // the planner's statistics: per field, present, null, distinct, common values
+analyze kind Person;                // sample Person's statistics now (the database also does it as data changes)
 show sessions;                      // admin: who is connected and what's running
 explain find Person p | where p.age > 30;            // how each variable is found, estimates, steps, warnings
 explain analyze find Person p | where p.age > 30;    // runs it; shows actual counts and timings
+show alters;                        // background alters of kinds (§5.1)
+show slow queries;                  // admin: the latest statements over the slow-query threshold
 ```
+
+**Slow-query log.** A statement that takes at least the server's threshold (`polydb serve --slow-query`, default 1 s; 0 turns it off) is logged: the server writes it to its log, and keeps the latest 256 for `show slow queries` (newest first). An entry holds when it finished, how long it took, the user and database, the statement's text (parameters by name, never their values; passwords hidden; cut at 4 KiB), the rows returned and affected, the error if it failed, and for a query, how its source ran: each variable's access path with the rows it bound, as in `explain analyze`. The plan is described only for statements that turn out slow, so the log costs fast statements nothing. A `pop … wait`, which waits by design, isn't logged. Statements can hold literal values, so only server admins see them.
 
 ---
 
@@ -668,7 +725,7 @@ Each error has a **code**, a **message** and, where it applies, the **position**
 | `not_found` | unknown database, kind, field, handle or ID |
 | `conflict` | transaction conflict; safe to retry |
 | `permission` | not allowed for this user |
-| `limit` | timeout, row limit, depth limit or size limit exceeded |
+| `limit` | timeout, row limit, depth limit, size limit, or the per-statement limit on loading large values (types.md §13.1) exceeded |
 | `internal` | a bug or storage failure |
 
 Error messages suggest fixes where they can: "did you mean `find`?" for `FIND`, or "add `cast(x as float)`" for mixed arithmetic.
@@ -885,7 +942,8 @@ scope          = "server" | "database" ident | "kind" [ ident "." ] ident ;
 introspect_stmt = "describe" ( target | ( "kind" | "relation" | "format" | "index" ) ident )
                 | "show" show_what
                 | "explain" [ "analyze" ] statement
-                | "history" field_ref ;
+                | "history" field_ref
+                | "analyze" "kind" ident ;
 show_what      = "databases" | "kinds" | "relations" | "formats" | "indexes"
                | "users" | "roles" | "sessions"
                | "grants" [ "for" ident ]
@@ -1005,7 +1063,7 @@ None.
 13. Permissions (Phase 3, 2026-11-22):
    - **Entities of kinds you can't read are invisible:** scans and patterns skip them, reads through refs give null, and `degree` doesn't count relations to them. `find Kind x` without read on that kind, or naming such an entity by handle or ID, is a `permission` error.
    - Kindless entities are covered by database-level and server-level grants only.
-   - `use` needs some permission on the database, and `show databases` lists only those. `create database` and `drop database` need admin on the server.
+   - `use` needs some permission on the database, and `show databases` lists only those. `create database`, `drop database` and `restore database` need admin on the server; `backup database` needs admin on that database.
    - `relate` and `unrelate` need `relate` on the source's kind and `read` on the target's. Writing to an entity needs `write` on its kind, and `define` at kind level covers `alter kind`, `drop kind` and indexes on that kind.
    - Users, roles, grants and keys change at once, outside transactions: running one of those statements inside a transaction is an error. Admins of a database can grant permissions on it; roles and server grants need a server admin.
    - Grants on a kind follow it when it is renamed. `show grants for x` lists x's grants and those of its roles; users who aren't admins see only their own.
@@ -1013,9 +1071,9 @@ None.
 12. Sessions (Phase 2, 2026-11-22):
    - **Any error inside a transaction aborts it.** Later statements fail with `txn_aborted` until `rollback`, and `commit` rolls back and reports `txn_aborted` too (protocol.md §6.3). This stops the rest of a script from running as if the failed statement had worked.
    - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.
-   - `create database`, `drop database` and `use` aren't allowed inside a transaction.
+   - `create database`, `drop database`, `backup database`, `restore database`, `export`, `import` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
-   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns.
+   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns. `max_load` caps the bytes of large values a statement may load into memory (types.md §13.1; default 256 MiB, set by the server's `--max-load`; 0 means no limit).
    - `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` on one runs it and reports the rows it changed and the time.
    - `explain` on a query (Phase 5) shows the plan as a table with the columns `step`, `detail` and `estimate`:
      - a `find` row per variable, in the order they're bound. It says how the variable is found (`scan kind Person`, `lookup for p = @ann`, `index person_age for p.age > 30`, `text index …`, or `…, for each p` when it uses an earlier variable) and the estimated entities (`n per row` for those).
@@ -1024,4 +1082,5 @@ None.
      - then warnings: a scan of every entity, variables no condition links (a cross product), `search()` without a text index, and an index that is still building and so isn't used.
    - `explain analyze` on a query runs it and adds `rows` and `time` columns: the rows each variable bound and each step produced, and each step's time.
    - Introspection results are tables with a `section` column where they mix kinds of rows: `describe kind` lists the kind, its fields and its indexes; `describe @x` lists metadata, fields and relations in and out.
-14. Query planning (Phase 5, 2026-11-23): plans never change results or row order (§7.5). An index answers a condition only when every entity the condition passes is sure to be in it. Rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen. Estimates come from counting probes until statistics arrive.
+14. Query planning (Phase 5, 2026-11-23): plans never change results or row order (§7.5). An index answers a condition only when every entity the condition passes is sure to be in it. Rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen. Estimates come from counting probes and, since Phase 6, sampled statistics.
+15. Statistics (Phase 6, 2026-11-24): `analyze` is a contextual word, so existing names stay valid. `analyze kind K` needs read permission on K, samples committed data in its own transaction (so it works inside a transaction too), and returns the same table as `show stats kind K`. That table is exact for kinds no larger than the sample; a kind not yet sampled is sampled for the display without storing the result.

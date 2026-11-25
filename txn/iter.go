@@ -2,7 +2,6 @@ package txn
 
 import (
 	"bytes"
-	"sort"
 
 	"github.com/sandgorgon/polydb/storage"
 )
@@ -15,18 +14,7 @@ func (t *Txn) Iter(opts storage.IterOptions) storage.Iterator {
 		return &mergeIter{err: ErrDone}
 	}
 	// The buffered keys in range, in iteration order.
-	keys := t.sortedKeys()
-	lo, hi := 0, len(keys)
-	if opts.Lower != nil {
-		lo = sort.SearchStrings(keys, string(opts.Lower))
-	}
-	if opts.Upper != nil {
-		hi = sort.SearchStrings(keys, string(opts.Upper))
-	}
-	var buf []string
-	if lo < hi {
-		buf = keys[lo:hi]
-	}
+	buf := t.keysIn(opts.Lower, opts.Upper)
 	return &mergeIter{t: t, snap: t.snap.Iter(opts), buf: buf, reverse: opts.Reverse, bi: -1}
 }
 

@@ -283,7 +283,7 @@ func handshake(nc net.Conn, t Target, o *options, tlsState *tls.ConnectionState,
 	if err := wire.WritePreface(nc); err != nil {
 		return nil, err
 	}
-	features := []string{"blob-range", "queue-wait"}
+	features := []string{"blob-range", "blob-write", "queue-wait"}
 	if o.compression && t.Network != "unix" {
 		features = append(features, "deflate")
 	}

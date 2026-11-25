@@ -43,29 +43,96 @@ func wordRune(r rune) bool {
 // Tokenize splits text into folded words.
 func Tokenize(text string) []Token {
 	var out []Token
-	var cur []rune
-	flush := func() {
-		if len(cur) > 0 {
-			if w := Fold(string(cur)); w != "" {
-				out = append(out, Token{w, len(out)})
-			}
-			cur = cur[:0]
-		}
-	}
-	for _, r := range text {
-		switch {
-		case single(r):
-			flush()
-			cur = append(cur, r)
-			flush()
-		case wordRune(r):
-			cur = append(cur, r)
-		default:
-			flush()
-		}
-	}
-	flush()
+	t := NewTokenizer(func(tok Token) { out = append(out, tok) })
+	t.WriteString(text)
+	t.Close()
 	return out
+}
+
+// maxWordRunes bounds the runes of a word kept before folding: Fold
+// keeps at most MaxWordLen bytes, so a longer run (text with no spaces)
+// gives the same word.
+const maxWordRunes = 4 * MaxWordLen
+
+// Tokenizer splits text arriving in pieces into folded words, as
+// Tokenize does, holding only the current word: a character may span
+// two pieces.
+type Tokenizer struct {
+	emit  func(Token)
+	n     int
+	cur   []rune
+	carry []byte
+}
+
+// NewTokenizer returns a tokenizer that calls emit for each word.
+func NewTokenizer(emit func(Token)) *Tokenizer { return &Tokenizer{emit: emit} }
+
+func (t *Tokenizer) flush() {
+	if len(t.cur) > 0 {
+		if w := Fold(string(t.cur)); w != "" {
+			t.emit(Token{w, t.n})
+			t.n++
+		}
+		t.cur = t.cur[:0]
+	}
+}
+
+func (t *Tokenizer) rune(r rune) {
+	switch {
+	case single(r):
+		t.flush()
+		t.cur = append(t.cur, r)
+		t.flush()
+	case wordRune(r):
+		if len(t.cur) < maxWordRunes {
+			t.cur = append(t.cur, r)
+		}
+	default:
+		t.flush()
+	}
+}
+
+// WriteString adds a piece of text.
+func (t *Tokenizer) WriteString(s string) {
+	if old := len(t.carry); old > 0 {
+		need := min(utf8.UTFMax-old, len(s))
+		buf := append(t.carry, s[:need]...)
+		if !utf8.FullRune(buf) {
+			t.carry = buf // s was too short to finish the character
+			return
+		}
+		r, size := utf8.DecodeRune(buf)
+		t.rune(r)
+		if size >= old {
+			s = s[size-old:]
+		} else {
+			s = string(buf[size:old]) + s // an invalid byte: go on after it
+		}
+		t.carry = buf[:0]
+	}
+	for i, r := range s {
+		if r == utf8.RuneError && !utf8.FullRuneInString(s[i:]) {
+			t.carry = append(t.carry[:0], s[i:]...)
+			return
+		}
+		t.rune(r)
+	}
+}
+
+// Write adds a piece of text.
+func (t *Tokenizer) Write(p []byte) (int, error) {
+	t.WriteString(string(p))
+	return len(p), nil
+}
+
+// Close ends the text.
+func (t *Tokenizer) Close() {
+	for len(t.carry) > 0 {
+		r, size := utf8.DecodeRune(t.carry)
+		t.rune(r)
+		t.carry = t.carry[size:]
+	}
+	t.flush()
 }
 
 // Fold normalizes a word for comparison: case folded, accents removed,

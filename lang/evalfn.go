@@ -21,18 +21,73 @@ func (ev *Evaluator) call(e *Call, f *Frame) (value.Value, error) {
 	switch e.Name {
 	case "coalesce":
 		for _, a := range e.Args {
-			v, err := ev.Eval(a, f)
+			v, err := ev.EvalLazy(a, f)
 			if err != nil || !value.IsNull(v) {
 				return v, err
 			}
 		}
 		return value.Null, nil
 	case "typeof":
-		v, err := ev.Eval(e.Args[0], f)
+		v, err := ev.EvalLazy(e.Args[0], f)
 		if err != nil {
 			return nil, err
 		}
 		return value.MustText(typeName(v)), nil
+	case "len":
+		// The length of a large value needs no loading: bytes have it,
+		// and text counts its characters a piece at a time.
+		v, err := ev.EvalLazy(e.Args[0], f)
+		if err != nil {
+			return nil, err
+		}
+		if l, ok := v.(value.Lazy); ok {
+			switch l.Code() {
+			case value.CodeBytes:
+				return value.Int(l.Len()), nil
+			case value.CodeText:
+				n, err := l.RuneCount()
+				if err != nil {
+					return nil, runErr(e, "internal", "%v", err)
+				}
+				return value.Int(n), nil
+			}
+			if v, err = ev.Load(e.Args[0], v); err != nil {
+				return nil, err
+			}
+		}
+		return ev.callWith(e, []value.Value{v})
+	case "substr":
+		// A cut of a large text reads only up to its end.
+		v, err := ev.EvalLazy(e.Args[0], f)
+		if err != nil {
+			return nil, err
+		}
+		args := []value.Value{v}
+		for _, a := range e.Args[1:] {
+			av, err := ev.Eval(a, f)
+			if err != nil {
+				return nil, err
+			}
+			args = append(args, av)
+		}
+		if l, ok := v.(value.Lazy); ok && l.Code() == value.CodeText && !slices.ContainsFunc(args, value.IsNull) {
+			start, err := intArg(e, args, 1)
+			if err != nil {
+				return nil, err
+			}
+			n := int64(-1)
+			if len(args) == 3 {
+				if n, err = intArg(e, args, 2); err != nil {
+					return nil, err
+				}
+				n = max(n, 0)
+			}
+			return ev.substrLarge(e, l, max(start, 0), n)
+		}
+		if args[0], err = ev.Load(e.Args[0], v); err != nil {
+			return nil, err
+		}
+		return ev.callWith(e, args)
 	case "now":
 		return built(value.NewTime(ev.Now))
 	case "today":
@@ -43,6 +98,11 @@ func (ev *Evaluator) call(e *Call, f *Frame) (value.Value, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ev.callWith(e, args)
+}
+
+// callWith calls a function with its evaluated arguments.
+func (ev *Evaluator) callWith(e *Call, args []value.Value) (value.Value, error) {
 	// Functions return null when an argument is null (§8.3).
 	for _, a := range args {
 		if value.IsNull(a) {
@@ -557,7 +617,12 @@ func (ev *Evaluator) aggregate(e *Call, f *Frame) (value.Value, error) {
 			vals = append(vals, value.Bool(true))
 			continue
 		}
-		v, err := ev.Eval(e.Args[0], &Frame{Row: r, Target: f.Target, HasTarget: f.HasTarget})
+		eval := ev.Eval
+		switch e.Name {
+		case "count", "min", "max":
+			eval = ev.EvalLazy // counting and comparing don't load
+		}
+		v, err := eval(e.Args[0], &Frame{Row: r, Target: f.Target, HasTarget: f.HasTarget})
 		if err != nil {
 			return nil, err
 		}
@@ -580,10 +645,14 @@ func (ev *Evaluator) aggregate(e *Call, f *Frame) (value.Value, error) {
 	case "min", "max":
 		best := vals[0]
 		for _, v := range vals[1:] {
-			if !value.SameGroup(best, v) {
+			if !sameGroup(best, v) {
 				return nil, runErr(e, "type", "%s can't compare %s with %s", e.Name, typeName(best), typeName(v))
 			}
-			if c := value.Compare(v, best); e.Name == "min" && c < 0 || e.Name == "max" && c > 0 {
+			c, err := ev.Order(e, v, best)
+			if err != nil {
+				return nil, err
+			}
+			if e.Name == "min" && c < 0 || e.Name == "max" && c > 0 {
 				best = v
 			}
 		}

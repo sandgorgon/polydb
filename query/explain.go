@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/security"
@@ -203,7 +204,7 @@ func (x *executor) indexWarnings(pl *lang.Pipeline, lv *level, p *plan) ([]strin
 // reportPlan hands the plan, with the rows each level bound, to
 // Context.Planned (explain analyze).
 func (x *executor) reportPlan(pl *lang.Pipeline, p *plan) error {
-	if x.ctx.Planned == nil {
+	if x.ctx.Planned == nil || (x.ctx.PlanIfSlower > 0 && time.Since(x.began) < x.ctx.PlanIfSlower) {
 		return nil
 	}
 	sp, err := x.describe(pl, p)

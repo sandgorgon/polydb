@@ -2,11 +2,11 @@ package engine
 
 import (
 	"context"
+	"github.com/sandgorgon/polydb/blob"
 	"time"
 
 	"github.com/sandgorgon/polydb/fulltext"
 	"github.com/sandgorgon/polydb/keys"
-	"github.com/sandgorgon/polydb/lang"
 	"github.com/sandgorgon/polydb/model"
 	"github.com/sandgorgon/polydb/value"
 )
@@ -36,57 +36,60 @@ const (
 // their values: for a value index at most one, none when a key is absent
 // or null, a path finds nothing, or a value can't be a key; for a text
 // index one per word per field, holding the word's positions.
-func (tx *Tx) indexEntries(ix *model.Index, id value.ID, fields map[string]*model.Field) map[string][]byte {
+func (tx *Tx) indexEntries(ix *model.Index, id value.ID, fields map[string]*model.Field) (map[string][]byte, error) {
 	if ix.Unique {
-		return nil
+		return nil, nil
 	}
 	if ix.Text {
 		out := map[string][]byte{}
 		for i, k := range ix.Keys {
 			f, ok := fields[k.Field]
-			if !ok || f.Value == nil {
-				continue
-			}
-			t, ok := f.Value.(value.Text)
-			if !ok {
+			if !ok || f.Value == nil || f.Value.Code() != value.CodeText {
 				continue
 			}
 			pos := map[string][]int{}
-			for _, tok := range fulltext.Tokenize(t.Go()) {
-				pos[tok.Word] = append(pos[tok.Word], tok.Pos)
+			tk := fulltext.NewTokenizer(func(tok fulltext.Token) { pos[tok.Word] = append(pos[tok.Word], tok.Pos) })
+			if err := writeText(tk, f.Value); err != nil {
+				return nil, err
 			}
+			tk.Close()
 			for w, ps := range pos {
 				out[string(keys.TextEntry(ix.ID, w, id, i))] = keys.EncodePositions(ps)
 			}
 		}
-		return out
+		return out, nil
 	}
 	var vals []byte
 	for _, k := range ix.Keys {
-		f, ok := fields[k.Field]
-		if !ok || f.Value == nil || value.IsNull(f.Value) {
-			return nil
-		}
-		v := f.Value
-		if len(k.Path) > 0 {
-			d, ok := v.(value.Doc)
-			if !ok {
-				return nil
-			}
-			format, ok := tx.Catalog().Format(d.Format())
-			if !ok {
-				return nil
-			}
-			if v, ok = lang.IndexValue(format, d, k.Path); !ok {
-				return nil
-			}
+		v, ok := tx.columnValue(k, fields)
+		if !ok || value.IsNull(v) {
+			return nil, nil
 		}
 		var err error
-		if vals, err = value.AppendKey(vals, v); err != nil {
-			return nil
+		if vals, ok, err = valueKey(vals, v); !ok || err != nil {
+			return nil, err
 		}
 	}
-	return map[string][]byte{string(keys.IndexEntry(ix.ID, vals, id)): nil}
+	return map[string][]byte{string(keys.IndexEntry(ix.ID, vals, id)): nil}, nil
+}
+
+// writeText writes a text value to tk, a lazy one a piece at a time.
+func writeText(tk *fulltext.Tokenizer, v value.Value) error {
+	switch t := v.(type) {
+	case value.Text:
+		tk.WriteString(t.Go())
+	case value.Lazy:
+		buf := make([]byte, blob.ChunkSize)
+		for off := int64(0); off < t.Len(); {
+			p := buf[:min(int64(len(buf)), t.Len()-off)]
+			if _, err := t.Src.ReadAt(p, off); err != nil {
+				return wrap(CodeInternal, err)
+			}
+			tk.Write(p)
+			off += int64(len(p))
+		}
+	}
+	return nil
 }
 
 // buildIndex indexes a new non-unique index's existing entities: at once
@@ -123,7 +126,11 @@ func (tx *Tx) indexEntity(ix *model.Index, id value.ID) error {
 	if err != nil {
 		return err
 	}
-	for k, v := range tx.indexEntries(ix, id, st.fields) {
+	entries, err := tx.indexEntries(ix, id, st.fields)
+	if err != nil {
+		return err
+	}
+	for k, v := range entries {
 		tx.t.Set([]byte(k), v)
 	}
 	return nil
@@ -138,6 +145,9 @@ type IndexState struct {
 // IndexState reports whether an index is ready, as this transaction sees
 // it.
 func (tx *Tx) IndexState(ix *model.Index) (IndexState, error) {
+	if _, ok := tx.db.rewriting(ix.Kind); ok {
+		return IndexState{}, nil // an alter is rewriting the kind
+	}
 	if ix.Unique {
 		return IndexState{Ready: true}, nil
 	}
@@ -379,7 +389,11 @@ func (db *DB) VerifyIndexes() error {
 				if err != nil {
 					return err
 				}
-				for key, v := range tx.indexEntries(ix, id, e.fields) {
+				entries, err := tx.indexEntries(ix, id, e.fields)
+				if err != nil {
+					return err
+				}
+				for key, v := range entries {
 					want[key] = string(v)
 				}
 				return nil
@@ -400,4 +414,32 @@ func (db *DB) VerifyIndexes() error {
 		}
 		return nil
 	})
+}
+
+// RebuildIndex builds an index again from the data: its entries are
+// deleted and written anew, at once for a small kind, otherwise in the
+// background (the planner doesn't use it meanwhile). A unique index
+// checks for duplicates as it rebuilds.
+func (tx *Tx) RebuildIndex(name string) error {
+	if err := tx.writable(); err != nil {
+		return err
+	}
+	ix, ok := tx.Catalog().Index(name)
+	if !ok {
+		return errorf(CodeNotFound, "no index %s", name)
+	}
+	if k, ok := tx.Catalog().KindByID(ix.Kind); ok {
+		if err := tx.kindIdle(k); err != nil {
+			return err
+		}
+	}
+	if ix.Unique {
+		p := keys.UniquePrefix(ix.ID, "")
+		tx.t.DeleteRange(p, keys.Range(p).Upper)
+		return tx.fail2(tx.buildUnique(ix))
+	}
+	p := keys.IndexPrefix(ix.ID)
+	tx.t.DeleteRange(p, keys.Range(p).Upper)
+	tx.t.Delete(keys.IndexBuild(ix.ID))
+	return tx.fail2(tx.buildIndex(ix))
 }

@@ -46,6 +46,12 @@ func (*CreateRole) stmt()     {}
 func (*Grant) stmt()          {}
 func (*Describe) stmt()       {}
 func (*ShowStmt) stmt()       {}
+func (*Analyze) stmt()        {}
+func (*Backup) stmt()         {}
+func (*Export) stmt()         {}
+func (*Rebuild) stmt()        {}
+func (*Import) stmt()         {}
+func (*Restore) stmt()        {}
 func (*Explain) stmt()        {}
 func (*History) stmt()        {}
 
@@ -374,6 +380,59 @@ type ShowStmt struct {
 	At
 	What string // databases, kinds, relations, formats, indexes, users, roles, sessions, grants, keys, stats
 	For  string // grants, keys: user; stats: kind
+}
+
+// Backup is "backup database d to 'path'": write a consistent copy of a
+// database to a directory under the server's backup directory.
+type Backup struct {
+	At
+	Name string
+	Path Expr // text: a constant or parameter
+}
+
+// Restore is "restore database d from 'path'": create database d from a
+// backup.
+type Restore struct {
+	At
+	Name string
+	Path Expr
+}
+
+// Export is "export database d", "export security [without passwords]"
+// or "export (query)", then "as format" and "to path" when given.
+// Without a path the export is the statement's result, a bytes value.
+type Export struct {
+	At
+	What        string // "database", "security" or "query"
+	Name        string // the database
+	Query       Stmt   // a pipeline
+	NoPasswords bool
+	Format      string // "" for the default
+	Path        Expr   // text; nil: return the export
+}
+
+// Import is "import into database d from source [with new ids]" or
+// "import security from source [replace]". The source is a path (text)
+// or the export itself (bytes, usually an uploaded parameter).
+type Import struct {
+	At
+	What    string // "database" or "security"
+	Name    string
+	Source  Expr
+	NewIDs  bool
+	Replace bool
+}
+
+// Rebuild is "rebuild index name": build an index again from the data.
+type Rebuild struct {
+	At
+	Index string
+}
+
+// Analyze is "analyze kind K": sample the kind's statistics now.
+type Analyze struct {
+	At
+	Kind string
 }
 
 type Explain struct {

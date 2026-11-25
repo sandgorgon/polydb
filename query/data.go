@@ -20,6 +20,13 @@ func (x *executor) eval(e lang.Expr, f *lang.Frame) (value.Value, error) {
 	return v, fail(e, err)
 }
 
+// evalLazy is eval leaving a large value unread, for values that are
+// only passed along: shown or stored.
+func (x *executor) evalLazy(e lang.Expr, f *lang.Frame) (value.Value, error) {
+	v, err := x.ev.EvalLazy(e, f)
+	return v, fail(e, err)
+}
+
 // target resolves the target of a data statement to a node ID and what
 // it is.
 func (x *executor) target(e lang.Expr, row lang.Row) (value.ID, model.NodeKind, error) {
@@ -98,7 +105,7 @@ func (x *executor) added(a *lang.AddField, f *lang.Frame) (engine.Add, error) {
 	if def.History, err = x.history(a.History); err != nil {
 		return engine.Add{}, err
 	}
-	v, err := x.eval(a.Value, f)
+	v, err := x.evalLazy(a.Value, f)
 	return engine.Add{Def: def, Value: v}, err
 }
 
@@ -110,7 +117,7 @@ func (x *executor) create(s *lang.Create) (*Result, error) {
 	vals := engine.Fields{}
 	var adds []engine.Add
 	for _, in := range s.Inits {
-		v, err := x.eval(in.Value, nil)
+		v, err := x.evalLazy(in.Value, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -199,7 +206,7 @@ func (x *executor) assign(as *lang.Assign, id value.ID, f *lang.Frame) error {
 	if err != nil {
 		return fail(as, err)
 	}
-	rhs, err := x.eval(as.Value, f)
+	rhs, err := x.evalLazy(as.Value, f)
 	if err != nil {
 		return err
 	}
@@ -241,6 +248,10 @@ func orNull(v value.Value) value.Value {
 func (x *executor) setIn(as *lang.Assign, cur value.Value, steps []lang.LStep, f *lang.Frame, change func(value.Value) (value.Value, error)) (value.Value, error) {
 	if len(steps) == 0 {
 		return change(cur)
+	}
+	cur, err := x.ev.Load(as, cur)
+	if err != nil {
+		return nil, fail(as, err)
 	}
 	st := steps[0]
 	var key value.Value

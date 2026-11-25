@@ -55,6 +55,36 @@ type Options struct {
 	Now func() time.Time
 	// MaxPopWait caps how long PopWait may wait (default 15 minutes).
 	MaxPopWait time.Duration
+	// HistorySweep is how often each database removes history past its
+	// retention (DB.SweepHistory); default an hour, negative never.
+	HistorySweep time.Duration
+	// StatsRefresh is how often each database samples the statistics of
+	// kinds that have none or have changed by about a tenth (DB.Analyze);
+	// default a minute, negative never.
+	StatsRefresh time.Duration
+	// BlobThreshold is the length in bytes above which text, bytes and
+	// image field values are kept in the blob store (default 16 KiB, at
+	// least 4 KiB).
+	BlobThreshold int
+	// BlobSegmentSize is the size of the blob store's segment files
+	// (default blob.DefaultSegmentSize).
+	BlobSegmentSize int64
+	// BackupDir is where backup and restore statements read and write:
+	// their paths are relative to it (default <Dir>/backups; with no
+	// Dir, the statements are refused). DB.Backup and RestoreDatabase
+	// take any path.
+	BackupDir string
+	// SlowQuery is how long a statement takes to go in the slow-query
+	// log (default DefaultSlowQuery; negative: no log). OnSlowQuery, if
+	// set, receives each one.
+	SlowQuery   time.Duration
+	OnSlowQuery func(SlowQuery)
+	// MaxLoad is how many bytes of large values one statement may load
+	// into memory, for functions and operators that need their content:
+	// the default of sessions' max_load setting (default DefaultMaxLoad,
+	// negative no limit). Passing large values along (showing, storing,
+	// len, =) loads nothing.
+	MaxLoad int64
 	// PasswordIterations is the PBKDF2 iteration count for new passwords
 	// (default security.DefaultIterations, at least security.MinIterations).
 	PasswordIterations int
@@ -71,11 +101,18 @@ type Engine struct {
 	mu     sync.RWMutex
 	dbs    map[string]*DB
 	closed bool
+
+	slowMu sync.Mutex
+	slow   []SlowQuery // the latest slow statements, oldest first
 }
 
 // Security returns the engine's system store: users, roles, grants and
 // keys.
 func (e *Engine) Security() *security.Store { return e.sec }
+
+// MaxLoad returns how many bytes of large values a statement may load,
+// or a negative number for no limit (Options.MaxLoad).
+func (e *Engine) MaxLoad() int64 { return e.opts.MaxLoad }
 
 // Open returns an engine: a new, empty one in memory, or the one kept in
 // opts.Dir (created if needed).
@@ -91,6 +128,25 @@ func Open(opts Options) (*Engine, error) {
 	}
 	if opts.MaxPopWait <= 0 {
 		opts.MaxPopWait = 15 * time.Minute
+	}
+	if opts.HistorySweep == 0 {
+		opts.HistorySweep = time.Hour
+	}
+	if opts.StatsRefresh == 0 {
+		opts.StatsRefresh = time.Minute
+	}
+	if opts.BlobThreshold == 0 {
+		opts.BlobThreshold = DefaultBlobThreshold
+	}
+	opts.BlobThreshold = max(opts.BlobThreshold, minBlobThreshold)
+	if opts.BackupDir == "" && opts.Dir != "" {
+		opts.BackupDir = vfs.Join(opts.Dir, "backups")
+	}
+	if opts.SlowQuery == 0 {
+		opts.SlowQuery = DefaultSlowQuery
+	}
+	if opts.MaxLoad == 0 {
+		opts.MaxLoad = DefaultMaxLoad
 	}
 	e := &Engine{opts: opts, ids: value.NewIDGenerator(opts.Node), dbs: map[string]*DB{},
 		sec: security.New(opts.PasswordIterations)}
@@ -116,7 +172,7 @@ func (e *Engine) CreateDatabase(name string) (*DB, error) {
 		return nil, errorf(CodeConstraint, "database %s already exists", name)
 	}
 	if e.sys != nil {
-		db, err := e.createOnDisk(name)
+		db, err := e.createOnDisk(name, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -127,7 +183,7 @@ func (e *Engine) CreateDatabase(name string) (*DB, error) {
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	db, err := openDB(e, name, s)
+	db, err := openDB(e, name, s, blobPlace{})
 	if err != nil {
 		s.Close()
 		return nil, err
@@ -204,14 +260,27 @@ func (e *Engine) Close() error {
 	return first
 }
 
-func openDB(e *Engine, name string, s storage.Store) (*DB, error) {
+// openDB opens a database on store s, with its blob store in blobDir
+// ("" for one in memory).
+func openDB(e *Engine, name string, s storage.Store, bp blobPlace) (*DB, error) {
 	cat, err := catalog.Load(s, 0)
 	if err != nil {
 		return nil, wrap(CodeInternal, err)
 	}
-	db := &DB{name: name, eng: e, mgr: txn.NewManager(s), waiters: map[string]*waitList{}}
+	blobs, err := openBlobs(e, bp)
+	if err != nil {
+		return nil, err
+	}
+	db := &DB{name: name, eng: e, mgr: txn.NewManager(s), waiters: map[string]*waitList{}, blobs: blobs}
 	db.cat.Store(cat)
 	db.mgr.OnCommit(db.notify)
 	db.startBuilder()
+	if err := db.loadAlters(); err != nil {
+		db.stopBuilder()
+		return nil, err
+	}
+	db.startAlterer()
+	db.startSweeper(e.opts.HistorySweep)
+	db.startStats(e.opts.StatsRefresh)
 	return db, nil
 }

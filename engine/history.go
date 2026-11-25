@@ -34,7 +34,9 @@ func historyOf(kind *model.Kind, def *model.FieldDef) model.History {
 
 // recordHistory writes the versions and life record for the changes in
 // st. save calls it before writing the entity.
-func (tx *Tx) recordHistory(st *entState) error {
+// stored holds what the changed fields' records hold (blob references
+// for large values).
+func (tx *Tx) recordHistory(st *entState, stored map[string]value.Value) error {
 	now := tx.timeNow()
 	id := st.e.ID
 	kind := st.kind
@@ -76,7 +78,11 @@ func (tx *Tx) recordHistory(st *entState) error {
 		if !h.On || (had && sameValue(old.Value, f.Value)) {
 			continue
 		}
-		if err := tx.writeVersion(id, name, f.Value, h, now); err != nil {
+		v := f.Value
+		if sv, ok := stored[name]; ok {
+			v = sv
+		}
+		if err := tx.writeVersion(id, name, v, h, now); err != nil {
 			return err
 		}
 	}
@@ -121,10 +127,16 @@ func (tx *Tx) writeVersion(id value.ID, name string, v value.Value, h model.Hist
 		prev = append([]byte(nil), k...)
 		return nil
 	})
+	if err != nil {
+		return err
+	}
 	for _, k := range stale {
 		tx.t.Delete(k)
 	}
-	return err
+	if len(stale) > 0 {
+		return tx.markBlobsDirty(id)
+	}
+	return nil
 }
 
 func (tx *Tx) life(id value.ID) (*keys.LifeRecord, error) {
@@ -196,6 +208,9 @@ func (tx *Tx) versions(id value.ID, name string) ([]Version, error) {
 		val, err := keys.DecodeVersion(v)
 		if err != nil {
 			return wrap(CodeInternal, err)
+		}
+		if val, err = tx.lazy(val); err != nil {
+			return err
 		}
 		out = append(out, Version{t, val})
 		return nil
@@ -441,6 +456,9 @@ func (tx *Tx) dropKindHistory(kind value.ID) error {
 		return err
 	}
 	for _, id := range ids {
+		if err := tx.markBlobsDirty(id); err != nil {
+			return err
+		}
 		p := keys.HistoryEntity(id)
 		tx.t.DeleteRange(p, storage.PrefixEnd(p))
 		tx.t.Delete(keys.Life(id))

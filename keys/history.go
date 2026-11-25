@@ -57,6 +57,20 @@ func HistoryTime(k []byte) (value.Time, error) {
 	return t, nil
 }
 
+// ParseHistory returns the entity and field name in a version key.
+func ParseHistory(k []byte) (entity value.ID, name string, err error) {
+	if len(k) < 1+idLen+1+12 || k[0] != PrefixHistory {
+		return entity, "", badKey("history", k)
+	}
+	copy(entity[:], k[1:1+idLen])
+	n, w := binary.Uvarint(k[1+idLen:])
+	start := 1 + idLen + w
+	if w <= 0 || uint64(len(k)-start-12) != n {
+		return entity, "", badKey("history", k)
+	}
+	return entity, string(k[start : start+int(n)]), nil
+}
+
 // HistKind returns the key recording that entity, of a kind with history,
 // exists or existed.
 func HistKind(kind, entity value.ID) []byte { return key(PrefixHistKind, kind, entity) }

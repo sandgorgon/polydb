@@ -1,8 +1,10 @@
 package client_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"os/user"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	auth9 "github.com/sandgorgon/9auth"
@@ -30,9 +33,16 @@ type testServer struct {
 
 // startServer runs a server with a TLS identity on loopback, and a Unix
 // socket where the current OS user logs in as admin.
-func startServer(t *testing.T) *testServer {
+func startServer(t testing.TB) *testServer {
 	t.Helper()
-	eng, err := engine.Open(engine.Options{PasswordIterations: security.MinIterations})
+	return startServerWith(t, engine.Options{})
+}
+
+// startServerWith is startServer with an engine opened with opts.
+func startServerWith(t testing.TB, opts engine.Options) *testServer {
+	t.Helper()
+	opts.PasswordIterations = security.MinIterations
+	eng, err := engine.Open(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,5 +417,178 @@ func TestBlobsAndCancel(t *testing.T) {
 	// The connection still works.
 	if _, err := db.Exec(ctx, `find W w`, nil); err != nil {
 		t.Errorf("after cancel: %v", err)
+	}
+}
+
+func TestUploads(t *testing.T) {
+	ctx := context.Background()
+	ts := startServer(t)
+	db := ts.dial(t, "")
+	c := db.(*client.Conn)
+	if _, err := c.Upload(ctx, strings.NewReader("abc"), "bytes", ""); polydb.CodeOf(err) != "not_found" {
+		t.Fatalf("upload without a database: %v", err)
+	}
+	if _, err := db.Exec(ctx, `create database d; use d; define kind F { data: bytes?, body: text?, pic: image? }`, nil); err != nil {
+		t.Fatal(err)
+	}
+	// Bigger than the server's in-memory pieces and the blob chunk size.
+	data := make([]byte, 3<<20+77)
+	for i := range data {
+		data[i] = byte(i * 7 / 3)
+	}
+	up, err := c.Upload(ctx, bytes.NewReader(data), "bytes", "application/x-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if up.Length != int64(len(data)) || up.MediaType != "application/x-test" {
+		t.Fatalf("upload: %d %q", up.Length, up.MediaType)
+	}
+	// An upload reads back before it is used.
+	part := make([]byte, 4)
+	if _, err := up.ReadAt(part, 2<<20); err != nil || !bytes.Equal(part, data[2<<20:2<<20+4]) {
+		t.Fatalf("reading the upload: %v", err)
+	}
+	if _, err := db.Exec(ctx, `create F { data: $d }`, polydb.Params{"d": up}); err != nil {
+		t.Fatal(err)
+	}
+	var got *polydb.Blob
+	rows, err := db.Query(ctx, `find F f | show f.data`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows.Next()
+	if err := rows.Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	all, err := got.Bytes(ctx)
+	if err != nil || !bytes.Equal(all, data) || got.MediaType != "application/x-test" {
+		t.Fatalf("stored value: %d bytes, %q, %v", len(all), got.MediaType, err)
+	}
+	// A blob from a result goes back as a parameter by its token.
+	if _, err := db.Exec(ctx, `create F { data: $d }`, polydb.Params{"d": got}); err != nil {
+		t.Fatal(err)
+	}
+	var n int64
+	rows, err = db.Query(ctx, `find F f | where len(f.data) = $n | show count()`, polydb.Params{"n": len(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows.Next()
+	rows.Scan(&n)
+	rows.Close()
+	if n != 2 {
+		t.Fatalf("%d copies", n)
+	}
+
+	// Text uploads are checked when used.
+	txtUp, err := c.Upload(ctx, strings.NewReader(strings.Repeat("é", 20000)), "text", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `create F { body: $b }`, polydb.Params{"b": txtUp}); err != nil {
+		t.Fatal(err)
+	}
+	bad, err := c.Upload(ctx, bytes.NewReader([]byte{0xff, 0xfe}), "text", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `create F { body: $b }`, polydb.Params{"b": bad}); polydb.CodeOf(err) != "type" {
+		t.Fatalf("invalid text: %v", err)
+	}
+	notImage, _ := c.Upload(ctx, strings.NewReader("not an image"), "image", "")
+	if _, err := db.Exec(ctx, `create F { pic: $p }`, polydb.Params{"p": notImage}); polydb.CodeOf(err) != "type" {
+		t.Fatalf("invalid image: %v", err)
+	}
+	if _, err := c.Upload(ctx, strings.NewReader("x"), "list", ""); polydb.CodeOf(err) != "type" {
+		t.Fatalf("upload of a list: %v", err)
+	}
+	// A token the server doesn't know.
+	fake := polydb.NewLeasedBlob("bytes", 1, "", []byte("nope"), nil)
+	if _, err := db.Exec(ctx, `create F { data: $d }`, polydb.Params{"d": fake}); polydb.CodeOf(err) != "lease_expired" {
+		t.Fatalf("unknown token: %v", err)
+	}
+	// A reader that fails cancels the upload; the connection carries on.
+	if _, err := c.Upload(ctx, io.MultiReader(bytes.NewReader(data[:1<<20]), iotest.ErrReader(errors.New("disk gone"))), "bytes", ""); err == nil {
+		t.Fatal("failed reader uploaded")
+	}
+	if _, err := db.Exec(ctx, `find F f | show count()`, nil); err != nil {
+		t.Fatalf("after a failed upload: %v", err)
+	}
+
+	// Uploading needs write permission somewhere in the database: read
+	// access alone is refused, write on one kind is enough.
+	if _, err := db.Exec(ctx, `create user reader password "pw"; grant read on database d to reader;
+		create user writer password "pw"; grant read on database d to writer; grant write on kind d.F to writer`, nil); err != nil {
+		t.Fatal(err)
+	}
+	for user, want := range map[string]string{"reader": "permission", "writer": ""} {
+		udb, err := client.Dial(ctx, "polydb://"+user+"@"+ts.addr+"/d", client.WithPassword("pw"), client.WithServerFingerprint(ts.fingerprint))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = udb.(*client.Conn).Upload(ctx, strings.NewReader("abc"), "bytes", "")
+		if polydb.CodeOf(err) != want {
+			t.Errorf("%s uploading: %v", user, err)
+		}
+		udb.Close()
+	}
+}
+
+// Large values come back as blobs from both implementations: read when
+// scanned, and passed back as parameters without being read.
+func TestLargeValuesShared(t *testing.T) {
+	ctx := context.Background()
+	big := strings.Repeat("ab€", 20<<10) // 100 KiB: in the blob store, sent by reference
+	for name, db := range implementations(t) {
+		t.Run(name, func(t *testing.T) {
+			kind := map[string]string{"embedded": "LE", "client": "LC"}[name]
+			if _, err := db.Exec(ctx, `define kind `+kind+` { name: text, body: text? };
+				create `+kind+` { name: "a", body: $b }`, polydb.Params{"b": big}); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := db.Query(ctx, `find `+kind+` x | show x.body, x.body as again, x`, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !rows.Next() {
+				t.Fatal("no row")
+			}
+			b, ok := rows.Values()[0].(*polydb.Blob)
+			if !ok || b.Type != "text" || b.Length != int64(len(big)) {
+				t.Fatalf("large value as %T", rows.Values()[0])
+			}
+			var s string
+			var e *polydb.Entity
+			if err := rows.Scan(&s, new(any), &e); err != nil || s != big {
+				t.Fatalf("scan: %d bytes, %v", len(s), err)
+			}
+			if _, ok := e.Value("body").(*polydb.Blob); !ok {
+				t.Errorf("entity field is %T", e.Value("body"))
+			}
+			rows.Close()
+			// The reader gives the content to io.Copy (which uses its
+			// WriteTo) and to small reads alike.
+			var buf bytes.Buffer
+			if n, err := io.Copy(&buf, b.Reader()); err != nil || n != int64(len(big)) || buf.String() != big {
+				t.Fatalf("io.Copy: %d bytes, %v", n, err)
+			}
+			small, err := io.ReadAll(iotest.OneByteReader(b.Reader()))
+			if err != nil || string(small) != big {
+				t.Fatalf("one byte at a time: %d bytes, %v", len(small), err)
+			}
+			if _, err := db.Exec(ctx, `create `+kind+` { name: "b", body: $b }`, polydb.Params{"b": b}); err != nil {
+				t.Fatal(err)
+			}
+			rows, err = db.Query(ctx, `find `+kind+` x, `+kind+` y | where x.name = "a" and y.name = "b" | show x.body = y.body`, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var same bool
+			if !rows.Next() || rows.Scan(&same) != nil || !same {
+				t.Error("blob passed back stored differently")
+			}
+			rows.Close()
+		})
 	}
 }

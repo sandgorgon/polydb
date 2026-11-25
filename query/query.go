@@ -29,6 +29,9 @@ type Settings struct {
 	MaxDepth int           // cap for open-ended multi-hop patterns (*, *2..)
 	MaxRows  int           // 0: no limit
 	Timeout  time.Duration // 0: no limit; enforced by the session
+	// MaxLoad is how many bytes of large values a statement may load
+	// (types.md §13.1); 0: no limit.
+	MaxLoad int64
 }
 
 // DefaultSettings are the settings of a new session.
@@ -59,9 +62,17 @@ type Context struct {
 	// Planned, if set, receives how a planned source ran: its plan with
 	// the rows each variable bound, for explain analyze.
 	Planned func(*SourcePlan)
+	// PlanIfSlower, if set, reports the plan to Planned only when running
+	// the source took at least this long (the slow-query log), so fast
+	// statements don't pay for describing it.
+	PlanIfSlower time.Duration
 	// NoPlanner runs pipelines as written, scanning every kind, without
 	// the planner (tests compare the two).
 	NoPlanner bool
+	// LazyResults leaves large values in results as value.Lazy, for
+	// callers that send or read them a piece at a time. Otherwise they
+	// are loaded (within MaxLoad).
+	LazyResults bool
 }
 
 // Access decides what the user running a statement may do with entities
@@ -135,15 +146,62 @@ func Exec(ctx *Context, s lang.Stmt) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !ctx.LazyResults {
+		if err := x.loadResult(s, res); err != nil {
+			return nil, err
+		}
+	}
 	res.Warnings = append(res.Warnings, info.Warnings...)
 	return res, nil
 }
 
 func newExecutor(ctx *Context, info *lang.Info) *executor {
-	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now()}
+	x := &executor{ctx: ctx, info: info, tx: ctx.Tx, now: ctx.Tx.Now(), began: time.Now()}
 	x.graph = &graph{tx: ctx.Tx, ents: map[value.ID]*engine.Entity{}, hidden: map[value.ID]bool{}, access: ctx.Access}
-	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, LookupHandle: x.handleValue, Now: x.now}
+	x.ev = &lang.Evaluator{Info: info, Graph: x.graph, Params: ctx.Params, LookupHandle: x.handleValue, Now: x.now,
+		MaxLoad: ctx.Settings.MaxLoad}
+	ctx.Tx.SetMaxLoad(ctx.Settings.MaxLoad) // for checks and defaults
 	return x
+}
+
+// loadResult loads the large values in a result's cells and entities.
+func (x *executor) loadResult(s lang.Stmt, res *Result) error {
+	load := func(v value.Value) (value.Value, error) {
+		v, err := x.ev.Load(s, v)
+		return v, fail(s, err)
+	}
+	var cell func(c any) (any, error)
+	cell = func(c any) (any, error) {
+		switch c := c.(type) {
+		case value.Value:
+			return load(c)
+		case *Entity:
+			for _, f := range c.Fields {
+				if f.Value != nil {
+					var err error
+					if f.Value, err = load(f.Value); err != nil {
+						return nil, err
+					}
+				}
+			}
+		case *Path:
+			for _, n := range c.Nodes {
+				if _, err := cell(n); err != nil {
+					return nil, err
+				}
+			}
+		}
+		return c, nil
+	}
+	for _, row := range res.Rows {
+		for i, c := range row {
+			var err error
+			if row[i], err = cell(c); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // executor runs one checked statement.
@@ -156,6 +214,7 @@ type executor struct {
 	ev    *lang.Evaluator
 	now   time.Time
 	ticks int
+	began time.Time // when the statement started running
 }
 
 // can reports whether the user may do p on entities of kind.
@@ -284,7 +343,7 @@ func errAt(n lang.Node, code, format string, args ...any) *lang.Error {
 func (x *executor) stmt(s lang.Stmt) (*Result, error) {
 	switch s := s.(type) {
 	case *lang.DefineKind, *lang.AlterKind, *lang.DefineRelation, *lang.AlterRelation,
-		*lang.DefineFormat, *lang.DefineIndex, *lang.Drop:
+		*lang.DefineFormat, *lang.DefineIndex, *lang.Drop, *lang.Rebuild:
 		return x.definition(s)
 	case *lang.Create:
 		return x.create(s)

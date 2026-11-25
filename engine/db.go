@@ -4,7 +4,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/sandgorgon/polydb/blob"
 	"github.com/sandgorgon/polydb/catalog"
+	"github.com/sandgorgon/polydb/storage/lsm"
 	"github.com/sandgorgon/polydb/txn"
 )
 
@@ -23,6 +25,18 @@ type DB struct {
 
 	build   *builder // background index builds
 	buildMu sync.Mutex
+
+	sweepQuit, sweepDone chan struct{} // the background history sweep
+	statsQuit, statsDone chan struct{} // the background statistics refresh
+	statChanges          sync.Map      // kind ID → *atomic.Int64: changes since its last sample
+
+	alter          *alterer     // background alters (alter.go)
+	alters         atomic.Int64 // alters running, or about to
+	rewritingKinds sync.Map     // kind ID → *model.Kind: kinds whose entities an alter is rewriting
+
+	blobs   *blob.Store // large values (blob.go)
+	touchMu sync.Mutex
+	touched map[uint32]uint64 // blob segment → store seq of its last append
 }
 
 // Name returns the database's name.
@@ -96,7 +110,10 @@ func (db *DB) setCatalog(c *catalog.Catalog) {
 }
 
 func (db *DB) close() error {
+	db.stopStats()
+	db.stopSweeper()
 	db.stopBuilder()
+	db.stopAlterer()
 	db.wmu.Lock()
 	for _, wl := range db.waiters {
 		for _, w := range wl.list {
@@ -105,5 +122,19 @@ func (db *DB) close() error {
 		}
 	}
 	db.wmu.Unlock()
-	return db.mgr.Store().Close()
+	err := db.mgr.Store().Close()
+	if berr := db.blobs.Close(); err == nil {
+		err = berr
+	}
+	return err
+}
+
+// StoreMetrics returns the on-disk store's shape and work since it
+// opened; ok is false for a database kept in memory.
+func (db *DB) StoreMetrics() (m lsm.Metrics, ok bool) {
+	s, ok := db.mgr.Store().(*lsm.Store)
+	if !ok {
+		return m, false
+	}
+	return s.Metrics(), true
 }

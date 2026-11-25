@@ -1,8 +1,11 @@
 package value
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"strconv"
@@ -13,7 +16,13 @@ import (
 //
 //	bytes.Compare(Key(a), Key(b)) == Compare(a, b)
 //
-// so the storage engine can sort and range-scan without decoding. Equal
+// so the storage engine can sort and range-scan without decoding. The
+// one exception is text and bytes longer than KeyPrefixLen: their keys
+// hold the first KeyPrefixLen bytes and the content's SHA-256, so they
+// stay small and need no loading for a Lazy value. Such keys are equal
+// exactly when the values are, and order correctly against every other
+// key, but two of them with the same first KeyPrefixLen bytes order by
+// hash (see SameKeyGroup). Equal
 // values encode identically, even across numeric types (1, 1.0, 1n and
 // 1.00d share one key), so a key can't be decoded back to its exact type;
 // indexes point to the stored value for that.
@@ -33,7 +42,10 @@ import (
 //	                     digits in pairs, each pair p as 2p+1, or 2p for the
 //	                     last pair (an odd count is padded with 0). For
 //	                     negative numbers E and the digit bytes are inverted.
-//	text, bytes          the bytes with 0x00 escaped as 0x00 0xFF, then 0x00 0x01
+//	text, bytes          the bytes with 0x00 escaped as 0x00 0xFF, then 0x00 0x01;
+//	                     longer than KeyPrefixLen: the first KeyPrefixLen
+//	                     bytes escaped, then 0x00 0x02 and the 32-byte
+//	                     SHA-256 of the whole content
 //	date                 4 bytes, sign bit flipped
 //	time                 8 bytes seconds (sign bit flipped), 4 bytes nanoseconds
 //	duration             8 bytes, sign bit flipped
@@ -46,15 +58,68 @@ import (
 // sorts just above the decimal 0.1d. Keys for floats with large or tiny
 // exponents can be long (up to about 770 digits for subnormals).
 
+// KeyPrefixLen is how much of a long text or bytes value its key holds.
+const KeyPrefixLen = 256
+
 // Key returns the key encoding of v, or an error if v isn't keyable.
 func Key(v Value) ([]byte, error) { return AppendKey(nil, v) }
 
-// AppendKey appends the key encoding of v to dst.
+// AppendKey appends the key encoding of v to dst. A Lazy value's key
+// reads only the start of its content, which can fail.
 func AppendKey(dst []byte, v Value) ([]byte, error) {
 	if !IsKeyable(v) {
 		return dst, fmt.Errorf("%s value can't be used as a key", code(v))
 	}
+	if l, ok := v.(Lazy); ok {
+		prefix, err := l.prefix()
+		if err != nil {
+			return dst, err
+		}
+		if l.Ref.Len <= KeyPrefixLen {
+			return appendEscaped(append(dst, byte(group(l.Ref.Of))), string(prefix)), nil
+		}
+		return appendLongKey(append(dst, byte(group(l.Ref.Of))), prefix, l.Ref.Hash), nil
+	}
 	return appendKey(dst, v), nil
+}
+
+// appendStrKey appends a text or bytes value's content as a key.
+func appendStrKey(dst []byte, s string) []byte {
+	if len(s) <= KeyPrefixLen {
+		return appendEscaped(dst, s)
+	}
+	h := sha256.New()
+	io.WriteString(h, s)
+	return appendLongKey(dst, []byte(s[:KeyPrefixLen]), [32]byte(h.Sum(nil)))
+}
+
+func appendLongKey(dst, prefix []byte, hash [32]byte) []byte {
+	esc := appendEscaped(dst, string(prefix))
+	esc[len(esc)-1] = 2 // 0x00 0x02 instead of the terminator
+	return append(esc, hash[:]...)
+}
+
+// SameKeyGroup reports whether a and b may sit in either order in key
+// order: they are equal, or both long text or bytes values of one type
+// whose keys share their prefix. A scan in key order that must not miss
+// a value ordered by Compare reads on through a group.
+func SameKeyGroup(a, b Value) (bool, error) {
+	if Compare(a, b) == 0 {
+		return true, nil
+	}
+	if a.Code() != b.Code() || (a.Code() != CodeText && a.Code() != CodeBytes) {
+		return false, nil
+	}
+	ka, err := Key(a)
+	if err != nil {
+		return false, err
+	}
+	kb, err := Key(b)
+	if err != nil {
+		return false, err
+	}
+	long := func(k []byte) bool { return len(k) > 34 && k[len(k)-33] == 2 && k[len(k)-34] == 0 }
+	return long(ka) && long(kb) && bytes.Equal(ka[:len(ka)-32], kb[:len(kb)-32]), nil
 }
 
 func appendKey(dst []byte, v Value) []byte {
@@ -71,9 +136,9 @@ func appendKey(dst []byte, v Value) []byte {
 	case Int, BigInt, Float, Decimal:
 		return appendNumberKey(dst, v)
 	case Text:
-		return appendEscaped(dst, x.s)
+		return appendStrKey(dst, x.s)
 	case Bytes:
-		return appendEscaped(dst, string(x.b))
+		return appendStrKey(dst, string(x.b))
 	case Date:
 		return binary.BigEndian.AppendUint32(dst, uint32(x.days)^1<<31)
 	case Time:

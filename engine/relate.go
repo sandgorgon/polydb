@@ -22,6 +22,10 @@ const (
 // defined is registered on first use. props are the relation's
 // properties; for a defined type they must match its declared properties.
 func (tx *Tx) Relate(from value.ID, typ string, to value.ID, props Fields) (value.ID, error) {
+	return tx.relate(tx.newID(), from, typ, to, props)
+}
+
+func (tx *Tx) relate(id, from value.ID, typ string, to value.ID, props Fields) (value.ID, error) {
 	if err := tx.writable(); err != nil {
 		return value.ID{}, err
 	}
@@ -53,7 +57,7 @@ func (tx *Tx) Relate(from value.ID, typ string, to value.ID, props Fields) (valu
 	if err := tx.checkMax(rt, keys.PrefixIn, to, rt.MaxIn); err != nil {
 		return value.ID{}, err
 	}
-	rel := &model.Relation{ID: tx.newID(), Type: rt.ID, From: from, To: to, Props: pm}
+	rel := &model.Relation{ID: id, Type: rt.ID, From: from, To: to, Props: pm}
 	tx.writeRelation(rel)
 	return rel.ID, nil
 }

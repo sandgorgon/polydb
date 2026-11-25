@@ -207,6 +207,7 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 0x23 | CLOSE_STATEMENT | C → S | new |
 | 0x24 | BLOB_READ | C → S | new |
 | 0x25 | CANCEL | C → S | the stream to cancel |
+| 0x26 | BLOB_WRITE | C → S | new (first), then the upload's |
 | 0x40 | RESULT_HEADER | S → C | request's |
 | 0x41 | ROWS | S → C | request's |
 | 0x42 | RESULT_END | S → C | request's |
@@ -214,6 +215,7 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 0x44 | PREPARED | S → C | request's |
 | 0x45 | BLOB_DATA | S → C | request's |
 | 0x46 | NOTICE | S → C | request's |
+| 0x47 | BLOB_STORED | S → C | request's |
 | 0x60–0x6F | reserved: change subscriptions | | |
 | 0x70–0x7F | reserved: replication between servers (multi-node) | | |
 
@@ -262,11 +264,12 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 1 | text | text | one or more Rhizome statements |
 | 2 | params | `map<text, any>` | values for `$name` parameters |
 | 3 | txn | id? | run inside this transaction (see below) |
-| 4 | options | `map<text, any>` | per-request settings: `timeout`, `max_rows`, `explain` |
+| 4 | options | `map<text, any>` | per-request settings: `timeout`, `max_rows`, `max_load`, `explain` |
+| 5 | blob_params | `map<text, bytes>` | parameters whose values are blob references: name → lease token (from BLOB_STORED or a result); §7 |
 
 **PREPARE**: `text` (one statement). The reply is PREPARED: `statement_id` (int), `param_types` (`map<text, text>`, type expressions) and `columns` (as in RESULT_HEADER, if known in advance).
 
-**EXECUTE**: `statement_id`, `params`, `txn` and `options`, as in QUERY.
+**EXECUTE**: `statement_id`, `params`, `txn`, `options` and `blob_params`, as in QUERY.
 
 **CLOSE_STATEMENT**: `statement_id`. Statements are also freed when the connection closes.
 
@@ -349,7 +352,18 @@ Values larger than `inline_value_limit` (bytes, text, image data) are sent as **
 - The server replies with **BLOB_DATA** messages: `offset` and `data` (bytes), in order, with `END_STREAM` on the last.
 - Flow control applies (§8), so a client can read a 4 GiB video at its own pace. Ranges allow partial reads (headers, video seeking).
 - **Lease token:** a blob reference is valid while its transaction is open, or for **10 minutes** after its RESULT_END for auto-commit requests (server setting). The token proves the client was allowed to read the value, so BLOB_READ doesn't re-check permissions. After expiry, BLOB_READ fails with `lease_expired`.
-- The Go client exposes blob references as an `io.ReaderAt` plus `io.Reader` that fetches lazily, so apps rarely see the difference.
+- **Where leased content lives:** a stored large value goes into a result unread (types.md §13.1), and its lease reads it from the blob store, keeping the segments it needs until it expires; the server never holds the value in memory. Computed values are held in memory for the lease time.
+- The Go client exposes blob references as an `io.ReaderAt` plus an `io.Reader` that fetches 1 MiB at a time, so apps rarely see the difference. The embedded API returns large stored values the same way, as a `*polydb.Blob` read when the application reads it.
+
+**Uploads** (feature `blob-write`) send a large value to the server ahead of the request that uses it, in pieces, so it never has to fit in one message:
+
+- **BLOB_WRITE** fields: 1 `type` (text: `text`, `bytes` or `image`; first message), 2 `media_type` (text?, for bytes; first message), 3 `data` (bytes: the next piece), 4 `last` (bool). The first BLOB_WRITE opens a stream; the rest of the content follows in further BLOB_WRITE messages on that stream, the last one with `last` set (and `END_STREAM`). Pieces of 256 KiB are typical.
+- The server stores the pieces in the current database's blob store as they arrive. Uploads aren't flow-controlled by windows: the server reads each piece once it has stored the previous one, so TCP backpressure paces the client.
+- **BLOB_STORED** answers the last piece: 1 `ref`, a blob reference (§6.5) with a lease token, valid for the lease time. BLOB_READ reads it like any other.
+- The server checks an upload as a value of its type while storing it: text is normalized to NFC and must be valid UTF-8, and an image must start with a supported format's header. BLOB_STORED's `hash` and `length` are those of the stored (normalized) content.
+- A request passes the reference in `blob_params`. The statement gets the stored content without the server reading it back, and fails with `type` if the upload wasn't a valid value of its type. A blob reference from a result can be passed the same way, so a large value can be copied without sending it back.
+- An upload needs a database in use (`not_found` otherwise) and write permission somewhere in it: a write or admin grant on the server, the database or one of its kinds (`permission` otherwise). Storing the upload in a field is checked against that field's kind like any write; text is limited to 64 MiB, bytes and images to 4 GiB (`limit`). A client that stops sending sends CANCEL; what the server stored of it becomes garbage for the collector. Content that no statement uses within the lease time is removed by the blob store's collector.
+- The Go client's `(*client.Conn).Upload(ctx, r, type, mediaType)` returns a `*polydb.Blob` to pass as a parameter; blobs from results are passed by token too.
 
 ---
 
@@ -378,6 +392,7 @@ Flow control stops a fast sender from flooding a slow receiver. It works like HT
   |---|---|
   | `deflate` | message compression (§10) |
   | `blob-range` | BLOB_READ with offset and length (always on in 1.0; listed so later majors can drop it) |
+  | `blob-write` | uploads: BLOB_WRITE, BLOB_STORED and `blob_params` (§7; protocol 1.0, added in Phase 6) |
   | `queue-wait` | blocking `pop … wait` |
 
 - Reserved names for later: `subscriptions`, `client-cert`, `zstd`.

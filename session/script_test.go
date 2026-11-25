@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -86,13 +87,32 @@ func newScriptSession(t *testing.T, disk bool) *Session {
 	return s
 }
 
+// testClock is a clock tests move while background work reads it.
+type testClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *testClock) Set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = t
+}
+
+func (c *testClock) Add(d time.Duration) { c.Set(c.Now().Add(d)) }
+
 // newClockedSession also returns the engine's clock, which the caller may
 // move.
-func newClockedSession(t *testing.T, disk bool) (*Session, *time.Time) {
+func newClockedSession(t *testing.T, disk bool) (*Session, *testClock) {
 	t.Helper()
-	clock := new(time.Time)
-	*clock = time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
-	o := engine.Options{Now: func() time.Time { return *clock }, MaxPopWait: time.Minute,
+	clock := &testClock{t: time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)}
+	o := engine.Options{Now: clock.Now, MaxPopWait: time.Minute,
 		PasswordIterations: security.MinIterations}
 	if disk {
 		o.Dir, o.FS = "/data", vfs.NewMem()
@@ -129,7 +149,7 @@ func runScript(t *testing.T, file string, disk bool) {
 			if err != nil {
 				t.Fatalf("%s:%d: %v", file, i+1, err)
 			}
-			*clock = c
+			clock.Set(c)
 			out = append(out, lines[i])
 			chunk, chunkStart = nil, i+2
 			i++

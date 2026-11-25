@@ -75,6 +75,12 @@ func (s *env) authorize(qc *query.Context, st lang.Stmt) error {
 		return s.need(st, security.Define, kind(st.Name))
 	case *lang.DefineIndex:
 		return s.need(st, security.Define, kind(st.Kind))
+	case *lang.Rebuild:
+		var k *model.Kind
+		if ix, ok := cat.Index(st.Index); ok {
+			k, _ = cat.KindByID(ix.Kind)
+		}
+		return s.need(st, security.Define, k)
 	case *lang.Drop:
 		switch st.What {
 		case "kind":
@@ -105,6 +111,8 @@ func (s *env) authorize(qc *query.Context, st lang.Stmt) error {
 			}
 		}
 		return s.authorize(qc, st.Stmt)
+	case *lang.Analyze:
+		return s.need(st, security.Read, kind(st.Kind))
 	case *lang.ShowStmt:
 		if !s.eng.Security().CanSee(s.user, s.Database()) {
 			return denied(st, "you don't have permission on database %s", s.Database())

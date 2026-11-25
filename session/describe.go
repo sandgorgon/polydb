@@ -429,6 +429,33 @@ func (s *env) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) 
 			add(r, f.Name, f.Base, f.Doc)
 		}
 		return r, nil
+	case "alters":
+		r := table("kind", "phase", "done", "total", "failed", "rewrite", "started", "finished", "error")
+		alters, err := tx.Alters()
+		if err != nil {
+			return nil, failAt(st, err)
+		}
+		for _, a := range alters {
+			msg := a.Err
+			if len(a.Errors) > 0 {
+				msg = a.Errors[0]
+				if a.Failed > 1 {
+					msg += fmt.Sprintf(" (and %d more)", a.Failed-1)
+				}
+			}
+			started, _ := value.NewTime(a.Started)
+			var finished value.Value
+			if !a.Finished.IsZero() {
+				finished, _ = value.NewTime(a.Finished)
+			}
+			var errText any
+			if msg != "" {
+				errText = msg
+			}
+			add(r, a.Kind, a.Phase, value.Int(a.Done), value.Int(a.Total), value.Int(a.Failed), value.Bool(a.Rewrite),
+				started, finished, errText)
+		}
+		return r, nil
 	case "indexes":
 		r := table("name", "kind", "type", "keys", "status")
 		for _, ix := range cat.Indexes() {
@@ -473,9 +500,12 @@ func (s *env) show(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) 
 	return nil, sessionErr(st, "unsupported", "show %s arrives with security and the server in a later phase", st.What)
 }
 
-// kindStats shows, for each declared field of a kind, how many entities
-// have a value, how many hold null, and how many distinct values there
-// are.
+// kindStats shows the planner's statistics for a kind (spec/rhizome.md
+// §12): for each field and doc path of an index key, about how many
+// entities have a value, hold null, and how many distinct values there
+// are, with the most common values. They come from a sample, so they are
+// exact only for kinds no bigger than it. A kind not sampled yet is
+// sampled now, without storing the result.
 func (s *env) kindStats(qc *query.Context, st *lang.ShowStmt) (*query.Result, error) {
 	tx := qc.Tx
 	k, ok := tx.Catalog().Kind(st.For)
@@ -486,43 +516,58 @@ func (s *env) kindStats(qc *query.Context, st *lang.ShowStmt) (*query.Result, er
 	if err := s.need(st, security.Read, k); err != nil {
 		return nil, err
 	}
-	type stat struct {
-		present, nulls int
-		distinct       map[string]bool
+	ks, err := tx.KindStats(k)
+	stored := ks != nil
+	if err == nil && ks == nil {
+		ks, err = tx.SampleStats(k)
 	}
-	stats := make([]stat, len(k.Fields))
-	for i := range stats {
-		stats[i].distinct = map[string]bool{}
-	}
-	var ids []value.ID
-	if err := tx.Entities(k.Name, func(id value.ID) bool { ids = append(ids, id); return true }); err != nil {
+	if err != nil {
 		return nil, failAt(st, err)
 	}
-	for _, id := range ids {
-		e, err := tx.Get(id)
-		if err != nil {
-			return nil, failAt(st, err)
-		}
-		for i, fd := range k.Fields {
-			f, ok := e.Field(fd.Name)
-			if !ok || f.Value == nil {
-				continue
-			}
-			if value.IsNull(f.Value) {
-				stats[i].nulls++
-				continue
-			}
-			stats[i].present++
-			key, err := value.Key(f.Value)
-			if err != nil {
-				key = value.Encode(f.Value)
-			}
-			stats[i].distinct[string(key)] = true
-		}
+	return statsTable(k, ks, stored), nil
+}
+
+// analyzeKind samples a kind's statistics now, stores them, and shows them.
+func (s *env) analyzeKind(qc *query.Context, st *lang.Analyze) (*query.Result, error) {
+	k, ok := qc.Tx.Catalog().Kind(st.Kind)
+	if !ok {
+		return nil, sessionErr(st, "not_found", "no kind %s", st.Kind)
 	}
-	r := table("field", "type", "present", "null", "distinct")
-	for i, fd := range k.Fields {
-		add(r, fd.Name, fd.Type.String(), stats[i].present, stats[i].nulls, len(stats[i].distinct))
+	ks, err := s.db.Analyze(k.Name)
+	if err != nil {
+		return nil, failAt(st, err)
 	}
-	return r, nil
+	return statsTable(k, ks, true), nil
+}
+
+func statsTable(k *model.Kind, ks *engine.KindStats, stored bool) *query.Result {
+	r := table("field", "type", "present", "null", "distinct", "common")
+	at, _ := value.NewTime(ks.At)
+	note := fmt.Sprintf("sampled %d at %s", ks.Sampled, at)
+	if !stored {
+		note = "not analyzed yet: sampled " + fmt.Sprint(ks.Sampled) + " now"
+	}
+	add(r, "(entities)", nil, ks.Entities, nil, nil, note)
+	scale := func(n int) int {
+		if ks.Sampled == 0 {
+			return 0
+		}
+		return int(float64(n)*float64(ks.Entities)/float64(ks.Sampled) + 0.5)
+	}
+	for _, c := range ks.Columns {
+		var typ any
+		if len(c.Key.Path) == 0 {
+			if fd, ok := k.Field(c.Key.Field); ok {
+				typ = fd.Type.String()
+			}
+		}
+		common := []string{}
+		top := slices.Clone(c.Common)
+		slices.SortStableFunc(top, func(a, b engine.Common) int { return b.Count - a.Count })
+		for _, m := range top[:min(3, len(top))] {
+			common = append(common, fmt.Sprintf("%s (%d%%)", m.Text, m.Count*100/max(ks.Sampled, 1)))
+		}
+		add(r, engine.ColumnName(c.Key), typ, scale(c.Present), scale(c.Nulls), c.Distinct, strings.Join(common, ", "))
+	}
+	return r
 }

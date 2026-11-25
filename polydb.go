@@ -172,12 +172,27 @@ type Blob struct {
 	MediaType string
 	// fetch reads length bytes at offset.
 	fetch func(ctx context.Context, offset, length int64) ([]byte, error)
+	// token is the server's lease on the content, which lets the blob be
+	// passed back as a parameter without sending the content again.
+	token []byte
+	// lazy is the value an embedded database returned, which goes back
+	// as a parameter without being read.
+	lazy *value.Lazy
 }
 
 // NewBlob returns a blob read with fetch. Implementations of DB use it.
 func NewBlob(typ string, length int64, mediaType string, fetch func(ctx context.Context, offset, length int64) ([]byte, error)) *Blob {
 	return &Blob{Type: typ, Length: length, MediaType: mediaType, fetch: fetch}
 }
+
+// NewLeasedBlob is NewBlob for content a server holds under a lease
+// token. Passed as a parameter, such a blob sends only the token.
+func NewLeasedBlob(typ string, length int64, mediaType string, token []byte, fetch func(ctx context.Context, offset, length int64) ([]byte, error)) *Blob {
+	return &Blob{Type: typ, Length: length, MediaType: mediaType, fetch: fetch, token: token}
+}
+
+// Token returns the blob's lease token, or nil.
+func (b *Blob) Token() []byte { return b.token }
 
 // ReadAt implements io.ReaderAt.
 func (b *Blob) ReadAt(p []byte, off int64) (int, error) {
@@ -193,14 +208,74 @@ func (b *Blob) ReadAt(p []byte, off int64) (int, error) {
 	return len(data), err
 }
 
-// Reader returns a reader of the whole blob.
-func (b *Blob) Reader() io.Reader { return io.NewSectionReader(b, 0, b.Length) }
+// Reader returns a reader of the whole blob. It fetches the content in
+// pieces of 1 MiB, however little each Read asks for, and io.Copy
+// writes each piece as it arrives.
+func (b *Blob) Reader() io.Reader { return &blobReader{b: b} }
+
+// blobPiece is how much a blob's Reader fetches at a time.
+const blobPiece = 1 << 20
+
+type blobReader struct {
+	b   *Blob
+	off int64  // where buf starts in the blob
+	buf []byte // fetched, not yet read
+}
+
+func (r *blobReader) fill() error {
+	if len(r.buf) > 0 {
+		return nil
+	}
+	if r.off >= r.b.Length {
+		return io.EOF
+	}
+	n := min(blobPiece, r.b.Length-r.off)
+	data, err := r.b.fetch(context.Background(), r.off, n)
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != n {
+		return io.ErrUnexpectedEOF
+	}
+	r.buf = data
+	return nil
+}
+
+func (r *blobReader) Read(p []byte) (int, error) {
+	if err := r.fill(); err != nil {
+		return 0, err
+	}
+	n := copy(p, r.buf)
+	r.buf, r.off = r.buf[n:], r.off+int64(n)
+	return n, nil
+}
+
+// WriteTo writes the rest of the blob to w, a piece at a time.
+func (r *blobReader) WriteTo(w io.Writer) (int64, error) {
+	var total int64
+	for {
+		if err := r.fill(); err == io.EOF {
+			return total, nil
+		} else if err != nil {
+			return total, err
+		}
+		n, err := w.Write(r.buf)
+		total += int64(n)
+		r.buf, r.off = r.buf[n:], r.off+int64(n)
+		if err != nil {
+			return total, err
+		}
+	}
+}
 
 // Bytes reads the whole blob.
 func (b *Blob) Bytes(ctx context.Context) ([]byte, error) { return b.fetch(ctx, 0, b.Length) }
 
 // Value reads the whole blob as the value it stands for.
 func (b *Blob) Value(ctx context.Context) (value.Value, error) {
+	if b.lazy != nil {
+		return b.lazy.Load()
+	}
 	data, err := b.Bytes(ctx)
 	if err != nil {
 		return nil, err

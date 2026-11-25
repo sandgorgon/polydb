@@ -21,7 +21,7 @@ type TypeCodec interface {
 
 // fields decodes a record list and checks its length.
 func fields(b []byte, what string, n int) ([]value.Value, error) {
-	v, err := value.Decode(b)
+	v, err := value.DecodeStored(b)
 	if err != nil {
 		return nil, fmt.Errorf("keys: %s record: %w", what, err)
 	}
@@ -88,6 +88,17 @@ func optID(id value.ID) value.Value {
 func EncodeEntity(e *model.Entity) []byte {
 	return list(optID(e.Kind), e.Meta.Created, e.Meta.Updated, value.Int(e.Meta.Version),
 		e.Meta.Labels, value.MustText(e.Meta.Owner), e.Meta.Props)
+}
+
+// EntityKind decodes only an entity record's kind (zero for kindless).
+func EntityKind(b []byte) (value.ID, error) {
+	vs, err := value.DecodeListHead(b, 1)
+	if err != nil || len(vs) != 1 {
+		return value.ID{}, fmt.Errorf("keys: entity record: %v", err)
+	}
+	r := &reader{what: "entity", vs: vs}
+	id := r.optID()
+	return id, r.err
 }
 
 // DecodeEntity decodes an entity header.

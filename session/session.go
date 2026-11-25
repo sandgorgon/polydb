@@ -71,8 +71,10 @@ type Txn struct {
 // engine's system store; embedded programs usually run as
 // security.AdminUser. No database is in use until "use".
 func New(eng *engine.Engine, user string) *Session {
+	settings := query.DefaultSettings
+	settings.MaxLoad = max(eng.MaxLoad(), 0)
 	return &Session{eng: eng, user: user, ids: value.NewIDGenerator(0), handles: map[string]query.Handle{},
-		settings: query.DefaultSettings, txns: map[value.ID]*Txn{}, prepared: map[int64]lang.Stmt{}}
+		settings: settings, txns: map[value.ID]*Txn{}, prepared: map[int64]lang.Stmt{}}
 }
 
 // User returns the session's user.
@@ -250,6 +252,11 @@ type Request struct {
 	// Settings, if set, replace the session's settings for this request
 	// (QUERY options).
 	Settings *query.Settings
+	// LazyResults leaves large values in results as value.Lazy, for a
+	// caller that sends or reads them a piece at a time (query.Context).
+	LazyResults bool
+	closed      bool
+	plan        *query.SourcePlan // the last statement's, when it was slow
 }
 
 // Request starts a request in transaction txn (nil for none). A
@@ -277,10 +284,12 @@ func (s *Session) Request(txn *value.ID) (*Request, error) {
 }
 
 // Close ends the request, releasing its transaction for the next one.
+// Calls after the first do nothing.
 func (r *Request) Close() {
-	if r.txn == nil {
+	if r.txn == nil || r.closed {
 		return
 	}
+	r.closed = true
 	r.s.mu.Lock()
 	r.txn.busy, r.txn.used = false, time.Now()
 	r.s.mu.Unlock()
@@ -309,7 +318,14 @@ func (r *Request) Exec(ctx context.Context, st lang.Stmt, params map[string]valu
 			return nil, sessionErr(st, "txn_aborted", "the transaction failed earlier (%v); roll it back to continue", t.aborted)
 		}
 	}
+	r.plan = nil
+	began := time.Now()
 	res, err := r.exec(ctx, st, params)
+	if slow := r.s.eng.SlowQueryThreshold(); slow > 0 {
+		if d := time.Since(began); d >= slow && !waits(st) {
+			r.noteSlow(st, d, res, err)
+		}
+	}
 	if err != nil && r.txn != nil {
 		// Any error inside an explicit transaction aborts it, so that the
 		// statements after it can't run as if it had worked.
@@ -367,6 +383,14 @@ func (r *Request) db(st lang.Node) (*engine.DB, error) {
 func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]value.Value) (*query.Result, error) {
 	s := r.s
 	switch st := st.(type) {
+	case *lang.Backup:
+		return r.backup(ctx, st, params)
+	case *lang.Export:
+		return r.export(ctx, st, params)
+	case *lang.Import:
+		return r.importStmt(ctx, st, params)
+	case *lang.Restore:
+		return r.restore(ctx, st, params)
 	case *lang.CreateDatabase:
 		if err := r.noTx(st, "create database"); err != nil {
 			return nil, err
@@ -421,6 +445,8 @@ func (r *Request) exec(ctx context.Context, st lang.Stmt, params map[string]valu
 			return res, nil
 		}
 		switch st.What {
+		case "slow":
+			return s.showSlow(st)
 		case "users", "roles", "grants", "keys", "sessions":
 			return r.env(nil).showSecurity(st)
 		}
@@ -546,6 +572,12 @@ func (s *Session) set(st *lang.SetSetting, params map[string]value.Value) (*quer
 			return nil, sessionErr(st, "constraint", "timeout can't be negative; 0s means no timeout")
 		}
 		s.settings.Timeout = time.Duration(d)
+	case "max_load":
+		n, _ := v.(value.Int)
+		if n < 0 {
+			return nil, sessionErr(st, "constraint", "max_load can't be negative; 0 means no limit")
+		}
+		s.settings.MaxLoad = int64(n)
 	case "max_rows", "max_depth":
 		n, _ := v.(value.Int)
 		if n < 0 || st.Name == "max_depth" && n == 0 {
@@ -598,8 +630,12 @@ func (r *Request) inTx(ctx context.Context, st lang.Stmt, params map[string]valu
 	e := r.env(db)
 	qc := &query.Context{
 		Tx: tx, Handles: view, Params: params, Settings: settings,
-		Interrupt: func() error { return interrupted(ctx, settings.Timeout) },
-		Access:    e.access(),
+		Interrupt:   func() error { return interrupted(ctx, settings.Timeout) },
+		Access:      e.access(),
+		LazyResults: r.LazyResults,
+	}
+	if slow := s.eng.SlowQueryThreshold(); slow > 0 {
+		qc.Planned, qc.PlanIfSlower = func(sp *query.SourcePlan) { r.plan = sp }, slow
 	}
 	if auto && !noWait {
 		qc.Wait = func(id value.ID, field string, wait time.Duration) (value.Value, error) {
@@ -674,6 +710,8 @@ func (e *env) run(ctx context.Context, qc *query.Context, st lang.Stmt) (*query.
 		return e.describe(qc, st)
 	case *lang.ShowStmt:
 		return e.show(qc, st)
+	case *lang.Analyze:
+		return e.analyzeKind(qc, st)
 	case *lang.Explain:
 		return e.explain(ctx, qc, st)
 	}

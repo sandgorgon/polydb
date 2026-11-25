@@ -81,6 +81,11 @@ func TestPermissions(t *testing.T) {
 	if !s.CanSee("ramon", "sales") || s.CanSee("ramon", "hr") || !s.CanSee("admin", "hr") {
 		t.Error("CanSee")
 	}
+	// ramon writes kind k1 in sales through staff → analyst; eve has nothing.
+	if !s.CanWriteIn("ramon", "sales") || s.CanWriteIn("ramon", "hr") ||
+		!s.CanWriteIn("admin", "hr") || s.CanWriteIn("eve", "sales") || s.CanWriteIn("nobody", "sales") {
+		t.Error("CanWriteIn")
+	}
 
 	// Database admin covers that database only.
 	must(s.GrantPerm("eve", Admin, Scope{Level: DatabaseLevel, Database: "hr"}))

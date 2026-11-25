@@ -5,6 +5,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/sandgorgon/polydb/blob"
 	"github.com/sandgorgon/polydb/catalog"
 	"github.com/sandgorgon/polydb/keys"
 	"github.com/sandgorgon/polydb/model"
@@ -26,7 +27,18 @@ type Tx struct {
 
 	guarded    bool // the catalog version key is guarded
 	failed     error
-	startBuild bool // it defined an index to build in the background
+	startBuild bool             // it defined an index to build in the background
+	changed    map[value.ID]int // entities saved per kind, for statistics
+
+	blobsPut map[[32]byte]bool // blobs stored or reused (blob.go)
+
+	loadLimit     int64 // SetMaxLoad
+	loadLimitSet  bool
+	importing     bool       // ImportEntity: ref targets may come later
+	alterJob      bool       // a background alter's own transaction
+	startAlterJob bool       // this transaction starts a background alter
+	blobSync      []blob.Loc // chunks to sync before committing
+	commitSeq     *uint64    // set to the commit's sequence number
 }
 
 // Catalog returns the catalog as this transaction sees it, including its
@@ -57,12 +69,24 @@ func (tx *Tx) Commit() error {
 		}
 		tx.t.Set(keys.CatalogVersion, value.Encode(value.Int(newCat.Version())))
 	}
-	if _, err := tx.t.Commit(); err != nil {
+	if err := tx.syncBlobs(); err != nil {
+		tx.t.Rollback()
+		return err
+	}
+	seq, err := tx.t.Commit()
+	if err != nil {
 		code := CodeInternal
 		if err == txn.ErrReadOnly {
 			code = CodeConstraint
 		}
 		return wrap(code, err)
+	}
+	if tx.commitSeq != nil {
+		*tx.commitSeq = seq
+	}
+	if tx.startAlterJob {
+		tx.startAlterJob = false
+		tx.db.kickAlterer()
 	}
 	if newCat != nil {
 		tx.db.setCatalog(newCat)
@@ -70,11 +94,20 @@ func (tx *Tx) Commit() error {
 	if tx.startBuild {
 		tx.db.kickBuilder()
 	}
+	for kind, n := range tx.changed {
+		tx.db.changes(kind).Add(int64(n))
+	}
 	return nil
 }
 
 // Rollback discards the transaction. It is safe to call after Commit.
-func (tx *Tx) Rollback() { tx.t.Rollback() }
+func (tx *Tx) Rollback() {
+	if tx.startAlterJob {
+		tx.startAlterJob = false
+		tx.db.alters.Add(-1)
+	}
+	tx.t.Rollback()
+}
 
 // writable checks the transaction may write, and guards the catalog
 // version so a concurrent definition change makes one of the two fail.
@@ -178,9 +211,18 @@ type entState struct {
 	orig     map[string]*model.Field // as loaded; nil for a new entity
 	isNew    bool
 	deleted  bool
+	// blobs names the loaded fields whose records held blob references.
+	blobs map[string]bool
+	// imported keeps the metadata an import gives (ImportEntity).
+	imported bool
 }
 
-func (tx *Tx) loadEntity(id value.ID) (*entState, error) {
+func (tx *Tx) loadEntity(id value.ID) (*entState, error) { return tx.loadEntityAs(id, true) }
+
+// loadEntityAs loads an entity, with large values as value.Lazy, or left
+// as blob references unless resolve is set. Such a state is only for
+// reading.
+func (tx *Tx) loadEntityAs(id value.ID, resolve bool) (*entState, error) {
 	b, ok, err := tx.get(keys.Entity(id))
 	if err != nil {
 		return nil, err
@@ -209,6 +251,19 @@ func (tx *Tx) loadEntity(id value.ID) (*entState, error) {
 		f, err := keys.DecodeField(id, name, v, cat)
 		if err != nil {
 			return wrap(CodeInternal, err)
+		}
+		if _, ok := f.Value.(value.BlobRef); ok {
+			if !resolve {
+				st.fields[name], st.orig[name] = f, f
+				return nil
+			}
+			if f.Value, err = tx.lazy(f.Value); err != nil {
+				return err
+			}
+			if st.blobs == nil {
+				st.blobs = map[string]bool{}
+			}
+			st.blobs[name] = true
 		}
 		st.fields[name], st.orig[name] = f, f
 		return nil
@@ -250,6 +305,14 @@ func (tx *Tx) save(st *entState) error {
 	}
 	cat := tx.Catalog()
 	id := st.e.ID
+	if err := tx.checkNotAltering(st.kind); err != nil {
+		return err
+	}
+	if st.origKind != st.kind {
+		if err := tx.checkNotAltering(st.origKind); err != nil {
+			return err
+		}
+	}
 	if !st.deleted {
 		if err := tx.emptyQueues(st); err != nil {
 			return err
@@ -262,17 +325,49 @@ func (tx *Tx) save(st *entState) error {
 		}
 	}
 
-	if err := tx.recordHistory(st); err != nil {
+	// What the changed fields' records hold: large values go to the blob
+	// store first, and history versions hold the same references.
+	stored := map[string]value.Value{}
+	if !st.deleted {
+		for name, f := range st.fields {
+			if old, ok := st.orig[name]; (ok && old == f) || f.Value == nil {
+				continue
+			}
+			v, err := tx.storeValue(id, f.Value)
+			if err != nil {
+				return err
+			}
+			stored[name] = v
+		}
+	}
+	if err := tx.droppedBlobs(st); err != nil {
 		return err
+	}
+	if err := tx.recordHistory(st, stored); err != nil {
+		return err
+	}
+	if k := st.kind; k != nil || st.origKind != nil {
+		if k == nil || st.deleted {
+			k = st.origKind
+		}
+		if tx.changed == nil {
+			tx.changed = map[value.ID]int{}
+		}
+		tx.changed[k.ID]++
 	}
 
 	// Side keys: compute before and after, then write the difference.
 	var before, after map[string][]byte
+	var err error
 	if !st.isNew {
-		before = tx.sideKeys(st.origKind, st.e, st.orig)
+		if before, err = tx.sideKeys(st.origKind, st.e, st.orig); err != nil {
+			return err
+		}
 	}
 	if !st.deleted {
-		after = tx.sideKeys(st.kind, st.e, st.fields)
+		if after, err = tx.sideKeys(st.kind, st.e, st.fields); err != nil {
+			return err
+		}
 	}
 	for k := range before {
 		if _, ok := after[k]; !ok {
@@ -308,7 +403,13 @@ func (tx *Tx) save(st *entState) error {
 			if old, ok := st.orig[name]; ok && old == f {
 				continue // unchanged
 			}
-			rec, err := keys.EncodeField(f, cat)
+			out := f
+			if ref, ok := stored[name].(value.BlobRef); ok {
+				cp := *f
+				cp.Value = ref
+				out = &cp
+			}
+			rec, err := keys.EncodeField(out, cat)
 			if err != nil {
 				return wrap(CodeInternal, err)
 			}
@@ -328,8 +429,10 @@ func (tx *Tx) save(st *entState) error {
 		}
 		return nil
 	}
-	st.e.Meta.Version++
-	st.e.Meta.Updated = tx.timeNow()
+	if !st.imported {
+		st.e.Meta.Version++
+		st.e.Meta.Updated = tx.timeNow()
+	}
 	tx.t.Set(keys.Entity(id), keys.EncodeEntity(st.e))
 	if st.isNew {
 		tx.t.Set(keys.Node(id), keys.EncodeNode(keys.NodeRef{Kind: model.NodeEntity}))
@@ -386,9 +489,23 @@ func checkRequired(st *entState) error {
 	return nil
 }
 
+// valueKey appends v's key to dst; ok is false if v can't be a key. A
+// large value's key holds its start and hash (value.KeyPrefixLen), and
+// reading a lazy value's start can fail.
+func valueKey(dst []byte, v value.Value) ([]byte, bool, error) {
+	if !value.IsKeyable(v) {
+		return dst, false, nil
+	}
+	k, err := value.AppendKey(dst, v)
+	if err != nil {
+		return dst, false, wrap(CodeInternal, err)
+	}
+	return k, true, nil
+}
+
 // sideKeys returns the unique and back-ref keys an entity's fields need,
 // with their values.
-func (tx *Tx) sideKeys(kind *model.Kind, e *model.Entity, fields map[string]*model.Field) map[string][]byte {
+func (tx *Tx) sideKeys(kind *model.Kind, e *model.Entity, fields map[string]*model.Field) (map[string][]byte, error) {
 	out := map[string][]byte{}
 	for _, f := range fields {
 		fd := fieldDef(kind, f)
@@ -401,40 +518,52 @@ func (tx *Tx) sideKeys(kind *model.Kind, e *model.Entity, fields map[string]*mod
 			}
 		}
 		if fd.Unique && f.Declared && kind != nil && !value.IsNull(f.Value) {
-			if k, err := value.Key(f.Value); err == nil {
+			k, ok, err := valueKey(nil, f.Value)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				out[string(keys.Unique(kind.ID, f.Name, k))] = e.ID[:]
 			}
 		}
 	}
 	if kind != nil {
 		for _, ix := range tx.Catalog().IndexesOn(kind.ID) {
-			if k, ok := uniqueIndexKey(ix, fields); ok {
+			k, ok, err := uniqueIndexKey(ix, fields)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				out[string(k)] = e.ID[:]
 			}
-			for k, v := range tx.indexEntries(ix, e.ID, fields) {
+			entries, err := tx.indexEntries(ix, e.ID, fields)
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range entries {
 				out[k] = v
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // uniqueIndexKey returns the unique key of a unique index for the given
 // fields, or false if the index isn't unique or a field is absent or null.
-func uniqueIndexKey(ix *model.Index, fields map[string]*model.Field) ([]byte, bool) {
+func uniqueIndexKey(ix *model.Index, fields map[string]*model.Field) ([]byte, bool, error) {
 	if !ix.Unique {
-		return nil, false
+		return nil, false, nil
 	}
 	var vals []byte
 	for _, k := range ix.Keys {
 		f, ok := fields[k.Field]
 		if !ok || f.Value == nil || value.IsNull(f.Value) || len(k.Path) > 0 {
-			return nil, false
+			return nil, false, nil
 		}
 		var err error
-		if vals, err = value.AppendKey(vals, f.Value); err != nil {
-			return nil, false
+		if vals, ok, err = valueKey(vals, f.Value); !ok || err != nil {
+			return nil, false, err
 		}
 	}
-	return keys.Unique(ix.ID, "", vals), true
+	return keys.Unique(ix.ID, "", vals), true, nil
 }

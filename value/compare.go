@@ -46,6 +46,8 @@ func group(c Code) int {
 		return 16
 	case CodeFifo, CodeLifo, CodeRing, CodePriority:
 		return 17
+	case CodeBlobRef:
+		return 18
 	}
 	panic(fmt.Sprintf("value: no sort group for %s", c))
 }
@@ -58,7 +60,18 @@ func code(v Value) Code {
 	if v == nil {
 		return CodeNull
 	}
+	if _, ok := v.(Lazy); ok {
+		return CodeBlobRef // compared by reference; see Lazy
+	}
 	return v.Code()
+}
+
+// refHash returns the hash of a BlobRef or a Lazy's reference.
+func refHash(v Value) [32]byte {
+	if l, ok := v.(Lazy); ok {
+		return l.Ref.Hash
+	}
+	return v.(BlobRef).Hash
 }
 
 // Equal reports whether a and b are equal. Numbers are equal when their
@@ -96,6 +109,9 @@ func Compare(a, b Value) int {
 		return bytes.Compare(x[:], y[:])
 	case 10:
 		x, y := a.(Ref).Target, b.(Ref).Target
+		return bytes.Compare(x[:], y[:])
+	case 18:
+		x, y := refHash(a), refHash(b)
 		return bytes.Compare(x[:], y[:])
 	}
 	return compareComposite(a, b)

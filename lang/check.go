@@ -230,6 +230,26 @@ func (c *checker) stmt(s Stmt, sc *scope) error {
 		return nil
 	case *SetSetting:
 		return c.setSetting(s)
+	case *Rebuild:
+		return nil
+	case *Export:
+		if s.Path != nil {
+			if err := c.constText(s.Path, "an export path"); err != nil {
+				return err
+			}
+		}
+		if s.Query != nil {
+			return c.stmt(s.Query, sc)
+		}
+		return nil
+	case *Import:
+		sc := newScope()
+		sc.noRows = "an import source"
+		return c.write(s.Source, value.TypeAny, sc)
+	case *Backup:
+		return c.constText(s.Path, "a backup path")
+	case *Restore:
+		return c.constText(s.Path, "a backup path")
 	case *DefineKind:
 		return c.defineKind(s)
 	case *AlterKind:
@@ -266,6 +286,9 @@ func (c *checker) stmt(s Stmt, sc *scope) error {
 		return err
 	case *Describe:
 		return c.describe(s)
+	case *Analyze:
+		_, err := c.kind(s.P, s.Kind)
+		return err
 	case *ShowStmt:
 		if s.What == "stats" && s.For != "" {
 			_, err := c.kind(s.P, s.For)
@@ -286,6 +309,15 @@ var settings = map[string]*value.Type{
 	"timeout":   value.TypeDuration,
 	"max_rows":  value.TypeInt,
 	"max_depth": value.TypeInt,
+	"max_load":  value.TypeInt,
+}
+
+// constText checks an expression that must be text from constants and
+// parameters only.
+func (c *checker) constText(e Expr, what string) error {
+	sc := newScope()
+	sc.noRows = what
+	return c.write(e, value.TypeText, sc)
 }
 
 func (c *checker) setSetting(s *SetSetting) error {

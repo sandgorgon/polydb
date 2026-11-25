@@ -376,16 +376,59 @@ Used inside the storage engine for index keys and sorting.
 - It starts with a byte for the type group (section 11.2) so different types sort correctly against each other. All numeric types share one encoding so that `1` and `1.0` encode identically.
 - Techniques: sign-flipped big-endian integers and zero-byte escaping for text and bytes. **Numbers** of every type are written as their exact decimal value, `0.d1d2… × 10^E`: a class byte (−inf, negative, zero, positive, +inf, NaN), the exponent, then the digits in pairs. Every float has a finite decimal expansion, so this is exact and agrees with §11.1 (the float `0.1` sorts just above `0.1d`). The cost is long keys for floats with extreme exponents.
 - Keys are self-delimiting (no key is a prefix of another), so composite keys are plain concatenations. The full layout is documented at the top of value/key.go.
+- **Long text and bytes:** a value longer than 256 bytes is keyed by its first 256 bytes and the SHA-256 of its content. Keys stay small, and a value in the blob store is keyed without loading it. Two such keys are equal exactly when the values are, and they order correctly against every other key; but two long values with the same first 256 bytes order by hash, not content. Unique constraints and equality lookups are exact. A range or `starts with` lookup whose bound is longer than 256 bytes scans instead of using the index, and reading an index in order (top-N) reads on through values that share their first 256 bytes, so results always follow §11.
 - It can't always be decoded back to the exact original type (for example, `1` and `1.0` encode the same). Indexes therefore point back to the stored value, which keeps the real type.
+
+### 12.3 JSON form
+Used by exports (rhizome.md §4). It is exact: reading it back gives the value that was written.
+
+- **Plain JSON** where JSON has the type: `null`, `true`/`false`, int as a number, text as a string, list as an array, and a map whose keys are all text not starting with `$` as an object.
+- **Every other value** is an object with one key starting with `$` that names its type, plus, for some, plain keys with details:
+
+| Type | Form |
+|---|---|
+| float | `{"$float": 1.5}`, also `"nan"`, `"inf"`, `"-inf"` |
+| bigint, decimal | `{"$bigint": "123…"}`, `{"$decimal": "19.99"}` |
+| bytes, image | `{"$bytes": "<base64>", "media": "image/svg+xml"}`, `{"$image": "<base64>"}` |
+| time, date, duration | `{"$time": "2026-11-21T14:30:00Z"}`, `{"$date": "2026-11-21"}`, `{"$duration": "1h30m"}` |
+| id, ref | `{"$id": "<id>"}`, `{"$ref": "<id>"}` |
+| doc | `{"$doc": "<text>", "format": "invoice"}` |
+| array, set, pair | `{"$array": […]}`, `{"$set": […]}`, `{"$pair": [k, v]}` |
+| other maps | `{"$map": [[k, v], …]}` |
+| record | `{"$record": {"name": v, …}}`, fields in order |
+| queues | `{"$fifo": […], "limit": 10}`, `{"$lifo": …}`, `{"$ring": […], "capacity": 5}`, `{"$priority": [[prio, item], …], "low_first": true, "limit": 0}`, items in pop order |
+| large value in an export | `{"$blob": "<sha256>", "type": "bytes", "len": 123, "media": "…"}`, its content in the export's data records |
+
+- Reading JSON from elsewhere: a number is an int if it is whole and fits in 64 bits, a float otherwise (as for `json` docs), and a whole number beyond 64 bits is an error (write it as `$bigint`).
 
 ---
 
 ## 13. Large values
 
-- **Byte strings, text and images** over **16 KiB** go to the blob store. They're split into 1 MiB chunks, and each chunk is addressed by its SHA-256 hash, so identical content is stored only once. The field holds a blob reference (tag 0x22).
-- **Collections and queues** over **1,000 elements** (or 64 KiB encoded) are stored element by element in the key-value store instead of as one blob. Pushing to a queue, adding to a set or changing one map entry then doesn't rewrite the whole collection.
-- Both thresholds are configurable per database.
+- **Byte strings, text and images** over **16 KiB** go to the blob store. They're split into 1 MiB chunks, and each chunk is addressed by its SHA-256 hash, so identical content is stored only once. The field holds a blob reference (tag 0x22). Only whole field values (and their history versions) are stored this way; a large value inside a collection, a record, metadata or relation properties stays inline.
+- **Collections and queues** over **1,000 elements** (or 64 KiB encoded) are stored element by element in the key-value store instead of as one blob. Pushing to a queue, adding to a set or changing one map entry then doesn't rewrite the whole collection. (Not implemented yet: deferred until after v1.0, see plan.md.)
+- The blob threshold is an engine setting (`engine.Options.BlobThreshold`, at least 4 KiB), the same for every database.
 - None of this is visible to queries.
+
+### 13.1 The blob store
+
+- **Segments:** each database keeps chunks in append-only segment files (`databases/<n>/blobs/00000001.seg`, …), separate from the key-value store, so large values are written once instead of being rewritten by compaction, and don't crowd the cache. A segment is sealed at 256 MiB and a new one started. Each chunk in a segment carries its hash, length and a CRC-32C, checked on every read.
+- **Records in the key-value store:** a blob record per distinct content (its length and chunk hashes), a location record per distinct chunk (segment, offset, length), and a **use record** for each entity that references a blob from a field or a history version. Writers only add use records, each for its own entity, so writers storing the same content never conflict with each other.
+- **Durability:** a transaction's new chunks are synced to their segment before it commits, so a committed reference always finds its data. A crash before the commit leaves unreferenced data at the end of a segment, which a later rewrite reclaims.
+- **Reads are lazy.** Reading a large field gives a reference to its content, not the content. A statement loads the content only where it needs it, and passing a value along loads nothing:
+  - showing it: the server sends it by lease and reads it from the blob store when the client fetches it (protocol.md §7);
+  - storing it in another field or entity: the new use shares the stored content;
+  - `len` (bytes have the length; text counts characters a piece at a time), `is null` and other type tests, `typeof`, `count`, `coalesce` and `if`;
+  - unique constraints and indexes on the field, whose keys hold the value's start and hash (§12.2), and full-text indexes, which read the text a piece at a time.
+
+  Comparing, searching and cutting read the content a piece at a time, without loading it: `=` and `!=` (by hash when both are stored, otherwise by length and then content), `<`, `<=`, `>`, `>=`, `between`, `sort`, `min`, `max`, `group by` and `distinct` (keyed like an index), `starts with`, `ends with`, `contains`, `matches` and `substr` (which reads only up to the end of its cut).
+
+  Anything else loads the content: functions and operators that build a new value from it (`upper`, `++`, `replace`, conversions and the like), `search()`, and check constraints that use such functions. Loaded content (and `substr`'s result) counts against a per-statement limit, the session setting `max_load` (rhizome.md; 256 MiB by default, a server setting), and a statement that would go over it fails with `limit`. A value loaded twice in a statement is loaded once.
+
+  Updating other fields of an entity doesn't load its large values, and statistics sampling never fetches blob content (it counts distinct values by hash). A reference read in a transaction stays readable after it ends: it holds the segments it reads until it is dropped, and the collector lets dropped references release theirs before it deletes segment files.
+- **Uploads** (protocol.md §7) go to the blob store as they arrive. Text is normalized to NFC and checked to be UTF-8 while it streams, and an image's header is checked. A statement given an upload stores it without reading it again, or fails with `type` if it wasn't valid.
+- **Collection** runs with the history sweep (hourly by default). An entity that may have dropped a reference (a field overwritten or removed, the entity deleted, history pruned) is marked; the collector checks marked entities against the references they still hold, deletes blobs left without uses and chunks no blob lists, and rewrites sealed segments that are less than half live into the active one. A segment is deleted only once no open transaction's snapshot and no download lease (protocol.md §7) can still read it.
+- **Conflicts** settle races between writers and the collector: a writer reusing a blob guards its record, which the collector deletes; a writer reusing a chunk for new content rewrites the chunk's location record, which the collector deletes or moves. Whichever commits second fails and retries.
 
 ---
 

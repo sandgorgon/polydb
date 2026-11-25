@@ -25,6 +25,7 @@
 //	0x40 history  0x40 entity len name time    opt-in field history (history.go)
 //	0x41 histkind 0x41 kind entity
 //	0x42 life     0x42 entity
+//	0x50–0x55     the blob store's records (blob.go)
 //
 // An entity's fields are contiguous under its field prefix, so reading a
 // whole entity is one short range scan. Kinds and relation types appear in

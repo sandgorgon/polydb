@@ -58,6 +58,14 @@ type Evaluator struct {
 	// LookupHandle, if set, finds handles missing from Handles.
 	LookupHandle func(name string) (value.Value, bool)
 	Now          time.Time
+	// MaxLoad is how many bytes of large values (value.Lazy) the
+	// statement may load for functions and operators that need their
+	// content; zero or negative means no limit.
+	MaxLoad int64
+
+	loaded     map[value.BlobRef]value.Value // lazy values loaded so far
+	loadedSize int64
+	prefixes   map[value.BlobRef][]byte // starts of lazy values (Order)
 
 	regexps map[string]*regexp.Regexp
 	queries map[string]*fulltext.Query // search() queries
@@ -90,8 +98,18 @@ func (ev *Evaluator) Cond(e Expr, f *Frame) (bool, error) {
 }
 
 // Eval evaluates e. It never returns a nil value: absent and missing
-// values are value.Null.
+// values are value.Null. A large value is loaded (see Load).
 func (ev *Evaluator) Eval(e Expr, f *Frame) (value.Value, error) {
+	v, err := ev.EvalLazy(e, f)
+	if err != nil {
+		return nil, err
+	}
+	return ev.Load(e, v)
+}
+
+// EvalLazy is Eval leaving a large value whose content is still in the
+// blob store as a value.Lazy, for callers that pass it along unread.
+func (ev *Evaluator) EvalLazy(e Expr, f *Frame) (value.Value, error) {
 	if f == nil {
 		f = &Frame{}
 	}
@@ -100,6 +118,31 @@ func (ev *Evaluator) Eval(e Expr, f *Frame) (value.Value, error) {
 		err = runErr(e, "type", "%v", ve.err)
 	}
 	return v, err
+}
+
+// Load returns v with a lazy value's content loaded, counting it against
+// MaxLoad. A value loaded once is kept for the statement.
+func (ev *Evaluator) Load(n Node, v value.Value) (value.Value, error) {
+	l, ok := v.(value.Lazy)
+	if !ok {
+		return v, nil
+	}
+	if c, ok := ev.loaded[l.Ref]; ok {
+		return c, nil
+	}
+	if ev.MaxLoad > 0 && ev.loadedSize+l.Ref.Len > ev.MaxLoad {
+		return nil, runErr(n, "limit", "loading %s would take the statement over its limit of %d bytes for large values", l, ev.MaxLoad)
+	}
+	c, err := l.Load()
+	if err != nil {
+		return nil, runErr(n, "internal", "%v", err)
+	}
+	if ev.loaded == nil {
+		ev.loaded = map[value.BlobRef]value.Value{}
+	}
+	ev.loaded[l.Ref] = c
+	ev.loadedSize += l.Ref.Len
+	return c, nil
 }
 
 func (ev *Evaluator) eval(e Expr, f *Frame) (value.Value, error) {
@@ -179,9 +222,9 @@ func (ev *Evaluator) eval(e Expr, f *Frame) (value.Value, error) {
 			return nil, err
 		}
 		if c {
-			return ev.Eval(e.Then, f)
+			return ev.EvalLazy(e.Then, f)
 		}
-		return ev.Eval(e.Else, f)
+		return ev.EvalLazy(e.Else, f)
 	case *Cast:
 		x, err := ev.Eval(e.X, f)
 		if err != nil {
@@ -443,9 +486,17 @@ func typeName(v value.Value) string {
 // from the current value and the evaluated right side: = replaces, +=
 // and friends do arithmetic, ++= joins and --= removes.
 func (ev *Evaluator) Assign(as *Assign, cur, v value.Value) (value.Value, error) {
-	switch as.Op {
-	case "=":
+	if as.Op == "=" {
 		return v, nil
+	}
+	cur, err := ev.Load(as, cur)
+	if err != nil {
+		return nil, err
+	}
+	if v, err = ev.Load(as, v); err != nil {
+		return nil, err
+	}
+	switch as.Op {
 	case "+=", "-=", "*=", "/=":
 		return arithValues(as, as.Op[:1], orNull(cur), v)
 	case "++=", "--=":

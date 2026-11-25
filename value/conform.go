@@ -1,6 +1,7 @@
 package value
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"slices"
@@ -34,6 +35,9 @@ func conform(v Value, t *Type) (Value, error) {
 			return Null, nil
 		}
 		return nil, fmt.Errorf("null is not allowed for %s", t)
+	}
+	if _, ok := v.(BlobRef); ok {
+		return nil, errors.New("a blob reference is not a value")
 	}
 	switch t.Code {
 	case CodeAny:

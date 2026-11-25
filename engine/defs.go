@@ -37,10 +37,18 @@ func (tx *Tx) DefineKind(k model.Kind) (value.ID, error) {
 // fields some entities added themselves become declared when the kind
 // declares them with the same type, and values are converted to changed
 // types. If any entity doesn't fit, AlterKind fails with a count.
+//
+// A change that leaves stored data valid applies at once; one that needs
+// every entity checked or rewritten does that here for a kind of up to
+// syncBuildLimit entities, and in the background for a larger one, which
+// closes the kind to writes until it is done (alter.go).
 func (tx *Tx) AlterKind(name string, fn func(k *model.Kind) error) error {
 	old, ok := tx.Catalog().Kind(name)
 	if !ok {
 		return tx.unknownKind(name)
+	}
+	if err := tx.kindIdle(old); err != nil {
+		return err
 	}
 	nk := *old
 	nk.Fields = slices.Clone(old.Fields)
@@ -59,11 +67,33 @@ func (tx *Tx) AlterKind(name string, fn func(k *model.Kind) error) error {
 	if err := tx.validateExprs(newK.Fields, fieldTypes(newK.Fields)); err != nil {
 		return tx.fail(err)
 	}
+	need, unUnique := alterNeeds(old, newK)
+	if need == needNothing {
+		for _, f := range unUnique {
+			p := keys.UniquePrefix(old.ID, f)
+			tx.t.DeleteRange(p, prefixEnd(p))
+		}
+		return tx.fail2(tx.historyBaseline(old, newK))
+	}
+	n, err := tx.countUpTo(keys.Members(old.ID), syncBuildLimit+1)
+	if err != nil {
+		return err
+	}
+	if n > syncBuildLimit {
+		// In the background: the old definition stays current until the
+		// check is through.
+		target := *newK
+		if err := e.ReplaceKind(*old); err != nil {
+			return wrap(CodeInternal, err)
+		}
+		total, err := tx.count(keys.Members(old.ID))
+		if err != nil {
+			return err
+		}
+		return tx.startAlter(old, &target, need, int64(total), unUnique)
+	}
 	if err := tx.historyBaseline(old, newK); err != nil {
 		return tx.fail(err)
-	}
-	if sameData(old, newK) {
-		return nil
 	}
 
 	var ids []value.ID
@@ -74,9 +104,29 @@ func (tx *Tx) AlterKind(name string, fn func(k *model.Kind) error) error {
 	}); err != nil {
 		return err
 	}
+	// A change that only needs checking leaves the entities as they are;
+	// fields becoming unique get their keys.
+	check := &alterJob{KindID: old.ID}
+	if need == needCheck {
+		for _, f := range newK.Fields {
+			if of, had := old.Field(f.Name); f.Unique && (!had || !of.Unique) {
+				check.NewUnique = append(check.NewUnique, f.Name)
+			}
+		}
+		for _, f := range unUnique {
+			p := keys.UniquePrefix(old.ID, f)
+			tx.t.DeleteRange(p, prefixEnd(p))
+		}
+	}
 	failed, firstErr := 0, error(nil)
 	for _, id := range ids {
-		if err := tx.migrate(id, old, newK); err != nil {
+		var err error
+		if need == needCheck {
+			err = tx.checkOne(check, id, old, newK)
+		} else {
+			err = tx.migrate(id, old, newK)
+		}
+		if err != nil {
 			if CodeOf(err) == CodeInternal || CodeOf(err) == CodeConflict {
 				return tx.fail(err)
 			}
@@ -108,31 +158,50 @@ func sameData(a, b *model.Kind) bool {
 
 // migrate rewrites one entity for a kind change from old to newK.
 func (tx *Tx) migrate(id value.ID, old, newK *model.Kind) error {
-	st, err := tx.loadEntity(id)
-	if err != nil {
+	st, changed, err := tx.transform(id, old, newK)
+	if err != nil || !changed {
 		return err
 	}
+	if err := tx.save(st); err != nil {
+		return fmt.Errorf("entity %s: %w", id, err)
+	}
+	return nil
+}
+
+// transform loads an entity and changes it in memory for a kind change
+// from old to newK, checking what doesn't need a save: its values fit
+// the new types, a closed kind has no own fields. changed reports
+// whether the entity needs writing.
+func (tx *Tx) transform(id value.ID, old, newK *model.Kind) (st *entState, changed bool, err error) {
+	st, err = tx.loadEntity(id)
+	if err != nil {
+		return nil, false, err
+	}
 	st.origKind, st.kind = old, newK
+	// Changes to the kind itself (checks, uniqueness, deletes' rules)
+	// show only in what save computes; keep the old behaviour of saving
+	// whenever the definitions differ in what an entity's records hold.
+	changed = !sameData(old, newK)
 	for _, name := range slices.Sorted(mapKeys(st.fields)) {
 		f := st.fields[name]
 		nfd, declared := newK.Field(name)
 		switch {
 		case f.Declared && !declared: // the kind dropped this field
 			if err := tx.detachNode(f.ID); err != nil {
-				return err
+				return nil, false, err
 			}
 			delete(st.fields, name)
 		case !f.Declared && declared: // the kind now declares a field this entity added
 			// The types must match, apart from being optional.
 			if !value.Required(f.Def.Type).Equal(value.Required(nfd.Type)) {
-				return errorf(CodeConstraint, "entity %s added %s as %s, but the kind declares it as %s", id, name, f.Def.Type, nfd.Type)
+				return nil, false, errorf(CodeConstraint, "entity %s added %s as %s, but the kind declares it as %s", id, name, f.Def.Type, nfd.Type)
 			}
 			cp := *f
 			cp.Declared, cp.Def = true, nil
 			if f.Value != nil {
 				c, err := tx.conform(nfd, f.Value)
 				if err != nil {
-					return fmt.Errorf("entity %s: %w", id, err)
+					return nil, false, fmt.Errorf("entity %s: %w", id, err)
 				}
 				cp.Value = c
 			}
@@ -144,7 +213,7 @@ func (tx *Tx) migrate(id value.ID, old, newK *model.Kind) error {
 			}
 			c, err := tx.conform(nfd, f.Value)
 			if err != nil {
-				return fmt.Errorf("entity %s: %w", id, err)
+				return nil, false, fmt.Errorf("entity %s: %w", id, err)
 			}
 			cp := *f
 			cp.Value = c
@@ -158,21 +227,18 @@ func (tx *Tx) migrate(id value.ID, old, newK *model.Kind) error {
 		}
 		v, err := tx.evalDefault(fd)
 		if err != nil {
-			return err
+			return nil, false, err
 		}
 		st.fields[fd.Name] = &model.Field{ID: tx.newID(), Entity: id, Name: fd.Name, Value: v, Declared: true}
 	}
 	if newK.Closed {
 		for _, f := range st.fields {
 			if !f.Declared {
-				return errorf(CodeConstraint, "entity %s has its own field %s, so the kind can't be closed", id, f.Name)
+				return nil, false, errorf(CodeConstraint, "entity %s has its own field %s, so the kind can't be closed", id, f.Name)
 			}
 		}
 	}
-	if err := tx.save(st); err != nil {
-		return fmt.Errorf("entity %s: %w", id, err)
-	}
-	return nil
+	return st, changed, nil
 }
 
 // DropKind removes a kind. It fails while entities of the kind exist.
@@ -180,6 +246,9 @@ func (tx *Tx) DropKind(name string) error {
 	k, ok := tx.Catalog().Kind(name)
 	if !ok {
 		return tx.unknownKind(name)
+	}
+	if err := tx.kindIdle(k); err != nil {
+		return err
 	}
 	n, err := tx.count(keys.Members(k.ID))
 	if err != nil {
@@ -196,6 +265,33 @@ func (tx *Tx) DropKind(name string) error {
 		return err
 	}
 	return wrap(CodeConstraint, e.DropKind(name))
+}
+
+// countUpTo counts the keys under prefix, stopping at max.
+func (tx *Tx) countUpTo(prefix []byte, max int) (int, error) {
+	n := 0
+	stop := errorf(CodeInternal, "stop")
+	err := tx.scan(prefix, false, func(_, _ []byte) error {
+		if n++; n >= max {
+			return stop
+		}
+		return nil
+	})
+	if err == stop {
+		err = nil
+	}
+	return n, err
+}
+
+// kindIdle refuses a definition change to a kind a background alter is
+// working on.
+func (tx *Tx) kindIdle(k *model.Kind) error {
+	tx.t.GuardKey(alterKey(k.ID))
+	j, ok, err := tx.loadAlter(k.ID)
+	if err != nil || !ok || !j.active() {
+		return err
+	}
+	return errorf(CodeConstraint, "kind %s is being altered (show alters); change it again when that finishes", k.Name)
 }
 
 func (tx *Tx) count(prefix []byte) (int, error) {
@@ -414,6 +510,9 @@ func (tx *Tx) DefineIndex(name, kind string, unique, text bool, ks ...model.Inde
 	if !ok {
 		return value.ID{}, tx.unknownKind(kind)
 	}
+	if err := tx.kindIdle(k); err != nil {
+		return value.ID{}, err
+	}
 	if unique {
 		for _, key := range ks {
 			if len(key.Path) > 0 {
@@ -436,31 +535,43 @@ func (tx *Tx) DefineIndex(name, kind string, unique, text bool, ks ...model.Inde
 		}
 		return id, nil
 	}
+	if err := tx.buildUnique(ix); err != nil {
+		return value.ID{}, tx.fail(err)
+	}
+	return id, nil
+}
+
+// buildUnique writes a unique index's keys for every entity of its kind,
+// failing on two with the same values.
+func (tx *Tx) buildUnique(ix *model.Index) error {
 	var members []value.ID
-	if err := tx.scan(keys.Members(k.ID), false, func(mk, _ []byte) error {
+	if err := tx.scan(keys.Members(ix.Kind), false, func(mk, _ []byte) error {
 		_, eid, err := keys.ParseMember(mk)
 		members = append(members, eid)
 		return wrap(CodeInternal, err)
 	}); err != nil {
-		return value.ID{}, err
+		return err
 	}
 	for _, eid := range members {
 		st, err := tx.loadEntity(eid)
 		if err != nil {
-			return value.ID{}, tx.fail(err)
+			return err
 		}
-		uk, ok := uniqueIndexKey(ix, st.fields)
+		uk, ok, err := uniqueIndexKey(ix, st.fields)
+		if err != nil {
+			return err
+		}
 		if !ok {
 			continue
 		}
 		if cur, found, err := tx.get(uk); err != nil {
-			return value.ID{}, tx.fail(err)
+			return err
 		} else if found {
-			return value.ID{}, tx.fail(errorf(CodeConstraint, "index %s: entities %s and %s have the same values", name, value.ID(cur), eid))
+			return errorf(CodeConstraint, "index %s: entities %s and %s have the same values", ix.Name, value.ID(cur), eid)
 		}
 		tx.t.Set(uk, eid[:])
 	}
-	return id, nil
+	return nil
 }
 
 // DropIndex removes an index.

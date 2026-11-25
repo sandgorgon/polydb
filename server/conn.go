@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"errors"
+	"io"
 	"net"
 	"slices"
 	"sync"
@@ -38,6 +40,7 @@ type conn struct {
 
 	mu         sync.Mutex
 	streams    map[uint32]*stream
+	open       int // streams counting against MaxStreams
 	lastStream uint32
 	goingAway  bool
 	closed     bool
@@ -52,6 +55,9 @@ type stream struct {
 	cancel context.CancelFunc
 	// cancelled is set by CANCEL, so the request reports "cancelled".
 	cancelled atomic.Bool
+	released  bool // its place counts no more against MaxStreams (on conn.mu)
+	// upload takes the content of an upload stream's later BLOB_WRITEs.
+	upload *io.PipeWriter
 }
 
 func (s *Server) handle(nc net.Conn) {
@@ -150,7 +156,7 @@ func (c *conn) handshake(info authn.ConnInfo, log interface{ Info(string, ...any
 	if _, ok := hello.Versions[wire.Major]; !ok {
 		return &wire.ConnError{Code: "version_mismatch", Msg: "the server speaks protocol 1.0"}
 	}
-	offered := []string{"blob-range", "queue-wait"}
+	offered := []string{"blob-range", "blob-write", "queue-wait"}
 	if s.cfg.Compression {
 		offered = append(offered, "deflate")
 	}
@@ -281,6 +287,30 @@ func (c *conn) loop(log interface {
 				st.cancelled.Store(true)
 				st.cancel()
 			}
+		case *wire.BlobWrite:
+			if st := c.stream(in.Stream); st != nil && st.upload != nil {
+				// The next piece of an upload. Writing blocks until the
+				// upload has stored the previous one; errors mean it
+				// ended early and has answered already.
+				if _, err := st.upload.Write(m.Data); err == nil && m.Last {
+					st.upload.Close()
+				}
+				continue
+			}
+			c.mu.Lock()
+			late := in.Stream <= c.lastStream
+			c.mu.Unlock()
+			if late {
+				continue // a piece of an upload that already ended with an error
+			}
+			if !slices.Contains(c.features, "blob-write") {
+				c.connError("protocol_error", "BLOB_WRITE without the blob-write feature")
+				return
+			}
+			if err := c.start(in.Stream, in.Msg); err != nil {
+				c.connError("protocol_error", err.Error())
+				return
+			}
 		case *wire.Query, *wire.Prepare, *wire.Execute, *wire.CloseStatement, *wire.BlobRead:
 			if err := c.start(in.Stream, in.Msg); err != nil {
 				c.connError("protocol_error", err.Error())
@@ -343,29 +373,57 @@ func (c *conn) start(id uint32, m wire.Message) error {
 		c.w.WriteMessage(id, &wire.Error{Code: "shutting_down", Message: "the connection is closing", StatementIndex: -1}, true)
 		return nil
 	}
-	if len(c.streams) >= c.srv.cfg.MaxStreams {
+	if c.open >= c.srv.cfg.MaxStreams {
 		c.mu.Unlock()
 		c.w.WriteMessage(id, &wire.Error{Code: "limit", Message: "too many requests at once on this connection", StatementIndex: -1}, true)
 		return nil
 	}
 	st := &stream{id: id, win: wire.NewWindow(c.srv.cfg.StreamWindow)}
 	st.ctx, st.cancel = context.WithCancel(c.ctx)
+	var body io.Reader
+	if bw, ok := m.(*wire.BlobWrite); ok {
+		// Later pieces come through a pipe from the read loop.
+		pr, pw := io.Pipe()
+		st.upload = pw
+		body = io.MultiReader(bytes.NewReader(bw.Data), pr)
+		if bw.Last {
+			pw.Close()
+		}
+		context.AfterFunc(st.ctx, func() { pr.CloseWithError(context.Canceled) })
+	}
 	c.streams[id] = st
+	c.open++
 	c.mu.Unlock()
 	c.requests.Add(1)
 	c.srv.wg.Add(1)
 	go func() {
 		defer c.srv.wg.Done()
 		defer c.finish(st)
+		if body != nil {
+			c.serveUpload(st, m.(*wire.BlobWrite), body)
+			return
+		}
 		c.serve(st, m)
 	}()
 	return nil
+}
+
+// release frees a stream's place under MaxStreams. The stream stays
+// open (for going away and idle timeouts) until finish.
+func (c *conn) release(st *stream) {
+	c.mu.Lock()
+	if !st.released {
+		st.released = true
+		c.open--
+	}
+	c.mu.Unlock()
 }
 
 // finish removes a finished stream; the last one closes a connection
 // that is going away.
 func (c *conn) finish(st *stream) {
 	st.cancel()
+	c.release(st)
 	c.mu.Lock()
 	delete(c.streams, st.id)
 	done := c.goingAway && len(c.streams) == 0
