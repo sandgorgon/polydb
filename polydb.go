@@ -27,8 +27,9 @@ import (
 // Version returns this PolyDB's version, for example "1.0.0".
 func Version() string { return version.String() }
 
-// DB is a connection to a PolyDB database: over the network, or to an
-// embedded engine. It is safe for concurrent use.
+// DB is a connection to a PolyDB database: over the network
+// (client.Dial), or to one inside this program (Open, OpenMemory). It is
+// safe for concurrent use.
 type DB interface {
 	Querier
 	// Prepare prepares one statement for repeated execution.
