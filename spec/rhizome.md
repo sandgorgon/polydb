@@ -1054,7 +1054,7 @@ None.
 1. No persistent entity names in v1. Use `unique` fields; the CLI gets a startup script (`~/.polydbrc`) for binding usual handles. `@@` is reserved.
 2. No kind inheritance in v1. `extends` and `trait` are reserved; traits are the preferred direction if field reuse is needed later.
 3. Relation types support `max out N` and `max in N`. No minimums in v1.
-4. Kinds are **extensible** by default: declared fields are enforced, and single entities may `add` their own extra fields. `closed` kinds forbid that. `set` never creates fields anywhere; new fields are always created with `add`. (Revised the same day: this replaces "closed by default", keeping typo protection while allowing per-entity fields as req.md describes.)
+4. Kinds are **extensible** by default: declared fields are enforced, and single entities may `add` their own extra fields. `closed` kinds forbid that. `set` never creates fields anywhere; new fields are always created with `add`. (Revised the same day: this replaces "closed by default", keeping typo protection while allowing per-entity fields as the requirements describe.)
 5. Relation deletion is set per relation type: `on delete cascade` (default) or `restrict`.
 6. `+` is numeric only; `++` joins and `--` removes. In `update`, `+=` is numeric, and `++=` / `--=` work on text and collections.
 7. Doc paths: each base format defines its own `->` steps (XML gets element-name and `@attr` steps), and derived formats give typed results from their shape (§8.6).

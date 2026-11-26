@@ -1,7 +1,6 @@
 # PolyDB Plan
 
 Status: **Phase 0 (specifications) complete (2026-11-22).** Phase 1 (values, model, in-memory storage, engine Go API) and Phase 2 (Rhizome language) complete and merged into `master`. Phase 3 (security, wire protocol, authentication, server, Go client, CLI) complete and merged into `master`. Phase 4 (persistence: write-ahead log, LSM storage, crash safety, on-disk databases and users, `polydb init`, field history) complete and merged into `master`. Phase 5 (secondary indexes built in the background, full-text search, query planner, `explain` with plans) complete and merged into `master`. Phase 6 (large data: history sweep, planner statistics, bulk loads, blob store with streamed large values, online backup and restore, export and import, background alter kind, slow-query log, hardening) complete and merged into `master`. Phase 7 (getting v1.0 ready: limits, configuration and packaging, embedded mode, public API under internal/, documentation, database metadata, performance follow-ups, release-candidate pass and CHANGELOG) complete and merged into `master`. **Phase 8: PolyDB 1.0.0 released (2026-11-25)**, tag `v1.0.0`, MIT license, published at github.com/sandgorgon/polydb with archives for Linux and macOS (amd64, arm64) and checksums. Next: the items under "After v1.0" (the 9P access layer first).
-Source requirements: [req.md](req.md)
 
 ---
 
@@ -152,7 +151,7 @@ Both modes implement the same Go interface, so application code can switch betwe
 - **Replication:** first by shipping the log, then Raft-based consensus.
 - **Distributed queries:** cross-partition traversal and query routing.
 
-## 6. Other things this concept needs (req.md: "identify what else")
+## 6. Other things this concept needs
 
 - transactions and concurrency control
 - constraints and validation (required fields, uniqueness, type checks)
