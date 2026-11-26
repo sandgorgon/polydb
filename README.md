@@ -97,3 +97,8 @@ rows, err := db.Query(ctx, `find Person p | where p.age > $min | show p.name`, p
 PolyDB follows semantic versioning. Within version 1, data, backups,
 exports, queries and the Go API keep working across upgrades;
 [compatibility](docs/compatibility.md) lists exactly what's promised.
+What changed in each release is in the [CHANGELOG](CHANGELOG.md).
+
+## License
+
+PolyDB is released under the [MIT License](LICENSE).

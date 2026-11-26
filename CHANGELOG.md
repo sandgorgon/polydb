@@ -3,7 +3,7 @@
 PolyDB follows [semantic versioning](https://semver.org); what each kind
 of release may change is in [compatibility](docs/compatibility.md).
 
-## 1.0.0 (unreleased)
+## 1.0.0 (2026-11-25)
 
 The first release. Everything below is new.
 
