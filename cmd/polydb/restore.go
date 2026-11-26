@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/sandgorgon/polydb/engine"
-	"github.com/sandgorgon/polydb/storage/vfs"
+	"github.com/sandgorgon/polydb/internal/engine"
+	"github.com/sandgorgon/polydb/internal/storage/vfs"
 )
 
 // restoreConfig is what restore needs, parsed from flags.

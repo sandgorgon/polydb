@@ -102,6 +102,7 @@ Reserved now for future features (inference rules, kind reuse and others), so th
 | `p::id`, `p::kind`, `p::created`, `p::updated`, `p::version`, `p::labels`, `p::owner` | entity metadata |
 | `p::props.source` | a custom metadata property |
 | `r.since`, `r::type`, `r::from`, `r::to` | relation property and metadata |
+| `database::name`, `database::created`, `database::owner`, `database::doc`, `database::labels`, `database::props.x` | metadata of the database in use (§4) |
 
 `p.name` gives the field's *value*. To use the field itself as a graph node, for example to relate it, write the field path in a relation position (`relate p.address ~located_in~> c`). The parser knows from context that a node is meant.
 
@@ -111,7 +112,7 @@ Reserved now for future features (inference rules, kind reuse and others), so th
 
 | Group | Statements |
 |---|---|
-| Databases and session | `create database`, `drop database`, `use`, `set`, `show databases`, `backup database`, `restore database`, `export`, `import` |
+| Databases and session | `create database`, `alter database`, `drop database`, `use`, `set`, `show databases`, `describe database`, `backup database`, `restore database`, `export`, `import` |
 | Definitions | `define kind / relation / format / index`, `alter …`, `drop …` |
 | Data | `create`, `update`, `delete`, `relate`, `unrelate`, `push`, `pop` |
 | Queries | pipelines starting with `find` |
@@ -129,11 +130,16 @@ Each statement ends with `;`.
 create database sales;
 use sales;
 drop database sales;             // needs admin; asks for confirmation in the CLI
-show databases;
+show databases;                  // with each one's owner, creation time, labels and doc
+describe database sales;         // all of its metadata
+
+alter database sales set doc = "Orders for the EU shop", ::labels ++= {"prod"};
+alter database sales set ::props.schema_version = 4;   // needs admin on sales
 
 set timeout = 30s;               // session settings
 set max_rows = 10000;
-set max_load = 1073741824;       // bytes of large values a statement may load
+set max_memory = 1073741824;     // bytes a statement may hold: its rows and loaded large values
+show limits;                     // this session's settings and the server's limits
 
 backup database sales to "nightly/mon";      // while it runs; needs admin on sales
 restore database sales_copy from "nightly/mon";  // creates sales_copy; needs admin
@@ -150,13 +156,33 @@ import security from "security.jsonl" replace;
 
 Queries can't span databases in v1.
 
+**Database metadata.** Like an entity (§2.1), a database has metadata. PolyDB keeps its `::name`, `::created` (the time of `create database`) and `::owner` (the user who created it). Admins of the database may set a `doc` note, `::labels` (a set of text) and `::props` (a map with text keys), for facts about the data as a whole: what it holds, `prod` or `test`, or the version of an application's data layout.
+
+- `alter database d set …` takes one or more of: `doc = <text>` (`null` removes it); `::labels` with `=`, `++=` or `--=` and a set of text; `::props` with `=` or `++=` and a map, or `--=` and a set of keys; `::props.key = <value>`. Values are constants or parameters. It needs `admin` on d, isn't allowed inside a transaction, and `::name`, `::created` and `::owner` are read-only (`constraint`).
+- Queries read the database in use's metadata as `database::name`, `database::created`, `database::owner`, `database::doc`, `database::labels` and `database::props` (`database::props.key` for one prop), anywhere an expression goes; a database made before metadata existed has null `::created` and `::owner`. `describe database d` lists it all, and `show databases` adds each database's owner, creation time, labels and doc. Reading needs some permission on the database, like `use`.
+- The metadata is stored in the database, so a backup carries all of it and a restored database keeps its owner and creation time. An export carries the doc, labels and props; `import` merges them into the target: the export's doc replaces the target's when it has one, labels are added, and props are merged with the export's values winning. The target keeps its own owner and creation time.
+
+**Limits.** A server bounds what one statement, connection or user may use, so that a heavy query or client can't starve the others (`polydb serve` flags or its configuration file; `polydb.Options` for an embedded database):
+
+| Limit | Default | Enforced |
+|---|---|---|
+| statement time (`--statement-timeout`) | none | the session's `timeout` starts at it; a session may lower it, only a server admin raise it or set `0s` |
+| statement memory (`--max-memory`) | 1 GiB | the session's `max_memory` starts at it, with the same rule. It counts the rows a statement's steps hold (for `sort`, `group by`, `distinct`, its result, and as a source binds them, so a runaway cross product stops early) and the large values it loads (types.md §13.1) |
+| connections (`--max-connections`) | 1,000 | logged-in connections; server admins may go past it so they can always get in. Connections still logging in are bounded the same way |
+| connections per user (`--max-user-connections`) | 100 | each user |
+| open transactions (`--max-transactions`) | 16 | per session |
+| upload size (`--max-upload`) | 4 GiB | each upload (protocol.md §7) |
+| upload quota (`--upload-quota`) | 16 GiB | the bytes of a user's uploads not yet expired, used or not |
+
+Going over a limit fails the statement, upload or login with `limit` (or `permission`, for a session trying to raise one); a request option (protocol.md §6) follows the same rules as `set`. `show limits` lists this session's settings and the server's limits. A negative value given to the server means no limit.
+
 **Backups.** `backup database` writes the database as of one commit to a directory, while it keeps taking reads and writes: the key-value store's latest data written as compacted files, the blob segments copied, and a `BACKUP` file listing every file with its SHA-256, written last. History versions are data, so they are in the backup; users, roles and grants are server-wide and aren't. It returns the path, keys, files and bytes. `restore database` creates a new database from a backup, checking every file as it copies it; it never replaces an existing database (drop it first, or restore under another name and switch). Paths are directories relative to the server's backup directory (`polydb serve --backup-dir`, default `<data-dir>/backups`); a backup's directory must not exist yet. On a stopped server, `polydb restore [--database name] dir` does the same from any directory. Embedded programs call `DB.Backup` and `Engine.RestoreDatabase` with any path.
 
 **Export and import.** An export is a portable copy, read and written a record at a time, so neither side holds it in memory:
 
 - **Formats:** `jsonl` (JSON Lines, the default: one record per line, values in their JSON form, types.md §12.3) and `native` (the binary value encoding, smaller and faster). Large values are written once each, in pieces, before the first entity using them.
-- **A database export** holds its definitions (as `define` statements, run on import like any other), then every entity (ID, kind, metadata, fields, the definitions of fields it added itself) and every relation, as of one snapshot. History versions aren't exported: a backup keeps them.
-- **`import into database d`** creates the definitions d lacks; ones it has must be the same, or the import fails naming the difference before writing anything. IDs are kept, and one that exists is an error; `with new ids` gives every entity, field and relation a new ID and rewrites the refs pointing at them (plain `id` values are kept), which copies data into a database that has it. An export may only hold definitions, entities and relations: any other statement in it is refused. Entities and relations are written in batches of transactions; an import that fails keeps the batches before the failure, and says how far it got. Ref targets aren't checked, since they may come later in the export.
+- **A database export** holds the database's doc, labels and props (merged on import, see Database metadata above), its definitions (as `define` statements, run on import like any other), then every entity (ID, kind, metadata, fields, the definitions of fields it added itself) and every relation, as of one snapshot. History versions aren't exported: a backup keeps them.
+- **`import into database d`** creates the definitions d lacks; ones it has must be the same, or the import fails naming the difference before writing anything. IDs are kept, and one that exists is an error; `with new ids` gives every entity, field and relation a new ID and rewrites the refs pointing at them (plain `id` values are kept), which copies data into a database that has it. An export may only hold definitions, entities and relations: any other statement in it is refused. Entities and relations are written in batches of transactions, several committing at once (relations only once every entity is in); an import that fails keeps the batches that committed, and says how many entities and relations that is. Ref targets aren't checked, since they may come later in the export.
 - **`export (query)`** writes a query's result: `jsonl` and `native` as rows (whole entities and relations as maps), `csv` with a header and plain cells (text as is, numbers, times and IDs in their usual forms, bytes in base64, collections as JSON), and `dot` (Graphviz) or `graph` (JSON: `{"nodes": […], "edges": […]}`) with the result's entities as nodes, labelled by kind and a `name`, `title` or `label` field, and as edges the relations in the result and those between its nodes. A graph names large values without their content.
 - **`export security`** holds every user (with password credentials: salted PBKDF2 hashes, never the passwords, but still worth guessing at, so the file is a secret; `without passwords` leaves them out), key fingerprints, roles and memberships, and grants, with kinds by name so they apply to restored or imported databases. **`import security`** creates the users and roles that don't exist and adds memberships and grants; a user that exists keeps its password and keys unless `replace` is given; grants on databases or kinds that don't exist are skipped and counted.
 - **Where:** `to "path"` writes a file in the backup directory, which must not exist yet; without it the export is the statement's result, a bytes value the client downloads in pieces (a security export comes from memory, the others from the database's blob store). `from` takes a path there, or the export itself, usually a parameter uploaded with `Conn.Upload`. `polydb export` and `polydb import` do this from the command line.
@@ -519,6 +545,7 @@ A planner chooses how a `find` over kinds finds its rows. Plans change speed, ne
   - A larger range is estimated from the kind's **statistics**, and so is a lookup per row of an earlier variable: the kind's entities divided by the key's distinct values.
 
   Statistics come from a random sample of up to 10,000 entities per kind. For each field, and each doc path of an index key, they record how many entities have a value or null, an estimate of the distinct values, the most common values and a histogram of the rest. The database samples a kind when it has no statistics yet, and again once about a tenth of it has changed (or at least 50 entities); `analyze kind K` samples one at once. Without statistics, the planner guesses.
+- **Exact ranges.** When an index range holds a condition exactly, the rows it finds aren't checked against that condition again, so a query like `find P p | where p.n between $a and $b | show count()` reads only the index. That's the case for every part of the condition (`between` makes two) when the key is a plain field of type `int`, `text`, `date`, `time`, `duration` or `bool`, and the value compared with has that same type (short text: long text keys hold only a prefix and hash). Documents, refs, ids, floats, decimals, `starts with` and mixed types are still checked on each row.
 - **Errors.** A row that an index or an earlier condition rules out isn't checked against the other conditions. An error that one of them would have raised on that row, such as comparing an int with text, doesn't happen.
 
 ---
@@ -688,6 +715,7 @@ show users;  show roles;  show grants for ramon;  show keys for ramon;
 describe @alice;                    // all fields with types, docs, IDs; relations in and out; metadata
 describe kind Person;               // schema, docs, indexes, entity count
 describe relation knows;
+describe database sales;            // name, owner, created, doc, labels, props
 describe #01JD...;                  // whatever the ID belongs to
 show kinds;  show relations;  show formats;  show indexes;
 show stats;                         // database size, counts per kind and relation type
@@ -844,7 +872,7 @@ base_type      = "bool" | "int" | "bigint" | "float"
                | "union" "<" type { "|" type } ">" ;
 
 (* ----- Changing and dropping definitions ----- *)
-alter_stmt     = "alter" ( alter_kind | alter_relation | alter_user ) ;
+alter_stmt     = "alter" ( alter_kind | alter_relation | alter_user | alter_database ) ;
 alter_kind     = "kind" ident ( "add" field_def
                               | "drop" ident
                               | "alter" field_def
@@ -858,6 +886,9 @@ alter_relation = "relation" ident ( "add" field_def
 alter_user     = "user" ident ( "password" expr
                               | "add" "key" text_lit [ "as" text_lit ]
                               | "drop" "key" text_lit ) ;
+alter_database = "database" ident "set" db_assign { "," db_assign } ;
+db_assign      = "doc" "=" expr
+               | "::" ident [ "." ident ] assign_op expr ;   (* ::labels, ::props, ::props.key *)
 drop_stmt      = "drop" ( "kind" | "relation" | "format" | "index" | "user" | "role" ) ident ;
 
 (* ----- Data ----- *)
@@ -939,7 +970,7 @@ perm           = "read" | "write" | "relate" | "define" | "admin" ;
 scope          = "server" | "database" ident | "kind" [ ident "." ] ident ;
 
 (* ----- Introspection ----- *)
-introspect_stmt = "describe" ( target | ( "kind" | "relation" | "format" | "index" ) ident )
+introspect_stmt = "describe" ( target | ( "kind" | "relation" | "format" | "index" | "database" ) ident )
                 | "show" show_what
                 | "explain" [ "analyze" ] statement
                 | "history" field_ref
@@ -982,6 +1013,7 @@ doc_step       = ident | text_lit | "[" expr "]"
 primary        = literal
                | ident | handle | param | id_lit
                | "::" ident                            (* metadata of the update target *)
+               | "database" "::" meta_name             (* metadata of the database in use *)
                | ident "(" [ expr { "," expr } ] ")"   (* function or aggregate call *)
                | "if" "(" expr "," expr "," expr ")"
                | "cast" "(" expr "as" type ")"
@@ -1073,10 +1105,10 @@ None.
    - Handles bound inside a transaction that rolls back are removed. `use` of another database clears the session's handles, since they name entities of one database.
    - `create database`, `drop database`, `backup database`, `restore database`, `export`, `import` and `use` aren't allowed inside a transaction.
    - `now()` and `today()` are the transaction's start time, so every statement in a transaction sees the same time.
-   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns. `max_load` caps the bytes of large values a statement may load into memory (types.md §13.1; default 256 MiB, set by the server's `--max-load`; 0 means no limit).
+   - `set timeout` stops a statement that runs longer, with a `limit` error; cancelling from the client does the same. `max_rows` is 0 (no limit) by default; `max_depth` (default 10) caps open-ended multi-hop patterns. `max_memory` caps the bytes a statement may hold (see Limits below).
    - `explain` on a data statement runs it in a scratch transaction that is rolled back and reports what would change or what blocks it; the scratch transaction sees committed data only. `explain analyze` on one runs it and reports the rows it changed and the time.
    - `explain` on a query (Phase 5) shows the plan as a table with the columns `step`, `detail` and `estimate`:
-     - a `find` row per variable, in the order they're bound. It says how the variable is found (`scan kind Person`, `lookup for p = @ann`, `index person_age for p.age > 30`, `text index …`, or `…, for each p` when it uses an earlier variable) and the estimated entities (`n per row` for those).
+     - a `find` row per variable, in the order they're bound. It says how the variable is found (`scan kind Person`, `lookup for p = @ann`, `index person_age for p.age > 30` with every condition the range uses, followed by `, exact` when it holds them exactly (§7.5), `text index …`, or `…, for each p` when it uses an earlier variable) and the estimated entities (`n per row` for those).
      - a `top` row when `sort … limit` reads an index in order and stops early;
      - then the steps, where steps the source applies marked `(checked at the source)`;
      - then warnings: a scan of every entity, variables no condition links (a cross product), `search()` without a text index, and an index that is still building and so isn't used.
@@ -1084,3 +1116,4 @@ None.
    - Introspection results are tables with a `section` column where they mix kinds of rows: `describe kind` lists the kind, its fields and its indexes; `describe @x` lists metadata, fields and relations in and out.
 14. Query planning (Phase 5, 2026-11-23): plans never change results or row order (§7.5). An index answers a condition only when every entity the condition passes is sure to be in it. Rows that an index or an earlier condition rules out skip the other conditions, so errors those would raise on them don't happen. Estimates come from counting probes and, since Phase 6, sampled statistics.
 15. Statistics (Phase 6, 2026-11-24): `analyze` is a contextual word, so existing names stay valid. `analyze kind K` needs read permission on K, samples committed data in its own transaction (so it works inside a transaction too), and returns the same table as `show stats kind K`. That table is exact for kinds no larger than the sample; a kind not yet sampled is sampled for the display without storing the result.
+16. Database metadata (Phase 7, 2026-11-25): stored in the database's own store under one meta key, so backups carry it. `alter database` writes it in its own transaction and needs `admin` on the database; `doc` is a keyword, so the statement reads `doc = …` itself. `database::x` in a default or check is an error at run time, like other reads beyond the entity's own fields. An `as of` query reads the current metadata: it has no history.

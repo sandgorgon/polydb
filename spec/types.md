@@ -407,7 +407,7 @@ Used by exports (rhizome.md §4). It is exact: reading it back gives the value t
 
 - **Byte strings, text and images** over **16 KiB** go to the blob store. They're split into 1 MiB chunks, and each chunk is addressed by its SHA-256 hash, so identical content is stored only once. The field holds a blob reference (tag 0x22). Only whole field values (and their history versions) are stored this way; a large value inside a collection, a record, metadata or relation properties stays inline.
 - **Collections and queues** over **1,000 elements** (or 64 KiB encoded) are stored element by element in the key-value store instead of as one blob. Pushing to a queue, adding to a set or changing one map entry then doesn't rewrite the whole collection. (Not implemented yet: deferred until after v1.0, see plan.md.)
-- The blob threshold is an engine setting (`engine.Options.BlobThreshold`, at least 4 KiB), the same for every database.
+- The blob threshold is an engine setting (16 KiB by default, at least 4 KiB), the same for every database.
 - None of this is visible to queries.
 
 ### 13.1 The blob store
@@ -423,7 +423,7 @@ Used by exports (rhizome.md §4). It is exact: reading it back gives the value t
 
   Comparing, searching and cutting read the content a piece at a time, without loading it: `=` and `!=` (by hash when both are stored, otherwise by length and then content), `<`, `<=`, `>`, `>=`, `between`, `sort`, `min`, `max`, `group by` and `distinct` (keyed like an index), `starts with`, `ends with`, `contains`, `matches` and `substr` (which reads only up to the end of its cut).
 
-  Anything else loads the content: functions and operators that build a new value from it (`upper`, `++`, `replace`, conversions and the like), `search()`, and check constraints that use such functions. Loaded content (and `substr`'s result) counts against a per-statement limit, the session setting `max_load` (rhizome.md; 256 MiB by default, a server setting), and a statement that would go over it fails with `limit`. A value loaded twice in a statement is loaded once.
+  Anything else loads the content: functions and operators that build a new value from it (`upper`, `++`, `replace`, conversions and the like), `search()`, and check constraints that use such functions. Loaded content (and `substr`'s result) counts against the statement's memory limit, the session setting `max_memory` (rhizome.md §4, Limits: 1 GiB by default, shared with the rows the statement holds), and a statement that would go over it fails with `limit`. A value loaded twice in a statement is loaded once.
 
   Updating other fields of an entity doesn't load its large values, and statistics sampling never fetches blob content (it counts distinct values by hash). A reference read in a transaction stays readable after it ends: it holds the segments it reads until it is dropped, and the collector lets dropped references release theirs before it deletes segment files.
 - **Uploads** (protocol.md §7) go to the blob store as they arrive. Text is normalized to NFC and checked to be UTF-8 while it streams, and an image's header is checked. A statement given an upload stores it without reading it again, or fails with `type` if it wasn't valid.

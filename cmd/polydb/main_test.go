@@ -14,7 +14,6 @@ import (
 
 	"github.com/sandgorgon/polydb"
 	"github.com/sandgorgon/polydb/value"
-	"github.com/sandgorgon/polydb/wire"
 )
 
 // isolate points HOME and the 9auth config at a temporary directory, so
@@ -284,10 +283,6 @@ func TestCellText(t *testing.T) {
 		if got := cellText(c.in); got != c.want {
 			t.Errorf("cellText(%v) = %q, want %q", c.in, got, c.want)
 		}
-	}
-	trace := traceText(&wire.Auth{Mechanism: "SCRAM-SHA-256", Data: []byte("n,,n=admin,r=secretnonce")})
-	if strings.Contains(trace, "secretnonce") || !strings.Contains(trace, "redacted") {
-		t.Errorf("trace leaks: %s", trace)
 	}
 }
 

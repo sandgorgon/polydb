@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sandgorgon/polydb/engine"
+	"github.com/sandgorgon/polydb/internal/engine"
 )
 
 // polydb restore puts a backup into a stopped server's data directory.

@@ -16,11 +16,8 @@ import (
 	auth9 "github.com/sandgorgon/9auth"
 	"github.com/sandgorgon/polydb"
 	"github.com/sandgorgon/polydb/client"
-	"github.com/sandgorgon/polydb/engine"
-	"github.com/sandgorgon/polydb/lang"
-	"github.com/sandgorgon/polydb/security"
+	"github.com/sandgorgon/polydb/internal/lang"
 	"github.com/sandgorgon/polydb/value"
-	"github.com/sandgorgon/polydb/wire"
 	"golang.org/x/term"
 )
 
@@ -76,14 +73,7 @@ func askPassword(prompt string) (string, error) {
 // connect opens the database named by url, or an in-memory engine.
 func connect(ctx context.Context, url string, f *connectFlags, errOut io.Writer) (polydb.DB, string, error) {
 	if f.memory {
-		eng, err := engine.Open(engine.Options{})
-		if err != nil {
-			return nil, "", err
-		}
-		if _, err := eng.CreateDatabase("mem"); err != nil {
-			return nil, "", err
-		}
-		db, err := polydb.Embed(ctx, eng, security.AdminUser, "mem")
+		db, err := polydb.OpenMemory(&polydb.Options{Database: "mem"})
 		return db, "mem", err
 	}
 	target, err := client.ParseURL(url)
@@ -119,29 +109,15 @@ func connect(ctx context.Context, url string, f *connectFlags, errOut io.Writer)
 		}))
 	}
 	if f.trace {
-		opts = append(opts, client.WithTrace(func(dir string, stream uint32, m wire.Message) {
-			fmt.Fprintf(errOut, "%s %3d %s\n", dir, stream, traceText(m))
+		opts = append(opts, client.WithTrace(func(dir string, stream uint32, msg string) {
+			fmt.Fprintf(errOut, "%s %3d %s\n", dir, stream, msg)
 		}))
 	}
 	db, err := client.Dial(ctx, url, opts...)
 	if err != nil {
 		return nil, "", err
 	}
-	return db, db.(*client.Conn).Database(), nil
-}
-
-// traceText shows a message for --trace, without login secrets.
-func traceText(m wire.Message) string {
-	switch x := m.(type) {
-	case *wire.Auth:
-		return fmt.Sprintf("Auth {Mechanism:%s User:%s Data:<redacted>}", x.Mechanism, x.User)
-	case *wire.AuthContinue:
-		return "AuthContinue {Data:<redacted>}"
-	case *wire.AuthOK:
-		return fmt.Sprintf("AuthOK {SessionID:%s User:%s Database:%s Data:<redacted>}", x.SessionID, x.User, x.Database)
-	}
-	name := strings.TrimPrefix(fmt.Sprintf("%T", m), "*wire.")
-	return fmt.Sprintf("%s %+v", name, m)
+	return db, db.Database(), nil
 }
 
 // shell runs statements against a database and prints results.
@@ -537,7 +513,7 @@ func shellCmd(ctx context.Context, args []string, in io.Reader, out, errOut io.W
 			term.MakeRaw(fd)
 		}
 	}
-	fmt.Fprintf(t, "polydb %s — \\? for help, \\q to quit\n", client.Version)
+	fmt.Fprintf(t, "polydb %s — \\? for help, \\q to quit\n", polydb.Version())
 	if !f.noRC {
 		if home, err := os.UserHomeDir(); err == nil {
 			if data, err := os.ReadFile(filepath.Join(home, ".polydbrc")); err == nil {

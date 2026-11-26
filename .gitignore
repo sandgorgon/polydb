@@ -6,3 +6,6 @@
 *.test
 *.out
 /coverage.*
+
+# Release archives (scripts/release.sh)
+/dist/

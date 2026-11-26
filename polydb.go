@@ -1,9 +1,10 @@
-// Package polydb is PolyDB's application interface. The same interfaces
-// are implemented by the network client (package client, which talks to
-// a server) and by an engine embedded in the program (Embed), so an
-// application can switch between the two (spec/protocol.md §13).
+// Package polydb is PolyDB's application interface. A DB runs Rhizome
+// statements either on a database inside this program (Open, OpenMemory)
+// or on a server (package client); both implement the same interfaces,
+// so an application can switch between the two (spec/protocol.md §13).
 //
-//	db, err := client.Dial(ctx, "polydb://ramon@db.example.com/sales", client.WithPassword(pw))
+//	db, err := polydb.Open("./data", nil) // or polydb.OpenMemory(nil)
+//	// or: db, err := client.Dial(ctx, "polydb://ana@db.example.com/sales", client.WithPassword(pw))
 //	rows, err := db.Query(ctx, `find Person p | where p.age > $min | show p.name`, polydb.Params{"min": 30})
 //	for rows.Next() {
 //		var name string
@@ -19,11 +20,16 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/sandgorgon/polydb/internal/version"
 	"github.com/sandgorgon/polydb/value"
 )
 
-// DB is a connection to a PolyDB database: over the network, or to an
-// embedded engine. It is safe for concurrent use.
+// Version returns this PolyDB's version, for example "1.0.0".
+func Version() string { return version.String() }
+
+// DB is a connection to a PolyDB database: over the network
+// (client.Dial), or to one inside this program (Open, OpenMemory). It is
+// safe for concurrent use.
 type DB interface {
 	Querier
 	// Prepare prepares one statement for repeated execution.
@@ -164,35 +170,47 @@ type Path struct {
 	Rels  []*Relation
 }
 
-// Blob is a large text, bytes or image value that the server sent by
-// reference. Its content is fetched when read.
+// Blob is a large text, bytes or image value: one a query returned,
+// whose content is read only when the application reads it, or one
+// uploaded (Uploader) or made with NewBlob to pass as a parameter.
 type Blob struct {
 	Type      string // "text", "bytes" or "image"
 	Length    int64
 	MediaType string
-	// fetch reads length bytes at offset.
-	fetch func(ctx context.Context, offset, length int64) ([]byte, error)
-	// token is the server's lease on the content, which lets the blob be
-	// passed back as a parameter without sending the content again.
-	token []byte
+	src       BlobSource
 	// lazy is the value an embedded database returned, which goes back
 	// as a parameter without being read.
 	lazy *value.Lazy
 }
 
-// NewBlob returns a blob read with fetch. Implementations of DB use it.
-func NewBlob(typ string, length int64, mediaType string, fetch func(ctx context.Context, offset, length int64) ([]byte, error)) *Blob {
-	return &Blob{Type: typ, Length: length, MediaType: mediaType, fetch: fetch}
+// BlobSource supplies a Blob's content.
+type BlobSource interface {
+	// ReadBlob reads length bytes at offset.
+	ReadBlob(ctx context.Context, offset, length int64) ([]byte, error)
 }
 
-// NewLeasedBlob is NewBlob for content a server holds under a lease
-// token. Passed as a parameter, such a blob sends only the token.
-func NewLeasedBlob(typ string, length int64, mediaType string, token []byte, fetch func(ctx context.Context, offset, length int64) ([]byte, error)) *Blob {
-	return &Blob{Type: typ, Length: length, MediaType: mediaType, fetch: fetch, token: token}
+// BlobFunc is a function that is a BlobSource.
+type BlobFunc func(ctx context.Context, offset, length int64) ([]byte, error)
+
+// ReadBlob calls f.
+func (f BlobFunc) ReadBlob(ctx context.Context, offset, length int64) ([]byte, error) {
+	return f(ctx, offset, length)
 }
 
-// Token returns the blob's lease token, or nil.
-func (b *Blob) Token() []byte { return b.token }
+// NewBlob returns a blob of length bytes whose content src reads; typ
+// is "text", "bytes" or "image". Passed as a parameter, its content is
+// read whole and sent with the statement; for content too large for
+// that, use Uploader.Upload.
+func NewBlob(typ string, length int64, mediaType string, src BlobSource) *Blob {
+	return &Blob{Type: typ, Length: length, MediaType: mediaType, src: src}
+}
+
+// Source returns what reads the blob's content.
+func (b *Blob) Source() BlobSource { return b.src }
+
+func (b *Blob) fetch(ctx context.Context, offset, length int64) ([]byte, error) {
+	return b.src.ReadBlob(ctx, offset, length)
+}
 
 // ReadAt implements io.ReaderAt.
 func (b *Blob) ReadAt(p []byte, off int64) (int, error) {

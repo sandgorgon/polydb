@@ -98,8 +98,8 @@ func ToValue(v any) (value.Value, error) {
 
 // ParamValues converts parameters to values.
 //
-// A *Blob is read whole, unless an embedded database returned it; see
-// SplitParams for blobs a server holds.
+// A *Blob is read whole, unless an embedded database returned it. (A
+// client passes blobs its server holds by their lease instead.)
 func ParamValues(p Params) (map[string]value.Value, error) {
 	if len(p) == 0 {
 		return nil, nil
@@ -125,25 +125,6 @@ func ParamValues(p Params) (map[string]value.Value, error) {
 		out[k] = c
 	}
 	return out, nil
-}
-
-// SplitParams is ParamValues for a client: blobs with a lease token
-// (read from results, or uploaded) are returned as tokens instead, so
-// their content isn't sent again.
-func SplitParams(p Params) (vals map[string]value.Value, tokens map[string][]byte, err error) {
-	rest := Params{}
-	for k, v := range p {
-		if b, ok := v.(*Blob); ok && b.token != nil {
-			if tokens == nil {
-				tokens = map[string][]byte{}
-			}
-			tokens[k] = b.token
-			continue
-		}
-		rest[k] = v
-	}
-	vals, err = ParamValues(rest)
-	return vals, tokens, err
 }
 
 // Scan copies cells into dest, converting as needed:
@@ -354,11 +335,11 @@ func inlineBlob(cell any) (*Blob, error) {
 	default:
 		return nil, mismatch(cell, "a blob")
 	}
-	return NewBlob(typ, int64(len(data)), media, func(_ context.Context, off, n int64) ([]byte, error) {
+	return NewBlob(typ, int64(len(data)), media, BlobFunc(func(_ context.Context, off, n int64) ([]byte, error) {
 		end := min(off+n, int64(len(data)))
 		if off > end {
 			return nil, nil
 		}
 		return data[off:end], nil
-	}), nil
+	})), nil
 }

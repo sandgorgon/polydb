@@ -12,7 +12,7 @@ import (
 
 	"github.com/sandgorgon/polydb"
 	"github.com/sandgorgon/polydb/client"
-	"github.com/sandgorgon/polydb/engine"
+	"github.com/sandgorgon/polydb/internal/engine"
 )
 
 // BenchmarkLargeValue measures the memory one 64 MiB value costs, client
@@ -31,7 +31,7 @@ func BenchmarkLargeValue(b *testing.B) {
 	if _, err := db.Exec(ctx, `create database d; use d; define kind F { name: text, data: bytes? }`, nil); err != nil {
 		b.Fatal(err)
 	}
-	c := db.(*client.Conn)
+	c := db
 	data := make([]byte, 64<<20)
 	for i := range data {
 		data[i] = byte(i * 7 / 3)

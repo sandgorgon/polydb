@@ -264,7 +264,7 @@ repeat: field number (varint), value (PolyDB value encoding, types.md §12.1)
 | 1 | text | text | one or more Rhizome statements |
 | 2 | params | `map<text, any>` | values for `$name` parameters |
 | 3 | txn | id? | run inside this transaction (see below) |
-| 4 | options | `map<text, any>` | per-request settings: `timeout`, `max_rows`, `max_load`, `explain` |
+| 4 | options | `map<text, any>` | per-request settings: `timeout`, `max_rows`, `max_memory`, `explain`; a request can't raise a limit past the server's without admin permission (rhizome.md §4, Limits) |
 | 5 | blob_params | `map<text, bytes>` | parameters whose values are blob references: name → lease token (from BLOB_STORED or a result); §7 |
 
 **PREPARE**: `text` (one statement). The reply is PREPARED: `statement_id` (int), `param_types` (`map<text, text>`, type expressions) and `columns` (as in RESULT_HEADER, if known in advance).
@@ -362,7 +362,7 @@ Values larger than `inline_value_limit` (bytes, text, image data) are sent as **
 - **BLOB_STORED** answers the last piece: 1 `ref`, a blob reference (§6.5) with a lease token, valid for the lease time. BLOB_READ reads it like any other.
 - The server checks an upload as a value of its type while storing it: text is normalized to NFC and must be valid UTF-8, and an image must start with a supported format's header. BLOB_STORED's `hash` and `length` are those of the stored (normalized) content.
 - A request passes the reference in `blob_params`. The statement gets the stored content without the server reading it back, and fails with `type` if the upload wasn't a valid value of its type. A blob reference from a result can be passed the same way, so a large value can be copied without sending it back.
-- An upload needs a database in use (`not_found` otherwise) and write permission somewhere in it: a write or admin grant on the server, the database or one of its kinds (`permission` otherwise). Storing the upload in a field is checked against that field's kind like any write; text is limited to 64 MiB, bytes and images to 4 GiB (`limit`). A client that stops sending sends CANCEL; what the server stored of it becomes garbage for the collector. Content that no statement uses within the lease time is removed by the blob store's collector.
+- An upload needs a database in use (`not_found` otherwise) and write permission somewhere in it: a write or admin grant on the server, the database or one of its kinds (`permission` otherwise). Storing the upload in a field is checked against that field's kind like any write; text is limited to 64 MiB, bytes and images to 4 GiB, and every upload to the server's upload size and the user's upload quota (`limit`; rhizome.md §4, Limits). A client that stops sending sends CANCEL; what the server stored of it becomes garbage for the collector. Content that no statement uses within the lease time is removed by the blob store's collector.
 - The Go client's `(*client.Conn).Upload(ctx, r, type, mediaType)` returns a `*polydb.Blob` to pass as a parameter; blobs from results are passed by token too.
 
 ---
@@ -420,7 +420,7 @@ Flow control stops a fast sender from flooding a slow receiver. It works like HT
 | `tls_required` | non-TLS TCP connection from a non-loopback address |
 | `auth_failed` | login failed (always generic) |
 | `flow_control` | window exceeded |
-| `too_many_connections` | server connection limit reached |
+| `limit` | a connection limit reached: the server's (which admins may pass) or the user's, or too many connections still logging in (rhizome.md §4, Limits) |
 | `shutting_down` | server is stopping (normally sent as GOAWAY instead) |
 | `timeout` | handshake or keepalive timeout |
 
@@ -489,11 +489,12 @@ err = polydb.RetryTx(ctx, db, func(tx polydb.Tx) error {   // retries on 'confli
 - **Debugging:** the CLI's `--trace` option prints every frame and message in readable form (field names, decoded values, with secrets redacted).
 
 **As built (Phase 3, 2026-11-22):**
-- The interfaces live in the root package `polydb` (`DB`, `Querier`, `Tx`, `Stmt`, `Rows`, `Params`, `Result`, `Error`, `RetryTx`), with plain result types `Entity`, `Field`, `Relation`, `Path` and the lazy `Blob` (an `io.ReaderAt`). `client.Dial` returns a `polydb.DB`; `polydb.Embed(ctx, engine, user, database)` returns one backed by an engine in the same program.
+- The interfaces live in the root package `polydb` (`DB`, `Querier`, `Tx`, `Stmt`, `Rows`, `Params`, `Result`, `Error`, `RetryTx`), with plain result types `Entity`, `Field`, `Relation`, `Path` and the lazy `Blob` (an `io.ReaderAt`). `client.Dial` returns a `*client.Conn`, which is a `polydb.DB`; `polydb.Open(dir, opts)` and `polydb.OpenMemory(opts)` return an `*Embedded`, a DB whose database runs in the same program as its administrator (the database named by `Options.Database`, default `main`, created if missing). Both `*client.Conn` and `*Embedded` are a `polydb.Uploader`: `Upload(ctx, r, typ, mediaType)` streams a large value from an `io.Reader` and returns a `*Blob` to pass as a parameter, never holding it whole.
 - `Rows` has one result set per statement: `Next` and `Scan` read the current one, `NextResultSet` moves on. If a later statement of a script fails, the earlier results can still be read and the error appears in `Rows.Err` once `NextResultSet` reaches it. `Exec` runs a whole script and sums what it changed.
 - `Scan` converts to Go types (`*string`, `*int64`, `*float64`, `*bool`, `*[]byte`, `*time.Time`, `*time.Duration`, `*value.ID`), keeps values as they are for `*any` and `*value.Value`, and takes null only into pointers to pointers. Blob references are fetched when scanned into anything but `*any` or `**Blob`.
 - More options: `WithPassword`, `WithConfirmPeer` (ask before trusting a new server), `WithTLSConfig`, `WithInsecure` (plain TCP to a loopback server), `WithCompression` and `WithTrace`. Dial refuses to connect over TLS without a way to trust the server.
 - Prepared statements that come back `stale_statement` are prepared again once, automatically.
+- The public Go packages are `polydb`, `client` and `value`; everything else is under `internal/` (Phase 7 step 4; docs/compatibility.md). `polydb.Version()` reports the library's version. A `Blob` reads its content through a `BlobSource`; `polydb.NewBlob` makes one from any source, and the client's own source carries the server's lease token, so a blob read from a result goes back as a parameter by its token alone.
 
 ---
 

@@ -23,7 +23,7 @@ import (
 	"strings"
 
 	auth9 "github.com/sandgorgon/9auth"
-	"github.com/sandgorgon/polydb/client"
+	"github.com/sandgorgon/polydb/internal/version"
 )
 
 func main() {
@@ -68,7 +68,7 @@ func run(ctx context.Context, args []string, in io.Reader, out, errOut io.Writer
 	case "whoami":
 		return whoamiCmd(args, out, errOut)
 	case "version":
-		fmt.Fprintln(out, "polydb", client.Version)
+		fmt.Fprintln(out, "polydb", version.Build())
 		return 0
 	case "help", "-h", "--help":
 		fmt.Fprint(out, usage)
