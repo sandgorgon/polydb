@@ -17,7 +17,17 @@ type graph struct {
 	ents   map[value.ID]*engine.Entity
 	hidden map[value.ID]bool // entities the user can't read
 	seen   map[value.ID]bool // entities read once, one field at a time
+	last   lastField         // the last field read that way
 	access Access
+}
+
+// lastField is a field read alone, so that reading it again (two
+// conditions on one field) doesn't count as a second visit.
+type lastField struct {
+	id   value.ID
+	name string
+	v    value.Value
+	ok   bool
 }
 
 // cacheLimit bounds the entities a statement keeps cached, so a scan
@@ -28,6 +38,7 @@ func (g *graph) reset() {
 	clear(g.ents)
 	clear(g.hidden)
 	clear(g.seen)
+	g.last = lastField{}
 }
 
 // entity loads an entity, or reports false if id isn't one or is of a
@@ -76,6 +87,10 @@ func (g *graph) Field(id value.ID, name string) (value.Value, bool, error) {
 	if g.hidden[id] {
 		return value.Null, false, nil
 	}
+	if g.last.id == id && g.last.name == name {
+		// The same field again, as in p.n >= $a and p.n < $b.
+		return g.last.v, g.last.ok, nil
+	}
 	if g.seen[id] {
 		// The second visit: load and cache the whole entity.
 		if e, ok, err := g.entity(id); err != nil || ok {
@@ -103,7 +118,9 @@ func (g *graph) Field(id value.ID, name string) (value.Value, bool, error) {
 			g.seen = map[value.ID]bool{}
 		}
 		g.seen[id] = true
+		g.last = lastField{id: id, name: name, v: v, ok: v != nil}
 		if v == nil {
+			g.last.v = value.Null
 			return value.Null, false, nil
 		}
 		return v, true, nil

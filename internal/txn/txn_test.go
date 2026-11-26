@@ -307,3 +307,59 @@ func TestConcurrentCounter(t *testing.T) {
 		t.Errorf("counter = %s, want 400 (%d conflicts retried)", got, conflicts.Load())
 	}
 }
+
+// Many writes and deletes, with scans of random ranges between them,
+// see exactly what a plain map of the same writes would: the buffered
+// keys' sorted runs (put, pushRun, keysIn) never lose, repeat or
+// misorder a key, including after Commit.
+func TestBufferedRunsMatchModel(t *testing.T) {
+	m := NewManager(mem.New())
+	rng := rand.New(rand.NewPCG(7, 9))
+	key := func() string { return fmt.Sprintf("k%05d", rng.IntN(20000)) }
+	tx := m.Begin(false)
+	model := map[string]string{}
+	check := func() {
+		lo, hi := key(), key()
+		if lo > hi {
+			lo, hi = hi, lo
+		}
+		var want []string
+		for k, v := range model {
+			if k >= lo && k < hi && v != "" {
+				want = append(want, k+"="+v)
+			}
+		}
+		slices.Sort(want)
+		var got []string
+		it := tx.Iter(storage.IterOptions{Lower: []byte(lo), Upper: []byte(hi)})
+		for it.Next() {
+			got = append(got, string(it.Key())+"="+string(it.Value()))
+		}
+		if err := it.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("scan [%s, %s): %d keys, want %d", lo, hi, len(got), len(want))
+		}
+	}
+	for i := range 30000 {
+		k := key()
+		if rng.IntN(5) == 0 {
+			tx.Delete([]byte(k))
+			model[k] = ""
+		} else {
+			v := fmt.Sprint(i)
+			tx.Set([]byte(k), []byte(v))
+			model[k] = v
+		}
+		if rng.IntN(300) == 0 {
+			check()
+		}
+	}
+	check()
+	if _, err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	tx = m.Begin(true)
+	check()
+}

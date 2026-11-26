@@ -136,9 +136,9 @@ type Txn struct {
 	err      error // first error from a write call, returned by Commit
 
 	writes     map[string]*entry
-	ranges     []span   // range deletions
-	sorted     []string // buffered keys, sorted (put)
-	pend       []string // buffered keys added since the last merge
+	ranges     []span     // range deletions
+	runs       [][]string // buffered keys in sorted runs, largest first (put)
+	pend       []string   // buffered keys added since the last run was made
 	pendSorted bool
 	guards     []span              // guarded ranges
 	points     map[string]struct{} // guarded single keys
@@ -200,15 +200,18 @@ func (t *Txn) put(key []byte, e *entry) {
 		t.pend = append(t.pend, k)
 		t.pendSorted = false
 		if len(t.pend) > maxPending {
-			t.mergePending()
+			t.pushRun()
 		}
 	}
 	t.writes[k] = e
 }
 
-// The buffered keys are kept sorted, in sorted, with the keys added
-// since the last merge in pend: a scan then costs a search and the keys
-// in its range, not a sort of every key the transaction wrote.
+// The buffered keys are kept in sorted runs, with the keys added since
+// the last run in pend. A run is made of every maxPending new keys, and
+// runs of similar size are merged, like a binary counter, so each key is
+// copied about log(n) times however many the transaction writes, and a
+// scan costs a search in each of the few runs and the keys in its range,
+// not a sort of every key the transaction wrote.
 const maxPending = 512
 
 func (t *Txn) sortPending() {
@@ -218,24 +221,51 @@ func (t *Txn) sortPending() {
 	}
 }
 
-// mergePending merges pend into sorted.
-func (t *Txn) mergePending() {
+// pushRun makes pend a run, merging it with the runs before it while
+// they are no more than twice its size.
+func (t *Txn) pushRun() {
 	if len(t.pend) == 0 {
 		return
 	}
 	t.sortPending()
-	out := make([]string, 0, len(t.sorted)+len(t.pend))
+	run := slices.Clone(t.pend)
+	t.pend = t.pend[:0]
+	for n := len(t.runs); n > 0 && len(t.runs[n-1]) <= 2*len(run); n = len(t.runs) {
+		run = mergeSorted(t.runs[n-1], run)
+		t.runs = t.runs[:n-1]
+	}
+	t.runs = append(t.runs, run)
+}
+
+// mergePending merges every buffered key into one run.
+func (t *Txn) mergePending() {
+	t.pushRun()
+	for len(t.runs) > 1 {
+		n := len(t.runs)
+		t.runs = append(t.runs[:n-2], mergeSorted(t.runs[n-2], t.runs[n-1]))
+	}
+}
+
+// mergeSorted merges two sorted slices of distinct keys.
+func mergeSorted(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	out := make([]string, 0, len(a)+len(b))
 	i, j := 0, 0
-	for i < len(t.sorted) || j < len(t.pend) {
-		if j == len(t.pend) || (i < len(t.sorted) && t.sorted[i] < t.pend[j]) {
-			out = append(out, t.sorted[i])
+	for i < len(a) || j < len(b) {
+		if j == len(b) || (i < len(a) && a[i] < b[j]) {
+			out = append(out, a[i])
 			i++
 		} else {
-			out = append(out, t.pend[j])
+			out = append(out, b[j])
 			j++
 		}
 	}
-	t.sorted, t.pend = out, t.pend[:0]
+	return out
 }
 
 // keysIn returns the buffered keys in [lo, hi) (nil: unbounded), sorted.
@@ -254,22 +284,11 @@ func (t *Txn) keysIn(lo, hi []byte) []string {
 		}
 		return ks[a:b]
 	}
-	s, p := span(t.sorted), span(t.pend)
-	if len(p) == 0 {
-		return s
+	var out []string
+	for _, r := range t.runs {
+		out = mergeSorted(out, span(r))
 	}
-	out := make([]string, 0, len(s)+len(p))
-	i, j := 0, 0
-	for i < len(s) || j < len(p) {
-		if j == len(p) || (i < len(s) && s[i] < p[j]) {
-			out = append(out, s[i])
-			i++
-		} else {
-			out = append(out, p[j])
-			j++
-		}
-	}
-	return out
+	return mergeSorted(out, span(t.pend))
 }
 
 // Set buffers a write of value to key. Errors (a read-only or finished
@@ -454,5 +473,8 @@ func (t *Txn) conflicts(rec commitRecord) bool {
 
 func (t *Txn) sortedKeys() []string {
 	t.mergePending()
-	return t.sorted
+	if len(t.runs) == 0 {
+		return nil
+	}
+	return t.runs[0]
 }

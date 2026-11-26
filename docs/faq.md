@@ -98,6 +98,8 @@ variable's entities:
 
 - `scan kind Person` reads every Person. If the query filters on a
   field, an index on it helps: `define index person_age on Person(age)`.
+- `index person_age for p.age > 30, exact` is the best case: the index
+  alone decides which entities match, so they aren't checked again.
 - A warning about variables that "no condition links" means every
   combination is formed (`find Person a, Person b` with no `where`
   joining them). Add a condition, or a `follow`.

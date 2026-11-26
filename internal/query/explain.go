@@ -89,6 +89,24 @@ func (x *executor) describe(pl *lang.Pipeline, p *plan) (*SourcePlan, error) {
 			if lp.acc.Index == nil {
 				what = "unique field "
 			}
+			var used []lang.Expr
+			for _, a := range lp.ix.answers {
+				if !slices.Contains(used, a.cond) {
+					used = append(used, a.cond)
+				}
+			}
+			if len(used) > 0 {
+				var ts []string
+				exact := lp.fixed && !(i == 0 && p.top != nil) // the top path checks its rows
+				for _, c := range used {
+					ts = append(ts, lang.FormatExpr(c))
+					exact = exact && slices.Contains(lp.answered, c)
+				}
+				answers = " for " + strings.Join(ts, " and ")
+				if exact {
+					answers += ", exact"
+				}
+			}
 			d += what + lp.acc.Name + answers
 		case pathText:
 			d += "text index " + lp.text.Name + answers

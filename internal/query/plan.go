@@ -58,6 +58,9 @@ type level struct {
 	path  *path
 	conds []lang.Expr // checked once the variable is bound
 	rows  int         // rows bound so far, for explain analyze
+	// skip are the conds the current candidates' index ranges hold
+	// exactly (set by candidates), which their rows needn't check.
+	skip []lang.Expr
 }
 
 type pathKind uint8
@@ -79,8 +82,9 @@ type path struct {
 	val  lang.Expr // pathID: the entity or entities; pathText: the query
 	list bool      // pathID: val is a collection (in)
 
-	acc *engine.Access // pathIndex
-	ix  ixProbe
+	acc      *engine.Access // pathIndex
+	ix       ixProbe
+	answered []lang.Expr // pathIndex, fixed: conditions its ranges hold exactly
 
 	text  *model.Index // pathText
 	field string
@@ -99,6 +103,43 @@ type ixProbe struct {
 	lo, hi *probe
 	prefix lang.Expr
 	checks []probe
+	// answers are the conditions the probe's ranges hold exactly, when
+	// its values key exactly (probeKeys): rows found need not check them.
+	answers []answer
+}
+
+// An answer is a condition an index range answers: an equality on
+// eqs[at], or the range's lower (at -1) or upper (at -2) bound.
+type answer struct {
+	cond lang.Expr
+	at   int
+	t    *value.Type // the key field's type; nil when it is never exact
+}
+
+// exactKeyType returns the type of an index key whose values the key
+// encoding holds exactly and compares as the language does: a plain
+// field of a scalar type that converts nothing. Others (documents, refs
+// and IDs with two encodings, floats, decimals, any) return nil, and
+// their conditions are always checked on the rows found.
+func exactKeyType(k *model.Kind, key model.IndexKey) *value.Type {
+	if k == nil || len(key.Path) > 0 {
+		return nil
+	}
+	fd, ok := k.Field(key.Field)
+	if !ok || fd.Type == nil {
+		return nil
+	}
+	switch fd.Type.Code {
+	case value.CodeInt, value.CodeText, value.CodeDate, value.CodeTime, value.CodeDuration, value.CodeBool:
+		return fd.Type
+	}
+	return nil
+}
+
+// exactValue reports whether v, compared with a key field of type t,
+// has a key that holds it exactly.
+func exactValue(t *value.Type, v value.Value) bool {
+	return t != nil && v.Code() == t.Code && !longValue(v)
 }
 
 type probe struct {
@@ -566,7 +607,7 @@ func (pc *planner) paths(lv *level, facts []fact) ([]*path, error) {
 		if err != nil {
 			return nil, fail(pc.pl, err)
 		}
-		p.fixed, p.ranges, p.est = true, rs, c
+		p.fixed, p.ranges, p.est, p.answered = true, rs, c, pk.answered
 		if c >= probeCap {
 			// Too many to count: estimate from statistics, or guess.
 			n, err := size()
@@ -673,6 +714,7 @@ func (pc *planner) ixProbe(lv *level, a *engine.Access, facts []fact, sortKey in
 		}
 		ip.eqs = append(ip.eqs, probe{e: ks[j].eq.val, list: ks[j].eq.op == "in"})
 		conds = append(conds, ks[j].eq.cond)
+		ip.answers = append(ip.answers, answer{ks[j].eq.cond, len(ip.eqs) - 1, exactKeyType(lv.kind, a.Keys[j])})
 		j++
 	}
 	if sortKey >= 0 && j != sortKey {
@@ -683,13 +725,16 @@ func (pc *planner) ixProbe(lv *level, a *engine.Access, facts []fact, sortKey in
 		kf := ks[j]
 		switch {
 		case kf.lo != nil || kf.hi != nil:
+			t := exactKeyType(lv.kind, a.Keys[j])
 			if kf.lo != nil {
 				ip.lo = &probe{e: kf.lo.val, incl: kf.lo.op == ">="}
 				conds = append(conds, kf.lo.cond)
+				ip.answers = append(ip.answers, answer{kf.lo.cond, -1, t})
 			}
 			if kf.hi != nil {
 				ip.hi = &probe{e: kf.hi.val, incl: kf.hi.op == "<="}
 				conds = append(conds, kf.hi.cond)
+				ip.answers = append(ip.answers, answer{kf.hi.cond, -2, t})
 			}
 			next = j + 1
 		case kf.prefix != nil:
@@ -706,6 +751,19 @@ func (pc *planner) ixProbe(lv *level, a *engine.Access, facts []fact, sortKey in
 	if next == 0 {
 		return ixProbe{}, nil, false
 	}
+	// A condition is answered only if the range holds all of it: every
+	// fact made from it (between makes two) is one the range uses.
+	made := map[lang.Expr]int{}
+	for i := range a.Keys {
+		for _, f := range ks[i].all {
+			made[f.cond]++
+		}
+	}
+	used := map[lang.Expr]int{}
+	for _, an := range ip.answers {
+		used[an.cond]++
+	}
+	ip.answers = slices.DeleteFunc(ip.answers, func(an answer) bool { return used[an.cond] != made[an.cond] })
 	// The facts not used for the range check that their keys have
 	// values in the index.
 	for i := range a.Keys {
@@ -778,7 +836,7 @@ func (pc *planner) topN(p *plan) error {
 			if !ok {
 				continue
 			}
-			rs, ok := x.indexProbe(ip, nil)
+			rs, _, ok := x.indexProbe(ip, nil)
 			if !ok || len(rs) != 1 {
 				continue
 			}
@@ -906,21 +964,25 @@ type probeKeys struct {
 	eqs            [][][]byte
 	lo, hi, prefix []byte
 	loIncl, hiIncl bool
+	// answered are the probe's answers whose values keyed exactly.
+	answered []lang.Expr
 }
 
 // indexProbe evaluates an index lookup into key ranges. ok is false when
 // a value can't be evaluated or an entity matching it might not be in the
 // index; the level then scans instead.
-func (x *executor) indexProbe(ip ixProbe, f *lang.Frame) ([]keyRange, bool) {
+func (x *executor) indexProbe(ip ixProbe, f *lang.Frame) ([]keyRange, []lang.Expr, bool) {
 	pk, ok := x.probeKeys(ip, f)
 	if !ok {
-		return nil, false
+		return nil, nil, false
 	}
-	return pk.ranges()
+	rs, ok := pk.ranges()
+	return rs, pk.answered, ok
 }
 
 func (x *executor) probeKeys(ip ixProbe, f *lang.Frame) (probeKeys, bool) {
 	var pk probeKeys
+	vals := map[int][]value.Value{} // by answer.at
 	eval := func(pr probe) ([]value.Value, bool) {
 		v, err := x.ev.Eval(pr.e, f)
 		if err != nil {
@@ -942,11 +1004,12 @@ func (x *executor) probeKeys(ip ixProbe, f *lang.Frame) (probeKeys, bool) {
 			}
 		}
 	}
-	for _, eq := range ip.eqs {
+	for i, eq := range ip.eqs {
 		vs, ok := eval(eq)
 		if !ok {
 			return pk, false
 		}
+		vals[i] = vs
 		var ks [][]byte
 		for _, v := range vs {
 			k, ok := eqKeys(v)
@@ -957,23 +1020,24 @@ func (x *executor) probeKeys(ip ixProbe, f *lang.Frame) (probeKeys, bool) {
 		}
 		pk.eqs = append(pk.eqs, ks)
 	}
-	bound := func(pr *probe) ([]byte, bool) {
+	bound := func(pr *probe, at int) ([]byte, bool) {
 		vs, ok := eval(*pr)
 		if !ok {
 			return nil, false
 		}
+		vals[at] = vs
 		return rangeKey(vs[0])
 	}
 	if ip.lo != nil {
 		var ok bool
-		if pk.lo, ok = bound(ip.lo); !ok {
+		if pk.lo, ok = bound(ip.lo, -1); !ok {
 			return pk, false
 		}
 		pk.loIncl = ip.lo.incl
 	}
 	if ip.hi != nil {
 		var ok bool
-		if pk.hi, ok = bound(ip.hi); !ok {
+		if pk.hi, ok = bound(ip.hi, -2); !ok {
 			return pk, false
 		}
 		pk.hiIncl = ip.hi.incl
@@ -992,6 +1056,26 @@ func (x *executor) probeKeys(ip ixProbe, f *lang.Frame) (probeKeys, bool) {
 		}
 		k, _ := value.Key(t)
 		pk.prefix = k[:len(k)-2] // without the terminator
+	}
+	// A condition is answered when every bound or equality made from it
+	// applies and keys exactly.
+	exact := map[lang.Expr]bool{}
+	for _, a := range ip.answers {
+		ok := !(a.at == -1 && pk.lo == nil || a.at == -2 && pk.hi == nil) // a dropped bound: the row check reports why
+		vs := vals[a.at]
+		ok = ok && len(vs) > 0
+		for _, v := range vs {
+			ok = ok && exactValue(a.t, v)
+		}
+		if prev, seen := exact[a.cond]; seen {
+			ok = ok && prev
+		}
+		exact[a.cond] = ok
+	}
+	for _, a := range ip.answers {
+		if exact[a.cond] && !slices.Contains(pk.answered, a.cond) {
+			pk.answered = append(pk.answered, a.cond)
+		}
 	}
 	return pk, true
 }
@@ -1208,6 +1292,9 @@ func (x *executor) bindLevel(pl *lang.Pipeline, lv *level, r srow, id value.ID) 
 	nr := srow{vars: vars, ids: ids, dirty: r.dirty}
 	f := &lang.Frame{Row: vars}
 	for _, c := range lv.conds {
+		if slices.Contains(lv.skip, c) {
+			continue
+		}
 		ok, err := x.ev.Cond(c, f)
 		if err != nil {
 			nr.dirty = true
@@ -1242,6 +1329,7 @@ func (x *executor) recheck(steps []lang.Step, vars lang.Row) (bool, error) {
 func (x *executor) candidates(pl *lang.Pipeline, lv *level, f *lang.Frame) ([]value.ID, error) {
 	p := lv.path
 	var ids []value.ID
+	lv.skip = nil
 	switch p.how {
 	case pathID:
 		ok := true
@@ -1275,13 +1363,14 @@ func (x *executor) candidates(pl *lang.Pipeline, lv *level, f *lang.Frame) ([]va
 		}
 		ids = slices.Clone(ids)
 	case pathIndex:
-		rs, ok := p.ranges, true
+		rs, answered, ok := p.ranges, p.answered, true
 		if !p.fixed {
-			rs, ok = x.indexProbe(p.ix, f)
+			rs, answered, ok = x.indexProbe(p.ix, f)
 		}
 		if !ok {
 			return x.scanLevel(pl, lv)
 		}
+		lv.skip = answered
 		for _, r := range rs {
 			err := x.tx.ScanAccess(p.acc, r.lo, r.hi, false, func(id value.ID) bool {
 				ids = append(ids, id)

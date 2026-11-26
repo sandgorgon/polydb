@@ -80,7 +80,7 @@ show stats kind Person;
 // => "boss" | "ref<Person>?" | 1 | 0 | 1 | ""
 
 explain find Person p | where p.age > 20 | show p.name;
-// => "find" | "p: index person_age for p.age > 20" | 1
+// => "find" | "p: index person_age for p.age > 20, exact" | 1
 // => "where" | "where p.age > 20 (checked at the source)" | null
 // => "show" | "show p.name" | null
 explain find p | follow p ~nope~> q;
@@ -96,7 +96,7 @@ explain find Person p, Company c | show count();
 // => "warning" | "no condition links p to c, so every combination is formed (a cross product)" | null
 // The planner's choices (§7.5): each variable's path and estimate.
 explain find Person p | where p.email = "bob@x.io" | show p.name;
-// => "find" | "p: unique field email for p.email = \"bob@x.io\"" | 1
+// => "find" | "p: unique field email for p.email = \"bob@x.io\", exact" | 1
 // => "where" | "where p.email = \"bob@x.io\" (checked at the source)" | null
 // => "show" | "show p.name" | null
 explain find Person p | where p = @ann | show p.name;
@@ -104,12 +104,12 @@ explain find Person p | where p = @ann | show p.name;
 // => "where" | "where p = @ann (checked at the source)" | null
 // => "show" | "show p.name" | null
 explain find Person p, Person b | where b.boss = p and p.age = 30 | show b.name;
-// => "find" | "p: index person_age for p.age = 30" | 1
+// => "find" | "p: index person_age for p.age = 30, exact" | 1
 // => "find" | "b: scan kind Person" | 2
 // => "where" | "where b.boss = p and p.age = 30 (checked at the source)" | null
 // => "show" | "show b.name" | null
 explain find Person p | where p.age > 0 | sort p.age desc | limit 1 | show p.name;
-// => "find" | "p: index person_age for p.age > 0" | 1
+// => "find" | "p: index person_age for p.age > 0, exact" | 1
 // => "where" | "where p.age > 0 (checked at the source)" | null
 // => "sort" | "sort p.age desc" | null
 // => "limit" | "limit 1" | null

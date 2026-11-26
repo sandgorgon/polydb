@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/sandgorgon/polydb/internal/engine"
@@ -46,7 +47,11 @@ func ImportDatabase(ctx context.Context, db *engine.DB, r io.Reader, opts Import
 	if opts.NewIDs {
 		im.ids = map[value.ID]value.ID{}
 	}
+	im.start()
 	err = im.run()
+	if werr := im.stop(); err == nil {
+		err = werr
+	}
 	if err != nil {
 		err = fmt.Errorf("after %d entities and %d relations: %w", im.st.Entities, im.st.Relations, err)
 	}
@@ -65,6 +70,85 @@ type importer struct {
 	batch                []func(*engine.Tx) error
 	batchEnts, batchRels int64
 	batchSize            int // bytes, roughly
+
+	// Batches are committed by importWorkers goroutines while the reader
+	// decodes the next ones. mu guards st's counts and failed.
+	work     chan batch
+	inFlight sync.WaitGroup // batches sent and not yet committed or failed
+	workers  sync.WaitGroup
+	mu       sync.Mutex
+	failed   error
+	sawRel   bool // a relation record came: entity batches are all committed
+}
+
+// batch is a transaction's worth of records.
+type batch struct {
+	fns        []func(*engine.Tx) error
+	ents, rels int64
+}
+
+// importWorkers is how many batches commit at once. Batches of entities
+// are independent; relations wait for every entity batch (barrier), as
+// they need their endpoints to exist.
+const importWorkers = 4
+
+func (im *importer) start() {
+	im.work = make(chan batch)
+	for range importWorkers {
+		im.workers.Go(func() {
+			for b := range im.work {
+				im.commit(b)
+				im.inFlight.Done()
+			}
+		})
+	}
+}
+
+// stop ends the workers once every batch sent has finished.
+func (im *importer) stop() error {
+	close(im.work)
+	im.workers.Wait()
+	return im.err()
+}
+
+func (im *importer) err() error {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	return im.failed
+}
+
+// commit writes one batch in a transaction, retrying conflicts.
+func (im *importer) commit(b batch) {
+	if im.err() != nil {
+		return // after a failure, batches still queued are dropped
+	}
+	err := im.ctx.Err()
+	if err == nil {
+		err = im.db.Retry(5, func(tx *engine.Tx) error {
+			for _, fn := range b.fns {
+				if err := fn(tx); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	if err != nil {
+		if im.failed == nil {
+			im.failed = err
+		}
+		return
+	}
+	im.st.Entities += b.ents
+	im.st.Relations += b.rels
+}
+
+// barrier waits for every batch sent to commit or fail.
+func (im *importer) barrier() error {
+	im.inFlight.Wait()
+	return im.err()
 }
 
 func (im *importer) run() error {
@@ -109,9 +193,21 @@ func (im *importer) run() error {
 		case "entity":
 			err = im.entity(m)
 		case "relation":
-			err = im.relation(m)
+			if !im.sawRel {
+				// Every entity must exist before relations connect them.
+				im.sawRel = true
+				if err = im.flush(); err == nil {
+					err = im.barrier()
+				}
+			}
+			if err == nil {
+				err = im.relation(m)
+			}
 		case "end":
 			if err := im.flush(); err != nil {
+				return err
+			}
+			if err := im.barrier(); err != nil {
 				return err
 			}
 			ents, _ := intField(m, "entities")
@@ -477,25 +573,18 @@ func (im *importer) maybeFlush() error {
 	return nil
 }
 
-// flush writes the batch in one transaction, retrying conflicts.
+// flush sends the batch to be committed. It reports a batch that failed
+// earlier, so the reader stops.
 func (im *importer) flush() error {
+	if err := im.err(); err != nil {
+		return err
+	}
 	if len(im.batch) == 0 {
 		return nil
 	}
-	err := im.db.Retry(5, func(tx *engine.Tx) error {
-		for _, fn := range im.batch {
-			if err := fn(tx); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	im.st.Entities += im.batchEnts
-	im.st.Relations += im.batchRels
-	im.batch, im.batchEnts, im.batchRels, im.batchSize = im.batch[:0], 0, 0, 0
+	im.inFlight.Add(1)
+	im.work <- batch{fns: im.batch, ents: im.batchEnts, rels: im.batchRels}
+	im.batch, im.batchEnts, im.batchRels, im.batchSize = nil, 0, 0, 0
 	return nil
 }
 

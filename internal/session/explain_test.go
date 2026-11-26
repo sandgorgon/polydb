@@ -42,7 +42,7 @@ create Pet { name: "rex", owner: @o };
 
 	// p is found by name, then each p's pets through pet_owner.
 	got := explain(`analyze find P p, Pet x | where x.owner = p and p.name = "n00007" | show x.name`)
-	want := `"find" | "p: index p_name for p.name = \"n00007\"" | 1 | 1 | null
+	want := `"find" | "p: index p_name for p.name = \"n00007\", exact" | 1 | 1 | null
 "find" | "x: index pet_owner for x.owner = p, for each p" | "10 per row" | 1 | null
 "source" | "the rows the source produced" | null | 1 | T
 "where" | "where x.owner = p and p.name = \"n00007\" (checked at the source)" | null | null | null
